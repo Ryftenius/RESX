@@ -1,4 +1,15 @@
-# RESX
+<h1 align="center">RESX</h1>
+<p align="center"><b>Windows Binary Analysis & RE Toolkit</b></p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white&style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white&style=for-the-badge" />
+  <img src="https://img.shields.io/badge/CLI-Tools-4CAF50?style=for-the-badge" />
+  <img src="https://img.shields.io/github/actions/workflow/status/TITAN-Softwork-Solutions/RESX/ci.yml?style=for-the-badge&label=CI" />
+  <a href="https://discord.gg/yUWyvT9JyP">
+    <img src="https://img.shields.io/discord/1240608336005828668?label=TITAN%20Softworks&logo=discord&color=5865F2&style=for-the-badge" />
+  </a>
+</p>
 
 `RESX` is a Windows binary recon CLI from `TITAN Softwork Solutions`.
 
