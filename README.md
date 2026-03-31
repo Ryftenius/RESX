@@ -11,9 +11,8 @@
   </a>
 </p>
 
-`RESX` is a Windows binary recon CLI from `TITAN Softwork Solutions`.
 
-It is built for fast terminal-first reversing: exports, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, switch-table analysis, caller tracing, PE inspection, YARA, and triage.
+RESX is built for fast terminal-first reversing: exports, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, switch-table analysis, caller tracing, PE inspection, YARA, and triage.
 
 ## Build
 
@@ -46,11 +45,10 @@ resx eat <dll>
 resx iat <dll>
 resx syms <dll>
 resx pechk <dll>
+resx priority
 resx callers <dll> <function>
 resx locate <name>
-resx locate-all <name>
 resx locate-sym <name>
-resx locate-all-sym <name>
 resx yara <dll> <rule.yar>
 ```
 
@@ -69,15 +67,11 @@ resx yara <dll> <rule.yar>
 ```text
 > resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 
-[*] Searching for 'ntoskrnl.exe'...
 [+] Found: \\?\C:\Windows\System32\ntoskrnl.exe
 [*] Architecture: x64  |  ImageBase: 0x140000000
-[*] Parsing export table...
-[+] Found 3389 exports
+[*] Exports: 3389
 [*] Not found in EAT, trying PDB symbols...
 [+] KiSystemCall64 @ RVA 0x006BDE40  (from enumerated PDB symbols)
-[*] Symbols: local cache first, then configured paths, then Microsoft symbol server
-[*] Disassembling from RVA 0x006BDE40 (file offset 0x636E40)...
 
 ntoskrnl.exe!KiSystemCall64  [RVA 0x006BDE40, VA 0x1406BDE40]
   006BDE40  0F 01 F8                       SWAPGS
@@ -161,9 +155,6 @@ Switch Map:
 ### Recompiler Output That Keeps Real Conditions
 
 ```text
-C Reconstruction Preview:
-// Source: KiSystemCall64
-
 NTSTATUS __fastcall KiSystemCall64(
     void* param_1,
     void* param_2,
@@ -206,7 +197,6 @@ block_00AE0FF7:  [6 insn]  range 0x00AE0FF7..0x00AE1013
 > resx syms ntoskrnl.exe --verbose
 
 [*] Module loaded: ntoskrnl.exe
-[*] Symbols: local cache first, then configured paths, then Microsoft symbol server
 [*] RSDS PDB: ntkrnlmp.pdb
 [*] Symbol URL: http://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/<GUIDAge>/ntkrnlmp.pdb
 [*] Cache path: C:\Users\<user>\AppData\Local\resx\symbols\ntkrnlmp.pdb\<GUIDAge>\ntkrnlmp.pdb
@@ -230,6 +220,10 @@ resx yara suspicious.dll .\rules\triage.yar
 
 - Semantic switch labels come from parsed SDK metadata when available. Structural switch recovery still works without the SDK.
 - `intelli` is a command alias for `dump` with triage enabled, so it accepts normal dump-side options too.
+- `locate` / `locate-sym` return all matches inside the priority set by default.
+- `callers` scans the priority set by default.
+- Use `--include-dir` and `--include-image` when you want to widen the scan beyond the priority set for `locate` or `callers`.
+- `resx priority` opens the generated priority config JSON. Edit priority directories, exact names, prefixes, and regexes there.
 - `--edrchk` only compares against images that are already loaded in memory by default. RESX does not provide a real sandbox/container. `--unsafe-map-image` re-enables the old fallback of mapping an on-disk image into the current process and should be treated as unsafe for untrusted samples.
 - `resx update` requires a git checkout with a configured `origin`.
 - Use `resx help` or `resx <command> --example` for the live command help.

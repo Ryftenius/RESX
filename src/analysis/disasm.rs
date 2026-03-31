@@ -4,6 +4,7 @@ use iced_x86::{
 
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::config::Config;
+use crate::core::known::describe_known_address;
 use crate::formats::pe::{Export, PeFile};
 
 #[derive(Debug, Clone)]
@@ -210,11 +211,13 @@ pub fn disassemble_at(
         };
 
         for addr in collect_data_refs(&iced) {
-            if addr >= image_base {
-                if let Some(desc) = symbol_index.describe(addr) {
-                    if !comment_parts.iter().any(|p| p == &desc) {
-                        comment_parts.push(desc);
-                    }
+            if let Some(desc) = describe_known_address(addr).or_else(|| {
+                (addr >= image_base)
+                    .then(|| symbol_index.describe(addr))
+                    .flatten()
+            }) {
+                if !comment_parts.iter().any(|p| p == &desc) {
+                    comment_parts.push(desc);
                 }
             }
         }

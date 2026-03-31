@@ -39,13 +39,12 @@ USAGE
   resx iat <dll> [options]
   resx syms <dll> [options]
   resx pechk <dll> [options]
+  resx priority
 
   resx callers <dll> <function> [follow options]
 
   resx locate <funcname> [options]
-  resx locate-all <funcname> [options]
   resx locate-sym <funcname> [options]
-  resx locate-all-sym <funcname> [options]
 
   resx yara <dll> <rule.yar> [options]
   resx update [options]
@@ -61,12 +60,10 @@ COMMANDS
   iat         Dump the Import Address Table.
   syms        Dump resolved module and PDB symbols.
   pechk       Run PE header and layout anomaly checks.
-  callers     Reverse-trace callers of a target function across images.
-  locate      Find the first export-backed match for a function name.
-  locate-all  Show every export-backed match for a function name.
-  locate-sym  Find the first export/symbol-backed match.
-  locate-all-sym
-              Show every export/symbol-backed match.
+  priority    Open the generated priority config used by locate and callers.
+  callers     Reverse-trace callers across the priority set.
+  locate      Show export-backed matches in the priority list.
+  locate-sym  Show export/symbol-backed matches in the priority list.
   yara        Scan a PE image with one or more YARA rules.
   update      Pull the latest version from the current git remote/branch.
   help        Show this help text.
@@ -104,8 +101,8 @@ FOLLOW OPTIONS
   --show-rva                 show owning function RVA
   --show-site                show call-site RVA(s)
   --filter-dll <text>        restrict caller DLL names
-  --scan-dir <dir>           add directory to scan
-  --scan-dll <dll>           explicitly include an image
+  --include-dir <dir>        add extra directories to scan
+  --include-image <dll>      explicitly include extra images to scan
   --scan-exe                 include EXEs
   --include <glob>           include filter
   --exclude <glob>           exclude filter
@@ -115,6 +112,7 @@ FOLLOW OPTIONS
 GLOBAL OPTIONS
   --arch <auto|x86|x64>
   --path <dir>
+  --priority
   --no-system
   --no-cwd
   --no-path
@@ -133,6 +131,10 @@ EXAMPLES
   resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
+  resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
+  resx priority
+  resx locate NtOpenProcess --include-dir C:\Work\Drivers
+  resx locate-sym NtOpenProcess --include-image .\mydriver.sys
   resx syms .\J58.dll --pdb .\J58.pdb
   resx update
   resx intelli --example
@@ -154,11 +156,10 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "iat",
         "syms",
         "pechk",
+        "priority",
         "callers",
         "locate",
-        "locate-all",
         "locate-sym",
-        "locate-all-sym",
         "yara",
         "edrchk",
         "follow",
@@ -231,6 +232,10 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--pechk".to_string());
         }
+        "priority" => {
+            rewritten.push("--priority".to_string());
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+        }
         "callers" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--follow-callers".to_string());
@@ -239,16 +244,8 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.push("--locate".to_string());
             rewritten.extend(raw_args.iter().skip(2).cloned());
         }
-        "locate-all" => {
-            rewritten.push("--locate-all".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
         "locate-sym" => {
             rewritten.push("--locate-sym".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
-        "locate-all-sym" => {
-            rewritten.push("--locate-all-sym".to_string());
             rewritten.extend(raw_args.iter().skip(2).cloned());
         }
         "yara" => {
@@ -321,17 +318,28 @@ CFG EXAMPLES
 CALLERS EXAMPLES
   resx callers kernel32.dll CreateFileW
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
+  resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
   resx callers user32.dll MessageBoxW --scan-exe --show-site --json
 "#
         }
-        "locate" | "locate-all" | "locate-sym" | "locate-all-sym" => {
+        "locate" | "locate-sym" => {
             r#"
 LOCATE EXAMPLES
   resx locate OpenProcess
   resx locate NtOpenProcess
-  resx locate-all VirtualAlloc
+  resx locate NtOpenProcess --include-dir C:\Work\Drivers
   resx locate-sym RtlpHeapHandleError
-  resx locate-all-sym NtOpenProcess
+  resx locate-sym NtOpenProcess --include-image .\mydriver.sys
+"#
+        }
+        "priority" => {
+            r#"
+PRIORITY EXAMPLES
+  resx priority
+
+NOTES
+  Opens the generated priority config JSON used by locate and callers.
+  Edit priority directories, exact filenames, prefixes, and regexes there.
 "#
         }
         "symbols" | "pdb" | "syms" => {
@@ -349,7 +357,7 @@ GENERAL EXAMPLES
   resx intelli suspicious.dll
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx callers ntdll.dll NtOpenProcess --depth 2
-  resx locate-all-sym NtOpenProcess
+  resx locate-sym NtOpenProcess
   resx update
 "#
         }

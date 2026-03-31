@@ -15,6 +15,10 @@ pub fn dispatch(
     let func_arg = cfg.function.clone();
     let is_peinfo_shorthand = dll_arg.eq_ignore_ascii_case("peinfo") && !func_arg.is_empty();
 
+    if cli.priority {
+        return commands::priority::run(cfg, w, c);
+    }
+
     if cli.update {
         return commands::update::run(cfg, w, c);
     }
@@ -60,20 +64,18 @@ pub fn dispatch(
     }
     if dll_arg.is_empty() {
         return Err(
-            "Specify a command such as dump, cfg, intelli, peinfo, sections, eat, iat, syms, pechk, callers, locate, yara, update, or help".to_owned(),
+            "Specify a command such as dump, cfg, intelli, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, yara, update, or help".to_owned(),
         );
     }
 
     Err(
-        "Incomplete command. Use `resx dump <dll> <function>`, `resx intelli <dll> [function]`, `resx cfg <dll> <function>`, `resx peinfo <dll>`, `resx update`, or `resx help`".to_owned(),
+        "Incomplete command. Use `resx dump <dll> <function>`, `resx callers <dll> <function>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
     )
 }
 
 fn is_locate_mode(cfg: &Config, dll_arg: &str, func_arg: &str) -> bool {
     cfg.locate
-        || cfg.locate_all
         || cfg.locate_deep
-        || cfg.locate_all_deep
         || (!dll_arg.is_empty()
             && !dll_arg.eq_ignore_ascii_case("peinfo")
             && func_arg.is_empty()

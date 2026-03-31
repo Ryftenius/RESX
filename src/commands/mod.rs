@@ -4,6 +4,7 @@ pub mod follow;
 pub mod intelli;
 pub mod locate;
 pub mod peinfo;
+pub mod priority;
 pub mod show_eat;
 pub mod show_iat;
 pub mod show_syms;

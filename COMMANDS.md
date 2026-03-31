@@ -19,11 +19,10 @@
 - `resx iat <dll>`
 - `resx syms <dll>`
 - `resx pechk <dll>`
+- `resx priority`
 - `resx callers <dll> <function>`
 - `resx locate <name>`
-- `resx locate-all <name>`
 - `resx locate-sym <name>`
-- `resx locate-all-sym <name>`
 - `resx yara <dll> <rule.yar>`
 - `resx update`
 
@@ -69,8 +68,8 @@
 - `--show-rva`
 - `--show-site`
 - `--filter-dll <text>`
-- `--scan-dir <dir>`
-- `--scan-dll <dll>`
+- `--include-dir <dir>`
+- `--include-image <dll>`
 - `--scan-exe`
 - `--include <glob>`
 - `--exclude <glob>`
@@ -80,6 +79,7 @@
 ## Global Flags
 
 - `--path <dir>`
+- `--priority`
 - `--no-system`
 - `--no-cwd`
 - `--no-path`
@@ -103,6 +103,10 @@
 - `dump --recomp` emits corrected bit-test branches and better local-call placeholders.
 - `syms --verbose` can show exact PDB identity/load diagnostics, including RSDS-derived kernel PDB names.
 - `dump` can resolve internal names from enumerated PDB symbols when exports do not contain the target.
+- `locate` and `locate-sym` return all matches inside the priority set by default.
+- `callers` uses the priority set by default.
+- `--include-dir` and `--include-image` widen the scan beyond the priority set for `locate` and `callers`.
+- `priority` opens the generated priority config JSON where you can edit directories, exact names, prefixes, and regexes.
 
 ## Examples
 
@@ -114,6 +118,9 @@ resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx syms ntoskrnl.exe --verbose
 resx callers blackbird.sys BLACKBIRDNtAllocateVirtualMemoryHookStub --depth 2
-resx locate-all-sym NtWriteVirtualMemory
+resx callers ntoskrnl.exe NtOpenProcess --include-dir C:\Work\Drivers --depth 2
+resx priority
+resx locate NtOpenProcess --include-dir C:\Work\Drivers
+resx locate-sym NtWriteVirtualMemory --include-image .\mydriver.sys
 resx update
 ```

@@ -93,9 +93,6 @@ pub fn run(
         c.on,
     );
 
-    if !cfg.quiet {
-        writeln!(w, "{}", c.info(&format!("Searching for '{}'...", dll_arg))).ok();
-    }
     let dll_path = find_dll_path(dll_arg, cfg)?;
     progress.tick("locating target image");
     let dll_name = dll_path
@@ -131,13 +128,10 @@ pub fn run(
         writeln!(w, "{}", c.info(&line)).ok();
     }
 
-    if !cfg.quiet {
-        writeln!(w, "{}", c.info("Parsing export table...")).ok();
-    }
     let exports = read_exports(&pe, &raw);
     progress.tick("reading export table");
     if !cfg.quiet && !exports.is_empty() {
-        writeln!(w, "{}", c.ok(&format!("Found {} exports", exports.len()))).ok();
+        writeln!(w, "{}", c.info(&format!("Exports: {}", exports.len()))).ok();
     }
 
     let pdb_symbols = if cfg.no_pdb {
@@ -349,29 +343,6 @@ pub fn run(
         }
     }
 
-    if !cfg.no_pdb && !cfg.quiet {
-        writeln!(
-            w,
-            "{}",
-            c.info(
-                "Symbols: local cache first, then configured paths, then Microsoft symbol server"
-            )
-        )
-        .ok();
-    }
-
-    if !cfg.quiet {
-        writeln!(
-            w,
-            "{}",
-            c.info(&format!(
-                "Disassembling from RVA 0x{:08X} (file offset 0x{:X})...",
-                target_rva, file_off
-            ))
-        )
-        .ok();
-    }
-
     let insns = disassemble_at(
         &raw,
         file_off,
@@ -462,8 +433,8 @@ pub fn run(
         writeln!(
             w,
             "{}",
-            c.ok(&format!(
-                "Done: {} instructions, ~{} bytes",
+            c.info(&format!(
+                "~{} instructions, ~{} bytes",
                 insns.len(),
                 func_size_bytes
             ))
@@ -607,7 +578,7 @@ pub fn run(
             }
         }
         if cfg.recomp && !cfg.json {
-            writeln!(w, "\n{}", c.bold(&c.b_mag("C Reconstruction Preview:"))).ok();
+            writeln!(w).ok();
             print_c_recomp(w, &s, c);
         }
         s
@@ -779,6 +750,8 @@ fn is_nt_api(label: &str) -> bool {
 fn color_kind(kind: &str, c: &Colors) -> String {
     if kind == "call" {
         c.b_yellow("CALL")
+    } else if kind == "syscall" {
+        c.b_red("SYSCALL")
     } else {
         c.yellow("JMP")
     }
@@ -840,6 +813,20 @@ fn print_api_calls(
     cfg: &Config,
     root_rva: u32,
 ) {
+    let synthetic_syscall = synthetic_syscall_call(insns, func_name);
+    let display_calls: Vec<ApiCall> = if let Some(call) = synthetic_syscall {
+        let mut merged = calls.to_vec();
+        if !merged.iter().any(|existing| {
+            existing.rva == call.rva && existing.label.eq_ignore_ascii_case(&call.label)
+        }) {
+            merged.push(call);
+        }
+        merged.sort_by_key(|call| call.rva);
+        merged
+    } else {
+        calls.to_vec()
+    };
+
     writeln!(w).ok();
     writeln!(
         w,
@@ -847,12 +834,12 @@ fn print_api_calls(
         c.bold(&c.b_cyan(&format!(
             "API Call Map for {}  [{} call site(s)]:",
             func_name,
-            calls.len()
+            display_calls.len()
         )))
     )
     .ok();
 
-    if calls.is_empty() {
+    if display_calls.is_empty() {
         writeln!(w, "{}", c.dim("  (no CALL/JMP targets found)")).ok();
         return;
     }
@@ -872,7 +859,7 @@ fn print_api_calls(
 
     print_calls_recursive(
         w,
-        calls,
+        &display_calls,
         insns,
         c,
         &root_image,
@@ -882,6 +869,27 @@ fn print_api_calls(
         &mut dll_map,
         "  ",
     );
+}
+
+fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiCall> {
+    if !is_nt_api(func_name) {
+        return None;
+    }
+
+    let syscall_site = insns.iter().find(|insn| {
+        matches!(insn.iced.mnemonic(), Mnemonic::Syscall | Mnemonic::Sysenter)
+            || (insn.iced.mnemonic() == Mnemonic::Int && insn.iced.immediate8() == 0x2E)
+    })?;
+
+    Some(ApiCall {
+        rva: syscall_site.rva,
+        kind: "syscall".to_owned(),
+        target_rva: 0,
+        label: func_name.to_owned(),
+        dll: "ntdll.dll".to_owned(),
+        is_import: true,
+        is_indirect: false,
+    })
 }
 
 struct TraceImageView<'a> {

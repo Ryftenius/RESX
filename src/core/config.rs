@@ -1,3 +1,6 @@
+use crate::core::priority::{
+    built_in_priority_names, built_in_priority_prefixes, load_priority_file,
+};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -22,6 +25,9 @@ pub struct Cli {
 
     #[arg(long = "path", action = clap::ArgAction::Append, value_name = "DIR")]
     pub paths: Vec<String>,
+
+    #[arg(long = "priority")]
+    pub priority: bool,
 
     #[arg(long = "no-system")]
     pub no_system: bool,
@@ -168,10 +174,10 @@ pub struct Cli {
     #[arg(long = "yara", action = clap::ArgAction::Append, value_name = "RULE_FILE")]
     pub yara: Vec<String>,
 
-    #[arg(long = "scan-dir", action = clap::ArgAction::Append, value_name = "DIR")]
+    #[arg(long = "include-dir", alias = "scan-dir", action = clap::ArgAction::Append, value_name = "DIR")]
     pub scan_dirs: Vec<String>,
 
-    #[arg(long = "scan-dll", action = clap::ArgAction::Append, value_name = "DLL")]
+    #[arg(long = "include-image", alias = "scan-dll", action = clap::ArgAction::Append, value_name = "DLL")]
     pub scan_dlls: Vec<String>,
 
     #[arg(long = "scan-exe")]
@@ -213,14 +219,8 @@ pub struct Cli {
     #[arg(long = "locate")]
     pub locate: bool,
 
-    #[arg(long = "locate-all")]
-    pub locate_all: bool,
-
     #[arg(long = "locate-sym")]
     pub locate_deep: bool,
-
-    #[arg(long = "locate-all-sym")]
-    pub locate_all_deep: bool,
 
     #[arg(long = "update")]
     pub update: bool,
@@ -235,6 +235,10 @@ pub struct Config {
     pub ordinal: u32,
 
     pub extra_paths: Vec<String>,
+    pub priority_dirs: Vec<String>,
+    pub priority_names: Vec<String>,
+    pub priority_prefixes: Vec<String>,
+    pub priority_regexes: Vec<String>,
     pub no_system: bool,
     pub no_cwd: bool,
     pub no_path: bool,
@@ -296,19 +300,26 @@ pub struct Config {
     pub show_site: bool,
     pub filter_dll: String,
     pub locate: bool,
-    pub locate_all: bool,
     pub locate_deep: bool,
-    pub locate_all_deep: bool,
 }
 
 impl Config {
     pub fn from_cli(cli: &Cli, _color: bool) -> Self {
+        let priority_file = load_priority_file();
+        let mut priority_names = built_in_priority_names();
+        priority_names.extend(priority_file.exact_names);
+        let mut priority_prefixes = built_in_priority_prefixes();
+        priority_prefixes.extend(priority_file.prefixes);
         Config {
             dll: cli.dll.clone().unwrap_or_default(),
             function: cli.function.clone().unwrap_or_default(),
             at_rva: cli.at_rva.clone().unwrap_or_default(),
             ordinal: cli.ordinal.unwrap_or(0),
             extra_paths: cli.paths.clone(),
+            priority_dirs: priority_file.priority_dirs,
+            priority_names,
+            priority_prefixes,
+            priority_regexes: priority_file.regexes,
             no_system: cli.no_system,
             no_cwd: cli.no_cwd,
             no_path: cli.no_path,
@@ -364,10 +375,8 @@ impl Config {
             follow_format: cli.follow_format.clone(),
             show_site: cli.show_site,
             filter_dll: cli.filter_dll.clone(),
-            locate: cli.locate || cli.locate_all || cli.locate_deep || cli.locate_all_deep,
-            locate_all: cli.locate_all,
-            locate_deep: cli.locate_deep || cli.locate_all_deep,
-            locate_all_deep: cli.locate_all_deep,
+            locate: cli.locate || cli.locate_deep,
+            locate_deep: cli.locate_deep,
         }
     }
 

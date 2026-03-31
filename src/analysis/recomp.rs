@@ -2,6 +2,7 @@ use iced_x86::{Mnemonic, OpKind, Register};
 
 use crate::analysis::disasm::{is_jcc, Instruction};
 use crate::analysis::symbols::SymbolIndex;
+use crate::core::known::describe_known_address;
 use crate::formats::pe::Export;
 
 fn fmt_op(
@@ -17,6 +18,9 @@ fn fmt_op(
         OpKind::Register => format!("{:?}", instr.op_register(op_idx)).to_lowercase(),
         OpKind::Immediate64 => {
             let v = instr.immediate64();
+            if let Some(desc) = describe_known_address(v) {
+                return desc;
+            }
             if v >= image_base {
                 if let Some(desc) = symbols.and_then(|idx| idx.describe(v)) {
                     return desc;
@@ -26,6 +30,9 @@ fn fmt_op(
         }
         OpKind::Immediate32 => {
             let v = instr.immediate32() as u64;
+            if let Some(desc) = describe_known_address(v) {
+                return desc;
+            }
             if v >= image_base {
                 if let Some(desc) = symbols.and_then(|idx| idx.describe(v)) {
                     return desc;
@@ -50,6 +57,9 @@ fn fmt_op(
         }
         OpKind::Memory => {
             if let Some(addr) = absolute_memory_address(instr) {
+                if let Some(desc) = describe_known_address(addr) {
+                    return desc;
+                }
                 if addr >= image_base {
                     if let Some(desc) = symbols.and_then(|idx| idx.describe(addr)) {
                         return format!("*({})", desc);
@@ -204,21 +214,6 @@ pub fn recomp_c(
     if used_params == 0 && arch == 32 {
         used_params = 4;
     }
-
-    sb.push_str("// ------------------------------------------------------------\n");
-    sb.push_str("// C Reconstruction Preview\n");
-    sb.push_str(&format!("// Source: {}\n", exp.name));
-    sb.push_str(&format!("// RVA: 0x{:08X}\n", exp.rva));
-    sb.push_str(&format!("// Arch: x{}\n", arch));
-    let size_bytes = {
-        let last = insns.last().unwrap();
-        (last.rva - insns[0].rva) as usize + last.bytes.len()
-    };
-    sb.push_str(&format!(
-        "// Size: ~{} bytes, {} instructions\n\n",
-        size_bytes,
-        insns.len()
-    ));
 
     let ret_type = "NTSTATUS";
     sb.push_str(&format!("{} {} {}(\n", ret_type, cc, exp.name));

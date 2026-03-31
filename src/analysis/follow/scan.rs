@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::core::config::Config;
+use crate::core::priority::{default_priority_dirs, matcher_from_lists};
 use crate::formats::pe::{
     attribute_to_func, parse_pe, read_cstr, read_exports, read_u32, read_u64,
 };
@@ -9,6 +10,10 @@ use crate::formats::pe::{
 #[derive(Debug, Clone)]
 pub struct FollowScanConfig {
     pub extra_paths: Vec<String>,
+    pub priority_dirs: Vec<String>,
+    pub priority_names: Vec<String>,
+    pub priority_prefixes: Vec<String>,
+    pub priority_regexes: Vec<String>,
     pub no_cwd: bool,
     pub no_path_env: bool,
     pub scan_dirs: Vec<String>,
@@ -33,6 +38,10 @@ impl FollowScanConfig {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             extra_paths: cfg.extra_paths.clone(),
+            priority_dirs: cfg.priority_dirs.clone(),
+            priority_names: cfg.priority_names.clone(),
+            priority_prefixes: cfg.priority_prefixes.clone(),
+            priority_regexes: cfg.priority_regexes.clone(),
             no_cwd: cfg.no_cwd,
             no_path_env: cfg.no_path,
             scan_dirs: cfg.scan_dirs.clone(),
@@ -406,11 +415,13 @@ fn build_reverse_index(data: &ScanImageData) -> ReverseCallIndex {
 }
 
 pub fn system_dirs(cfg: &FollowScanConfig) -> Vec<PathBuf> {
-    let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
     let mut dirs = Vec::new();
+    dirs.extend(cfg.priority_dirs.iter().map(PathBuf::from));
     if !cfg.no_system {
-        dirs.push(PathBuf::from(&windir).join("System32"));
+        dirs.extend(default_priority_dirs());
     }
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.to_string_lossy().to_ascii_lowercase()));
     dirs
 }
 
@@ -452,7 +463,7 @@ pub fn find_target_dll(name: &str, cfg: &FollowScanConfig) -> Result<PathBuf, St
         }
     }
     Err(format!(
-        "'{}' not found in System32 or PATH; use --path or provide full path",
+        "'{}' not found in priority dirs, System32, or PATH; use --priority to edit the priority config, --path, or provide full path",
         name
     ))
 }
@@ -470,12 +481,18 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
     };
     let mut seen = std::collections::HashSet::new();
     let mut paths = Vec::new();
+    let priority = matcher_from_lists(
+        cfg.priority_names.clone(),
+        cfg.priority_prefixes.clone(),
+        cfg.priority_regexes.clone(),
+    );
 
     let add_dir = |dir: &Path,
                    paths: &mut Vec<PathBuf>,
                    seen: &mut std::collections::HashSet<String>,
                    exts: &[&str],
-                   cfg: &FollowScanConfig| {
+                   cfg: &FollowScanConfig,
+                   enforce_priority: bool| {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -510,6 +527,9 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
             if !cfg.exclude.is_empty() && glob_match(&cfg.exclude, &base) {
                 continue;
             }
+            if enforce_priority && !priority.is_priority_path(&abs) {
+                continue;
+            }
 
             seen.insert(low);
             paths.push(abs);
@@ -517,10 +537,10 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
     };
 
     for dir in system_dirs(cfg) {
-        add_dir(&dir, &mut paths, &mut seen, &exts, cfg);
+        add_dir(&dir, &mut paths, &mut seen, &exts, cfg, true);
     }
     for dir in cfg.scan_dirs.iter().map(PathBuf::from) {
-        add_dir(&dir, &mut paths, &mut seen, &exts, cfg);
+        add_dir(&dir, &mut paths, &mut seen, &exts, cfg, false);
     }
     for dll_arg in &cfg.scan_dlls {
         if let Ok(p) = find_target_dll(dll_arg, cfg) {
