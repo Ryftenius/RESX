@@ -1,32 +1,27 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows:
-      - CI
-    types:
-      - completed
+  push:
     branches:
       - main
       - master
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_branch }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   build-and-publish:
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
 
     steps:
-      - name: Checkout successful CI commit
+      - name: Checkout release commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Install stable toolchain
@@ -36,6 +31,15 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --all-features
 
       - name: Read version metadata
         id: version
@@ -55,7 +59,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${{ steps.version.outputs.tag }}" "${{ github.event.workflow_run.head_sha }}"
+          git tag -f "${{ steps.version.outputs.tag }}" "${{ github.sha }}"
           git push origin "refs/tags/${{ steps.version.outputs.tag }}" --force
 
       - name: Build release
@@ -88,7 +92,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          target_commitish: ${{ github.sha }}
           files: |
             dist/*.zip
             dist/*.sha256
