@@ -6,9 +6,11 @@ use std::sync::{
 
 use rayon::prelude::*;
 
-use crate::color::Colors;
-use crate::follow_scan::{scan_image_for_callers, CallSite, Caller, FollowScanConfig, ScanImage};
-use crate::output::AsyncProgress;
+use crate::analysis::follow::scan::{
+    scan_image_for_callers, CallSite, Caller, FollowScanConfig, ScanImage,
+};
+use crate::core::color::Colors;
+use crate::core::output::AsyncProgress;
 
 #[derive(Debug, Clone)]
 pub struct FuncRef {

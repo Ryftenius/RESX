@@ -2,8 +2,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use crate::color::Colors;
-use crate::config::Config;
+use crate::core::color::Colors;
+use crate::core::config::Config;
 
 pub fn run(cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     let repo = Path::new(".");

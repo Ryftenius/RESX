@@ -1,14 +1,16 @@
 use std::io::Write;
 
-use crate::color::Colors;
-use crate::config::Config;
-use crate::follow_output::{
+use crate::analysis::follow::output::{
     count_nodes, node_to_json, print_call_flat, print_call_list, print_call_tree,
 };
-use crate::follow_scan::{build_scan_list, find_target_dll, FollowScanConfig, ScanImage};
-use crate::follow_trace::{build_call_tree, FuncRef, TraceCtx};
-use crate::pdb::load_pdb_symbol;
-use crate::pe::{parse_pe, read_exports};
+use crate::analysis::follow::scan::{
+    build_scan_list, find_target_dll, FollowScanConfig, ScanImage,
+};
+use crate::analysis::follow::trace::{build_call_tree, FuncRef, TraceCtx};
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::formats::pdb::load_pdb_symbol;
+use crate::formats::pe::{parse_pe, read_exports};
 
 pub fn run(
     dll_arg: &str,
@@ -147,7 +149,10 @@ pub fn run(
     Ok(())
 }
 
-fn find_export<'a>(exports: &'a [crate::pe::Export], name: &str) -> Option<&'a crate::pe::Export> {
+fn find_export<'a>(
+    exports: &'a [crate::formats::pe::Export],
+    name: &str,
+) -> Option<&'a crate::formats::pe::Export> {
     if let Some(e) = exports.iter().find(|e| e.name == name) {
         return Some(e);
     }
@@ -161,7 +166,7 @@ fn find_export<'a>(exports: &'a [crate::pe::Export], name: &str) -> Option<&'a c
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_target(
-    exports: &[crate::pe::Export],
+    exports: &[crate::formats::pe::Export],
     dll_path: &str,
     dll_name: &str,
     func_arg: &str,

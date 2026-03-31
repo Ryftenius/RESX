@@ -1,6 +1,6 @@
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 
-use crate::pe::{resolve_iat_slot, PeFile};
+use crate::formats::pe::{resolve_iat_slot, PeFile};
 
 #[derive(Debug, Clone)]
 pub enum ThunkResolution {

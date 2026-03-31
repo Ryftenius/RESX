@@ -1,153 +1,35 @@
+mod json;
+
 use iced_x86::{Mnemonic, OpKind, Register};
-use serde::Serialize;
 use std::io::Write;
 use std::sync::OnceLock;
 
-use crate::cfgview::{
+use self::json::{
+    hex_bytes, to_anomaly_json, to_edr_json, to_section_json, to_yara_json, ApiCallJson,
+    FuncResult, InsnJson,
+};
+use crate::analysis::cfgview::{
     detect_static_hook_indicators, render_cfg_colored_with_edges, render_cfg_text_with_edges,
     RecoveredIndirectEdge,
 };
-use crate::color::Colors;
-use crate::config::Config;
-use crate::disasm::{
+use crate::analysis::disasm::{
     collect_api_calls, disassemble_at, find_string_refs, find_xrefs, ApiCall, Instruction,
 };
-use crate::edr::{check_prologue, EdrCheckResult};
-use crate::intelli::{analyze_image, IntelliFinding};
-use crate::output::{
+use crate::analysis::edr::{check_prologue, EdrCheckResult};
+use crate::analysis::intelli::{analyze_image, IntelliFinding};
+use crate::analysis::recomp::recomp_c;
+use crate::analysis::symbols::SymbolIndex;
+use crate::analysis::thunk::{follow_jmp_thunk, ThunkResolution};
+use crate::analysis::yara::scan_file;
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::core::output::{
     print_c_recomp, print_eat, print_iat, print_insns, print_pe_anomalies, print_sections,
     print_yara_matches, StageProgress,
 };
-use crate::pdb::{load_pdb_symbol, load_pdb_symbols};
-use crate::pe::{parse_pe, read_exports, read_imports, Export, PeAnomaly, PeSection};
-use crate::recomp::recomp_c;
-use crate::search::find_dll_path;
-use crate::symbols::SymbolIndex;
-use crate::thunk::{follow_jmp_thunk, ThunkResolution};
-use crate::yara::scan_file;
-
-#[derive(Serialize)]
-struct InsnJson {
-    rva: String,
-    va: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    rebased_va: String,
-    bytes: String,
-    text: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    comment: String,
-}
-
-#[derive(Serialize)]
-struct FuncResult {
-    dll: String,
-    dll_path: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    function: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    rva: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    va: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    rebased_va: String,
-    image_base: String,
-    arch: String,
-    entry_point: String,
-    size_of_image: String,
-    size_of_headers: String,
-    section_alignment: String,
-    file_alignment: String,
-    checksum: String,
-    subsystem: String,
-    dll_characteristics: String,
-    header_corrupt: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pe_anomalies: Vec<PeAnomalyJson>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    sections: Vec<PeSectionJson>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    yara_matches: Vec<YaraJson>,
-    #[serde(skip_serializing_if = "is_zero_usize")]
-    size_bytes: usize,
-    #[serde(skip_serializing_if = "is_zero_usize")]
-    insn_count: usize,
-    pdb_loaded: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    followed_jmp: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    instructions: Vec<InsnJson>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    xrefs: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    strings: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    intelli_findings: Vec<IntelliFinding>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    recomp: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    cfg: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    hook_indicators: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    edrchk: Option<EdrJson>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    api_calls: Vec<ApiCallJson>,
-}
-
-#[derive(Serialize)]
-struct EdrJson {
-    in_memory_available: bool,
-    loaded_for_check: bool,
-    compared_len: usize,
-    modified: bool,
-    diff_offsets: Vec<usize>,
-    disk_bytes: String,
-    memory_bytes: String,
-}
-
-#[derive(Serialize)]
-struct PeSectionJson {
-    name: String,
-    rva: String,
-    virtual_size: String,
-    raw_offset: String,
-    raw_size: String,
-    protections: String,
-    expected: String,
-    entropy: f64,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    note: String,
-}
-
-#[derive(Serialize)]
-struct PeAnomalyJson {
-    severity: String,
-    kind: String,
-    detail: String,
-}
-
-#[derive(Serialize)]
-struct ApiCallJson {
-    rva: String,
-    kind: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    target_rva: String,
-    label: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    dll: String,
-    is_import: bool,
-    is_indirect: bool,
-}
-
-#[derive(Serialize)]
-struct YaraJson {
-    rule: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    namespace: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tags: Vec<String>,
-    file: String,
-}
+use crate::core::search::find_dll_path;
+use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
+use crate::formats::pe::{parse_pe, read_exports, read_imports, Export};
 
 #[derive(Debug, Clone)]
 struct RecoveredSwitchTarget {
@@ -948,8 +830,8 @@ fn print_api_calls(
     func_name: &str,
     c: &Colors,
     raw: &[u8],
-    pe: &crate::pe::PeFile,
-    symbol_index: &crate::symbols::SymbolIndex,
+    pe: &crate::formats::pe::PeFile,
+    symbol_index: &crate::analysis::symbols::SymbolIndex,
     exports: &[Export],
     arch: u32,
     image_base: u64,
@@ -1002,8 +884,8 @@ fn print_api_calls(
 
 struct TraceImageView<'a> {
     raw: &'a [u8],
-    pe: &'a crate::pe::PeFile,
-    symbol_index: &'a crate::symbols::SymbolIndex,
+    pe: &'a crate::formats::pe::PeFile,
+    symbol_index: &'a crate::analysis::symbols::SymbolIndex,
     exports: &'a [Export],
     arch: u32,
     image_base: u64,
@@ -1013,9 +895,9 @@ struct LoadedTraceImage {
     dll_name: String,
     dll_path: String,
     raw: Vec<u8>,
-    pe: crate::pe::PeFile,
+    pe: crate::formats::pe::PeFile,
     exports: Vec<Export>,
-    symbol_index: crate::symbols::SymbolIndex,
+    symbol_index: crate::analysis::symbols::SymbolIndex,
     arch: u32,
     image_base: u64,
 }
@@ -1610,7 +1492,7 @@ fn best_symbol_name_for_rva(
 fn recover_local_switch_dispatch(
     insns: &[Instruction],
     raw: &[u8],
-    pe: &crate::pe::PeFile,
+    pe: &crate::formats::pe::PeFile,
     symbol_index: &SymbolIndex,
     image_base: u64,
 ) -> Option<RecoveredSwitchDispatch> {
@@ -1644,7 +1526,7 @@ fn recover_local_switch_dispatch(
 
 fn resolve_dispatch_rva_local(
     raw: &[u8],
-    pe: &crate::pe::PeFile,
+    pe: &crate::formats::pe::PeFile,
     dispatcher: &QsiDispatcher,
     class_value: u32,
 ) -> Option<u32> {
@@ -2015,8 +1897,8 @@ fn print_intelli_findings(w: &mut dyn Write, findings: &[IntelliFinding], c: &Co
 pub(crate) fn resolve_function(
     func_arg: &str,
     exports: &[Export],
-    pdb_symbols: &[crate::pdb::PdbSymbol],
-    _pe: &crate::pe::PeFile,
+    pdb_symbols: &[crate::formats::pdb::PdbSymbol],
+    _pe: &crate::formats::pe::PeFile,
     _raw: &[u8],
     dll_path: &str,
     image_base: u64,
@@ -2144,9 +2026,9 @@ pub(crate) fn resolve_function(
 }
 
 fn find_cached_pdb_symbol<'a>(
-    pdb_symbols: &'a [crate::pdb::PdbSymbol],
+    pdb_symbols: &'a [crate::formats::pdb::PdbSymbol],
     func_arg: &str,
-) -> Option<&'a crate::pdb::PdbSymbol> {
+) -> Option<&'a crate::formats::pdb::PdbSymbol> {
     let want = normalize_symbol_name(func_arg);
     pdb_symbols
         .iter()
@@ -2154,7 +2036,7 @@ fn find_cached_pdb_symbol<'a>(
 }
 
 fn suggest_cached_pdb_symbols(
-    pdb_symbols: &[crate::pdb::PdbSymbol],
+    pdb_symbols: &[crate::formats::pdb::PdbSymbol],
     func_arg: &str,
     limit: usize,
 ) -> Vec<String> {
@@ -2248,59 +2130,4 @@ fn print_edr_report(w: &mut dyn Write, edr: &EdrCheckResult, c: &Colors) {
     if edr.loaded_from_memory {
         writeln!(w, "{}", c.dim("  Image was loaded for comparison")).ok();
     }
-}
-
-fn to_edr_json(edr: &EdrCheckResult) -> EdrJson {
-    EdrJson {
-        in_memory_available: edr.in_memory_available,
-        loaded_for_check: edr.loaded_from_memory,
-        compared_len: edr.compared_len,
-        modified: edr.modified,
-        diff_offsets: edr.diff_offsets.clone(),
-        disk_bytes: hex_bytes(&edr.disk_bytes),
-        memory_bytes: hex_bytes(&edr.memory_bytes),
-    }
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn to_section_json(section: &PeSection) -> PeSectionJson {
-    PeSectionJson {
-        name: section.name.clone(),
-        rva: format!("0x{:08X}", section.virtual_address),
-        virtual_size: format!("0x{:08X}", section.virtual_size),
-        raw_offset: format!("0x{:08X}", section.raw_offset),
-        raw_size: format!("0x{:08X}", section.raw_size),
-        protections: section.protection_string(),
-        expected: section.normal_expectation().to_owned(),
-        entropy: section.entropy,
-        note: section.unusual_protection_reason().unwrap_or_default(),
-    }
-}
-
-fn to_anomaly_json(anomaly: &PeAnomaly) -> PeAnomalyJson {
-    PeAnomalyJson {
-        severity: anomaly.severity.clone(),
-        kind: anomaly.kind.clone(),
-        detail: anomaly.detail.clone(),
-    }
-}
-
-fn to_yara_json(m: &crate::yara::YaraMatch) -> YaraJson {
-    YaraJson {
-        rule: m.rule.clone(),
-        namespace: m.namespace.clone(),
-        tags: m.tags.clone(),
-        file: m.file.clone(),
-    }
-}
-
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
 }

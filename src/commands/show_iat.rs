@@ -1,10 +1,10 @@
 use std::io::Write;
 
-use crate::color::Colors;
-use crate::config::Config;
-use crate::output::print_iat;
-use crate::pe::{parse_pe, read_imports};
-use crate::search::find_dll_path;
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::core::output::print_iat;
+use crate::core::search::find_dll_path;
+use crate::formats::pe::{parse_pe, read_imports};
 
 pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     let dll_path = find_dll_path(dll_arg, cfg)?;

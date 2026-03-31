@@ -1,6 +1,7 @@
 pub mod cfg;
 pub mod dump;
 pub mod follow;
+pub mod intelli;
 pub mod locate;
 pub mod peinfo;
 pub mod show_eat;

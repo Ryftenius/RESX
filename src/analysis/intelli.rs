@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::disasm::Instruction;
-use crate::pe::ImportDll;
+use crate::analysis::disasm::Instruction;
+use crate::formats::pe::ImportDll;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IntelliFinding {

@@ -1,14 +1,14 @@
 use std::io::Write;
 
-use crate::cfgview::render_cfg_colored;
-use crate::color::Colors;
-use crate::config::Config;
-use crate::disasm::disassemble_at;
-use crate::pdb::load_pdb_symbols;
-use crate::pe::{parse_pe, read_exports};
-use crate::search::find_dll_path;
-use crate::symbols::SymbolIndex;
-use crate::thunk::{follow_jmp_thunk, ThunkResolution};
+use crate::analysis::cfgview::render_cfg_colored;
+use crate::analysis::disasm::disassemble_at;
+use crate::analysis::symbols::SymbolIndex;
+use crate::analysis::thunk::{follow_jmp_thunk, ThunkResolution};
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::core::search::find_dll_path;
+use crate::formats::pdb::load_pdb_symbols;
+use crate::formats::pe::{parse_pe, read_exports};
 
 pub fn run(
     dll_arg: &str,

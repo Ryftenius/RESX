@@ -2,9 +2,9 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use crate::color::Colors;
-use crate::follow_scan::FollowScanConfig;
-use crate::follow_trace::CallNode;
+use crate::analysis::follow::scan::FollowScanConfig;
+use crate::analysis::follow::trace::CallNode;
+use crate::core::color::Colors;
 
 fn is_false(b: &bool) -> bool {
     !*b

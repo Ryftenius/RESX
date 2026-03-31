@@ -6,11 +6,11 @@ use std::sync::{
 
 use iced_x86::Mnemonic;
 
-use crate::color::Colors;
-use crate::config::Config;
-use crate::disasm::{is_jcc, is_jmp, is_ret, is_sys, Instruction};
-use crate::pe::{Export, ImportDll, PeAnomaly, PeFile};
-use crate::yara::YaraMatch;
+use crate::analysis::disasm::{is_jcc, is_jmp, is_ret, is_sys, Instruction};
+use crate::analysis::yara::YaraMatch;
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::formats::pe::{Export, ImportDll, PeAnomaly, PeFile};
 
 pub struct ProgressBar {
     pub total: usize,

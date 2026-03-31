@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::core::config::Config;
 
 pub fn system_search_paths() -> Vec<PathBuf> {
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());

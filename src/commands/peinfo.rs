@@ -3,12 +3,12 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use crate::color::Colors;
-use crate::config::Config;
-use crate::metadata::{query_file_metadata, FileMetadata};
-use crate::output::{print_pe_anomalies, print_sections, StageProgress};
-use crate::pe::{parse_pe, read_exports, read_imports, PeAnomaly, PeSection};
-use crate::search::find_dll_path;
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::core::output::{print_pe_anomalies, print_sections, StageProgress};
+use crate::core::search::find_dll_path;
+use crate::formats::metadata::{query_file_metadata, FileMetadata};
+use crate::formats::pe::{parse_pe, read_exports, read_imports, PeAnomaly, PeSection};
 
 #[derive(Serialize)]
 struct PeInfoJson {

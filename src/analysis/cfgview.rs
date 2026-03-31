@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::color::Colors;
-use crate::disasm::{is_ret, Instruction};
+use crate::analysis::disasm::{is_ret, Instruction};
+use crate::core::color::Colors;
 
 #[derive(Debug, Clone)]
 pub struct BlockEdge {
@@ -321,7 +321,7 @@ pub fn render_cfg_colored_with_edges(
 
 pub fn detect_static_hook_indicators(
     insns: &[Instruction],
-    entry_thunk: Option<&crate::thunk::ThunkResolution>,
+    entry_thunk: Option<&crate::analysis::thunk::ThunkResolution>,
 ) -> Vec<String> {
     let mut findings = Vec::new();
 

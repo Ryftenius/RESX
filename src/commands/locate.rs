@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use rayon::prelude::*;
 
-use crate::color::Colors;
-use crate::config::Config;
-use crate::output::ProgressBar;
-use crate::pdb::load_pdb_symbol;
-use crate::pe::{parse_pe, read_exports};
-use crate::thunk::follow_jmp_thunk;
+use crate::analysis::thunk::follow_jmp_thunk;
+use crate::core::color::Colors;
+use crate::core::config::Config;
+use crate::core::output::ProgressBar;
+use crate::formats::pdb::load_pdb_symbol;
+use crate::formats::pe::{parse_pe, read_exports};
 
 #[derive(Debug)]
 pub struct LocateResult {
@@ -501,7 +501,7 @@ struct SyscallStubInfo {
 
 fn detect_syscall_stub(
     raw: &[u8],
-    pe: &crate::pe::PeFile,
+    pe: &crate::formats::pe::PeFile,
     start_rva: u32,
 ) -> Option<SyscallStubInfo> {
     let off = pe.rva_to_offset(start_rva)?;

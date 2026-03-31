@@ -1,10 +1,20 @@
-use crate::config::Cli;
+use crate::core::config::Cli;
 
 pub const APP_NAME: &str = "RESX";
 pub const ORG_NAME: &str = "TITAN Softwork Solutions";
 
 pub fn version_string() -> String {
     format!("{} v{}", APP_NAME, env!("CARGO_PKG_VERSION"))
+}
+
+pub fn is_help_request(raw_args: &[String]) -> bool {
+    raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("help")
+        || raw_args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
+pub fn is_version_request(raw_args: &[String]) -> bool {
+    raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("version")
+        || raw_args.iter().any(|arg| arg == "--version" || arg == "-V")
 }
 
 pub fn print_usage() {
@@ -14,13 +24,14 @@ pub fn print_usage() {
 by {org}
 
 Windows binary recon CLI for exports, PDB-backed symbols, PE metadata, CFG recovery,
-switch-map recovery, hook checks, caller tracing, and rapid triage.
+switch-map recovery, hook checks, caller tracing, Intelli triage, and rapid analysis.
 
 USAGE
   resx dump <dll> <function> [options]
   resx dump <dll> --at <rva> [options]
   resx dump <dll> --ordinal <n> [options]
   resx cfg <dll> <function> [options]
+  resx intelli <dll> [function] [options]
 
   resx peinfo <dll> [options]
   resx sections <dll> [options]
@@ -43,6 +54,7 @@ USAGE
 COMMANDS
   dump        Disassemble or reconstruct one target by name, RVA, or ordinal.
   cfg         Show a control-flow graph view for one target.
+  intelli     Run heuristic triage over a target image or function.
   peinfo      Show PE metadata, version resources, signer info, and headers.
   sections    Show section layout, entropy, and protection expectations.
   eat         Dump the Export Address Table.
@@ -59,7 +71,7 @@ COMMANDS
   update      Pull the latest version from the current git remote/branch.
   help        Show this help text.
 
-DUMP OPTIONS
+DUMP / INTELLI OPTIONS
   --at <rva>                 dump by RVA instead of by function name
   --ordinal <n>              dump by export ordinal
   --recomp                   show C-like reconstruction
@@ -115,12 +127,13 @@ GLOBAL OPTIONS
 
 EXAMPLES
   resx dump kernel32.dll CreateFileW --recomp --bytes
-  resx dump ntdll.dll NtOpenProcess --cfg text --hookchk
+  resx intelli suspicious.dll
+  resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
   resx syms .\J58.dll --pdb .\J58.pdb
   resx update
-  resx dump --example
+  resx intelli --example
 "#,
         name = APP_NAME,
         version = env!("CARGO_PKG_VERSION"),
@@ -132,6 +145,7 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
     const KNOWN: &[&str] = &[
         "dump",
         "cfg",
+        "intelli",
         "peinfo",
         "sections",
         "eat",
@@ -186,6 +200,10 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--cfg".to_string());
             rewritten.push("text".to_string());
+        }
+        "intelli" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--intelli".to_string());
         }
         "peinfo" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
@@ -264,6 +282,19 @@ NOTES
   Intended for source checkouts, not arbitrary installed binaries.
 "#
         }
+        "intelli" => {
+            r#"
+INTELLI EXAMPLES
+  resx intelli suspicious.dll
+  resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
+  resx dump suspicious.dll --intelli
+  resx dump suspicious.dll WinMain --intelli --json
+
+NOTES
+  `intelli` is a first-class command alias for dump-driven heuristic triage.
+  It is useful when you want imports, strings, hooks, and signal tags quickly.
+"#
+        }
         "dump" | "recomp" | "c" => {
             r#"
 DUMP EXAMPLES
@@ -313,6 +344,7 @@ SYMBOL EXAMPLES
             r#"
 GENERAL EXAMPLES
   resx dump ntdll.dll NtCreateFile
+  resx intelli suspicious.dll
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx callers ntdll.dll NtOpenProcess --depth 2
   resx locate-all-sym NtOpenProcess

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::pdb::PdbSymbol;
-use crate::pe::Export;
+use crate::formats::pdb::PdbSymbol;
+use crate::formats::pe::Export;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSymbol {

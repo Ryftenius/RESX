@@ -12,6 +12,7 @@
 - `resx dump <dll> --at <rva>`
 - `resx dump <dll> --ordinal <n>`
 - `resx cfg <dll> <function>`
+- `resx intelli <dll> [function]`
 - `resx peinfo <dll>`
 - `resx sections <dll>`
 - `resx eat <dll>`
@@ -43,6 +44,12 @@
 - `--follow-jmp`
 - `--no-follow-jmp`
 - `--rebase <addr>`
+
+## Intelli
+
+- `resx intelli <dll>` runs triage against an image quickly.
+- `resx intelli <dll> <function>` narrows the triage to a specific target while still allowing dump-side options like `--hookchk`, `--cfg text`, `--strings`, and `--json`.
+- `intelli` is a command alias for the dump pipeline with `--intelli` enabled.
 
 ## Symbol Flags
 
@@ -99,6 +106,8 @@
 
 ```powershell
 resx dump ntdll.dll NtOpenProcess --cfg text --hookchk
+resx intelli suspicious.dll
+resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
 resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx syms ntoskrnl.exe --verbose

@@ -1,6 +1,6 @@
 #[cfg(windows)]
 mod win {
-    use crate::pe::{parse_pe, read_u32};
+    use crate::formats::pe::{parse_pe, read_u32};
     use std::collections::HashSet;
     use std::ffi::{c_void, CStr, CString};
     use std::path::{Path, PathBuf};
@@ -623,7 +623,7 @@ mod win {
         guid_age: String,
     }
 
-    fn extract_codeview_info(pe: &crate::pe::PeFile, raw: &[u8]) -> Option<CodeViewInfo> {
+    fn extract_codeview_info(pe: &crate::formats::pe::PeFile, raw: &[u8]) -> Option<CodeViewInfo> {
         let (dir_rva, dir_size) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_DEBUG);
         if dir_rva == 0 || dir_size < 28 {
             return None;

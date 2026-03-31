@@ -1,8 +1,8 @@
 use iced_x86::{Mnemonic, OpKind, Register};
 
-use crate::disasm::{is_jcc, Instruction};
-use crate::pe::Export;
-use crate::symbols::SymbolIndex;
+use crate::analysis::disasm::{is_jcc, Instruction};
+use crate::analysis::symbols::SymbolIndex;
+use crate::formats::pe::Export;
 
 fn fmt_op(
     instr: &iced_x86::Instruction,
@@ -166,7 +166,7 @@ pub fn recomp_c(
     arch: u32,
     image_base: u64,
     symbols: Option<&SymbolIndex>,
-    _cfg: &crate::config::Config,
+    _cfg: &crate::core::config::Config,
 ) -> String {
     if insns.is_empty() {
         return "// No instructions to reconstruct.".to_owned();
@@ -295,7 +295,7 @@ pub fn recomp_c(
                     format!("result = {}();", a0)
                 }
             }
-            _ if crate::disasm::is_ret(m) => {
+            _ if crate::analysis::disasm::is_ret(m) => {
                 if arch == 64 {
                     "return rax;".to_owned()
                 } else {

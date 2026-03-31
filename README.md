@@ -37,6 +37,7 @@ resx dump <dll> <function>
 resx dump <dll> --at <rva>
 resx dump <dll> --ordinal <n>
 resx cfg <dll> <function>
+resx intelli <dll> [function]
 resx peinfo <dll>
 resx sections <dll>
 resx eat <dll>
@@ -56,6 +57,7 @@ resx yara <dll> <rule.yar>
 - It resolves internal targets from exports and enumerated PDB symbols instead of stopping at the export table.
 - It can recover structured switch dispatchers instead of leaving you with `jmp r9`.
 - It can show disassembly, call maps, CFG edges, and pseudo-C in one pass.
+- It exposes `intelli` as a first-class triage command instead of hiding it behind a flag.
 - It is designed to be useful on real Windows internals work, not just “dump exports and quit.”
 
 ## Showcase
@@ -90,6 +92,31 @@ API Call Map for KiSystemCall64  [37 call site(s)]:
    0x6BE150  CALL  KiSaveDebugRegisterState [internal]
    0x6BE166  CALL  PsSyscallProviderDispatch [internal]
    0x6BE183  CALL  KiExceptionDispatch [internal]
+```
+
+### Intelli Triage As A Real Command
+
+```text
+> resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
+
+suspicious.dll!WinMain  [RVA 0x00017A40, VA 0x0000000180017A40]
+  mov  rcx, qword ptr [rip+0x4C12]
+  call qword ptr [rip+0x2130] ; WinHttpSendRequest
+
+Hook Indicators:
+  entry starts with jump thunk
+  in-memory prologue differs from disk at 5 offset(s)
+
+String References:
+  https://api.example-c2.net/gate
+  wss://cdn.example-c2.net/socket
+  C:\Users\Public\svchost.dat
+
+Intelli Triage:
+  [network] url (string) https://api.example-c2.net/gate
+  [network] websocket (string) wss://cdn.example-c2.net/socket
+  [filesystem] filepath (string) C:\Users\Public\svchost.dat
+  [execution] process-launch (import) CreateProcessW
 ```
 
 ### Switch Recovery Instead Of Raw Indirect Jumps
@@ -188,6 +215,8 @@ block_00AE0FF7:  [6 insn]  range 0x00AE0FF7..0x00AE1013
 
 ```powershell
 resx dump ntdll.dll NtOpenProcess --cfg text --hookchk
+resx intelli suspicious.dll
+resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
 resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx callers .\blackbird.sys BLACKBIRDNtAllocateVirtualMemoryHookStub --depth 2
@@ -198,6 +227,7 @@ resx yara suspicious.dll .\rules\triage.yar
 ## Notes
 
 - Semantic switch labels come from parsed SDK metadata when available. Structural switch recovery still works without the SDK.
+- `intelli` is a command alias for `dump` with triage enabled, so it accepts normal dump-side options too.
 - `resx update` requires a git checkout with a configured `origin`.
 - Use `resx help` or `resx <command> --example` for the live command help.
 

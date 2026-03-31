@@ -2,9 +2,9 @@ use iced_x86::{
     Decoder, DecoderOptions, Formatter, GasFormatter, IntelFormatter, Mnemonic, OpKind, Register,
 };
 
-use crate::config::Config;
-use crate::pe::{Export, PeFile};
-use crate::symbols::SymbolIndex;
+use crate::analysis::symbols::SymbolIndex;
+use crate::core::config::Config;
+use crate::formats::pe::{Export, PeFile};
 
 #[derive(Debug, Clone)]
 pub struct Instruction {
@@ -268,7 +268,11 @@ pub fn disassemble_at(
     Ok(insns)
 }
 
-pub fn find_string_refs(raw: &[u8], pe: &crate::pe::PeFile, insns: &[Instruction]) -> Vec<String> {
+pub fn find_string_refs(
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    insns: &[Instruction],
+) -> Vec<String> {
     use iced_x86::Mnemonic;
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -298,7 +302,7 @@ pub fn find_string_refs(raw: &[u8], pe: &crate::pe::PeFile, insns: &[Instruction
             }
             let rva = (va - pe.image_base) as u32;
             if let Some(off) = pe.rva_to_offset(rva) {
-                let s = crate::pe::read_cstr(raw, off);
+                let s = crate::formats::pe::read_cstr(raw, off);
                 if s.len() >= 4 && is_printable_ascii(&s) {
                     seen.insert(va);
                     let display = if s.len() > 128 {
@@ -406,7 +410,7 @@ pub fn collect_api_calls(
 
             if slot_va != 0 && slot_va >= image_base {
                 let slot_rva = (slot_va - image_base) as u32;
-                if let Some((dll, func)) = crate::pe::resolve_iat_slot(pe, raw, slot_rva) {
+                if let Some((dll, func)) = crate::formats::pe::resolve_iat_slot(pe, raw, slot_rva) {
                     results.push(ApiCall {
                         rva: insn.rva,
                         kind,

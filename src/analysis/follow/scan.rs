@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::config::Config;
-use crate::pe::{attribute_to_func, parse_pe, read_cstr, read_exports, read_u32, read_u64};
+use crate::core::config::Config;
+use crate::formats::pe::{
+    attribute_to_func, parse_pe, read_cstr, read_exports, read_u32, read_u64,
+};
 
 #[derive(Debug, Clone)]
 pub struct FollowScanConfig {
@@ -61,7 +63,7 @@ pub struct CallSite {
 
 #[derive(Debug, Clone)]
 pub struct Caller {
-    pub func: crate::follow_trace::FuncRef,
+    pub func: crate::analysis::follow::trace::FuncRef,
     pub sites: Vec<CallSite>,
 }
 
@@ -73,15 +75,15 @@ pub struct ScanImage {
 
 pub struct ScanImageData {
     pub raw: Vec<u8>,
-    pub pe: crate::pe::PeFile,
-    pub exports: Vec<crate::pe::Export>,
+    pub pe: crate::formats::pe::PeFile,
+    pub exports: Vec<crate::formats::pe::Export>,
     pub dll_name: String,
     pub dll_base_lower: String,
     pub dll_path_str: String,
 }
 
 struct IndexedCaller {
-    func: crate::follow_trace::FuncRef,
+    func: crate::analysis::follow::trace::FuncRef,
     sites: Vec<CallSite>,
 }
 
@@ -146,7 +148,7 @@ fn normalize_dll_base(path_or_name: &str) -> String {
 }
 
 fn read_import_slots(
-    pe: &crate::pe::PeFile,
+    pe: &crate::formats::pe::PeFile,
     raw: &[u8],
 ) -> std::collections::HashMap<u64, (String, String)> {
     let mut slots = std::collections::HashMap::new();
@@ -219,11 +221,14 @@ fn read_import_slots(
     slots
 }
 
-fn owner_func_for_site(site_rva: u32, data: &ScanImageData) -> (u32, crate::follow_trace::FuncRef) {
+fn owner_func_for_site(
+    site_rva: u32,
+    data: &ScanImageData,
+) -> (u32, crate::analysis::follow::trace::FuncRef) {
     if let Some(e) = attribute_to_func(site_rva, &data.exports) {
         (
             e.rva,
-            crate::follow_trace::FuncRef::new(
+            crate::analysis::follow::trace::FuncRef::new(
                 data.dll_name.clone(),
                 data.dll_path_str.clone(),
                 e.name.clone(),
@@ -235,7 +240,7 @@ fn owner_func_for_site(site_rva: u32, data: &ScanImageData) -> (u32, crate::foll
     } else {
         (
             site_rva,
-            crate::follow_trace::FuncRef::new(
+            crate::analysis::follow::trace::FuncRef::new(
                 data.dll_name.clone(),
                 data.dll_path_str.clone(),
                 format!("sub_{:08X}", site_rva),
@@ -575,7 +580,7 @@ const SCN_EXEC: u32 = 0x2000_0000;
 
 pub fn scan_image_for_callers(
     image: &ScanImage,
-    target: &crate::follow_trace::FuncRef,
+    target: &crate::analysis::follow::trace::FuncRef,
     target_arch: u32,
     cfg: &FollowScanConfig,
 ) -> Vec<Caller> {

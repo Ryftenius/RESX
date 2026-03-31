@@ -1,23 +1,8 @@
-mod cfgview;
-mod color;
+mod analysis;
+mod cli;
 mod commands;
-mod config;
-mod disasm;
-mod edr;
-mod follow_output;
-mod follow_scan;
-mod follow_trace;
-mod help;
-mod intelli;
-mod metadata;
-mod output;
-mod pdb;
-mod pe;
-mod recomp;
-mod search;
-mod symbols;
-mod thunk;
-mod yara;
+mod core;
+mod formats;
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -26,9 +11,13 @@ use std::time::Instant;
 use clap::Parser;
 use rayon::ThreadPoolBuilder;
 
-use crate::color::{enable_windows_ansi, is_terminal, Colors};
-use crate::config::{Cli, Config};
-use crate::help::{example_topic, preprocess_args, print_examples, print_usage, version_string};
+use crate::cli::help::{
+    example_topic, is_help_request, is_version_request, preprocess_args, print_examples,
+    print_usage, version_string,
+};
+use crate::cli::router::dispatch;
+use crate::core::color::{enable_windows_ansi, is_terminal, Colors};
+use crate::core::config::{Cli, Config};
 
 fn main() {
     let started = Instant::now();
@@ -88,94 +77,9 @@ fn main() {
         &mut stdout_lock
     };
 
-    let dll_arg = cfg.dll.clone();
-    let func_arg = cfg.function.clone();
-    let is_peinfo_shorthand = dll_arg.eq_ignore_ascii_case("peinfo") && !func_arg.is_empty();
-
-    let is_locate = cfg.locate
-        || cfg.locate_all
-        || cfg.locate_deep
-        || cfg.locate_all_deep
-        || (!dll_arg.is_empty()
-            && !dll_arg.eq_ignore_ascii_case("peinfo")
-            && func_arg.is_empty()
-            && cfg.at_rva.is_empty()
-            && cfg.ordinal == 0
-            && !cfg.show_eat
-            && !cfg.show_iat
-            && !cfg.show_syms
-            && !cfg.follow_callers
-            && !cfg.peinfo
-            && !cfg.sections
-            && !cfg.pechk
-            && !cfg.hookchk
-            && !cfg.intelli
-            && cfg.cfg_view.is_empty()
-            && cfg.yara.is_empty());
-
-    let result = if cli.update {
-        commands::update::run(&cfg, w, &c)
-    } else if is_locate {
-        let name = if !func_arg.is_empty() {
-            &func_arg
-        } else {
-            &dll_arg
-        };
-        if name.is_empty() {
-            eprintln!("{}", c.err_msg("Specify a function name to locate"));
-            print_usage();
-            std::process::exit(1);
-        }
-        commands::locate::run(name, &cfg, w, &c)
-    } else if is_peinfo_shorthand {
-        commands::peinfo::run(&func_arg, &cfg, w, &c)
-    } else if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("cfg") {
-        commands::cfg::run(&dll_arg, &func_arg, &cfg, w, &c)
-    } else if cfg.peinfo && !dll_arg.is_empty() && func_arg.is_empty() {
-        commands::peinfo::run(&dll_arg, &cfg, w, &c)
-    } else if cfg.follow_callers && !dll_arg.is_empty() && !func_arg.is_empty() {
-        commands::follow::run(&dll_arg, &func_arg, &cfg, w, &c)
-    } else if cfg.show_eat && func_arg.is_empty() && cfg.at_rva.is_empty() && cfg.ordinal == 0 {
-        commands::show_eat::run(&dll_arg, &cfg, w, &c)
-    } else if cfg.show_iat && func_arg.is_empty() && cfg.at_rva.is_empty() && cfg.ordinal == 0 {
-        commands::show_iat::run(&dll_arg, &cfg, w, &c)
-    } else if cfg.show_syms && func_arg.is_empty() && cfg.at_rva.is_empty() && cfg.ordinal == 0 {
-        commands::show_syms::run(&dll_arg, &cfg, w, &c)
-    } else if !func_arg.is_empty()
-        || !cfg.at_rva.is_empty()
-        || cfg.ordinal > 0
-        || cfg.show_eat
-        || cfg.show_iat
-        || cfg.sections
-        || cfg.pechk
-        || cfg.hookchk
-        || cfg.intelli
-        || !cfg.cfg_view.is_empty()
-        || !cfg.yara.is_empty()
-    {
-        commands::dump::run(&dll_arg, &func_arg, &cfg, w, &c)
-    } else if dll_arg.is_empty() {
-        eprintln!(
-            "{}",
-            c.err_msg(
-                "Specify a command such as dump, cfg, peinfo, sections, eat, iat, syms, pechk, callers, locate, yara, update, or help",
-            )
-        );
-        eprintln!("{}", c.dim("Run `resx help` for usage"));
-        std::process::exit(1);
-    } else {
-        eprintln!(
-            "{}",
-            c.err_msg(
-                "Incomplete command. Use `resx dump <dll> <function>`, `resx cfg <dll> <function>`, `resx peinfo <dll>`, `resx update`, or `resx help`",
-            )
-        );
-        eprintln!("{}", c.dim("Run `resx help` for usage"));
-        std::process::exit(1);
-    };
-
-    if let Err(e) = result {
+    if let Err(e) = dispatch(&raw_args, &cli, &cfg, w, &c) {
         eprintln!("{}", c.err_msg(&e));
+        eprintln!("{}", c.dim("Run `resx help` for usage"));
         std::process::exit(1);
     }
 
@@ -197,14 +101,4 @@ fn main() {
     } else {
         stdout_lock.flush().ok();
     }
-}
-
-fn is_help_request(raw_args: &[String]) -> bool {
-    raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("help")
-        || raw_args.iter().any(|arg| arg == "--help" || arg == "-h")
-}
-
-fn is_version_request(raw_args: &[String]) -> bool {
-    raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("version")
-        || raw_args.iter().any(|arg| arg == "--version" || arg == "-V")
 }
