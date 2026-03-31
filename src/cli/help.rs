@@ -76,7 +76,8 @@ DUMP / INTELLI OPTIONS
   --ordinal <n>              dump by export ordinal
   --recomp                   show C-like reconstruction
   --c-out <file>             write reconstruction to a C file
-  --edrchk                   compare disk vs loaded-memory prologue
+  --edrchk                   compare disk vs already-loaded in-memory prologue
+  --unsafe-map-image         allow mapping an on-disk image into RESX for checks that need memory bytes
   --hookchk                  show static entry-hook / thunk indicators
   --intelli                  run heuristic triage
   --xrefs                    show call targets (deduplicated flat list)
@@ -92,6 +93,7 @@ SYMBOL OPTIONS
   --pdb <file>               explicit PDB file
   --sym-path <path>          extra symbol path(s)
   --sym-server <url>         symbol server override
+  --reload                   bypass in-memory/disk PDB cache and reload symbols
   --no-pdb                   disable symbol/PDB loading
 
 FOLLOW OPTIONS

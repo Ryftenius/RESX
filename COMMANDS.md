@@ -39,6 +39,7 @@
 - `--xrefs`
 - `--strings`
 - `--edrchk`
+- `--unsafe-map-image`
 - `--hookchk`
 - `--intelli`
 - `--follow-jmp`
@@ -56,6 +57,7 @@
 - `--pdb <file>`
 - `--sym-path <path>`
 - `--sym-server <url>`
+- `--reload`
 - `--no-pdb`
 
 ## Caller Tracing Flags

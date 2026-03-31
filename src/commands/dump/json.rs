@@ -76,6 +76,7 @@ pub(crate) struct FuncResult {
 #[derive(Serialize)]
 pub(crate) struct EdrJson {
     pub(crate) in_memory_available: bool,
+    pub(crate) blocked_by_policy: bool,
     pub(crate) loaded_for_check: bool,
     pub(crate) compared_len: usize,
     pub(crate) modified: bool,
@@ -131,6 +132,7 @@ pub(crate) struct YaraJson {
 pub(crate) fn to_edr_json(edr: &EdrCheckResult) -> EdrJson {
     EdrJson {
         in_memory_available: edr.in_memory_available,
+        blocked_by_policy: edr.blocked_by_policy,
         loaded_for_check: edr.loaded_from_memory,
         compared_len: edr.compared_len,
         modified: edr.modified,

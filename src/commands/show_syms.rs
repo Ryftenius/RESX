@@ -23,6 +23,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         &cfg.sym_server,
         &cfg.pdb_file,
         cfg.verbose,
+        cfg.reload,
     )?;
     progress.tick("enumerating symbols");
     progress.finish();

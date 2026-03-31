@@ -30,6 +30,8 @@ resx update
 
 `resx update` is for a git checkout. It runs a fast-forward pull against the current branch on `origin`.
 
+PDB downloads are cached on disk and symbol enumerations are reused in-process. Use `--reload` when you want to bypass both and force a fresh symbol load.
+
 ## Core Commands
 
 ```powershell
@@ -228,6 +230,7 @@ resx yara suspicious.dll .\rules\triage.yar
 
 - Semantic switch labels come from parsed SDK metadata when available. Structural switch recovery still works without the SDK.
 - `intelli` is a command alias for `dump` with triage enabled, so it accepts normal dump-side options too.
+- `--edrchk` only compares against images that are already loaded in memory by default. RESX does not provide a real sandbox/container. `--unsafe-map-image` re-enables the old fallback of mapping an on-disk image into the current process and should be treated as unsafe for untrusted samples.
 - `resx update` requires a git checkout with a configured `origin`.
 - Use `resx help` or `resx <command> --example` for the live command help.
 

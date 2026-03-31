@@ -1,5 +1,6 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use rayon::prelude::*;
@@ -63,10 +64,12 @@ pub fn run(func_name: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Resu
 
     let mut results: Vec<LocateResult> = Vec::new();
     let tiers = collect_search_tiers(&search_dirs);
+    let (priority_tiers, deferred_tiers) = split_priority_tiers(&tiers);
     let mut matched_paths = std::collections::HashSet::new();
 
+    let priority_started = Instant::now();
     stream_export_hits(
-        &tiers,
+        &priority_tiers,
         func_name,
         show_all,
         cfg,
@@ -76,17 +79,61 @@ pub fn run(func_name: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Resu
         &mut matched_paths,
     )?;
 
+    let mut priority_symbol_files = 0usize;
     if deep && !cfg.no_pdb && (show_all || results.is_empty()) {
-        let remaining: Vec<Vec<PathBuf>> = tiers
-            .iter()
-            .map(|tier| {
-                tier.iter()
-                    .filter(|path| !matched_paths.contains(&path_key(path)))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .filter(|tier| !tier.is_empty())
-            .collect();
+        let remaining = collect_remaining_tiers(&priority_tiers, &matched_paths);
+        priority_symbol_files = count_tier_paths(&remaining);
+        stream_symbol_hits(
+            &remaining,
+            func_name,
+            show_all,
+            cfg,
+            c,
+            w,
+            &mut results,
+            &mut matched_paths,
+        )?;
+    }
+    let priority_elapsed = priority_started.elapsed();
+
+    if show_all && !deferred_tiers.is_empty() {
+        let priority_export_files = count_tier_paths(&priority_tiers);
+        let deferred_export_files = count_tier_paths(&deferred_tiers);
+        let deferred_symbol_files = if deep && priority_export_files > 0 {
+            deferred_export_files.saturating_mul(priority_symbol_files) / priority_export_files
+        } else {
+            0
+        };
+        if !prompt_to_continue_deferred_scan(
+            func_name,
+            deep,
+            priority_export_files,
+            priority_symbol_files,
+            deferred_export_files,
+            deferred_symbol_files,
+            priority_elapsed,
+            cfg,
+            w,
+            c,
+        )? {
+            annotate_syscall_targets(&mut results);
+            return print_locate_results(func_name, deep, &results, cfg, w, c);
+        }
+    }
+
+    stream_export_hits(
+        &deferred_tiers,
+        func_name,
+        show_all,
+        cfg,
+        c,
+        w,
+        &mut results,
+        &mut matched_paths,
+    )?;
+
+    if deep && !cfg.no_pdb && show_all {
+        let remaining = collect_remaining_tiers(&deferred_tiers, &matched_paths);
         stream_symbol_hits(
             &remaining,
             func_name,
@@ -101,6 +148,17 @@ pub fn run(func_name: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Resu
 
     annotate_syscall_targets(&mut results);
 
+    print_locate_results(func_name, deep, &results, cfg, w, c)
+}
+
+fn print_locate_results(
+    func_name: &str,
+    deep: bool,
+    results: &[LocateResult],
+    cfg: &Config,
+    w: &mut dyn Write,
+    c: &Colors,
+) -> Result<(), String> {
     if results.is_empty() {
         writeln!(
             w,
@@ -145,7 +203,7 @@ pub fn run(func_name: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Resu
             c.bold(&c.b_yellow(&format!("Locations of '{}':", func_name)))
         )
         .ok();
-        for r in &results {
+        for r in results {
             print_locate_result(w, c, r);
         }
         let hint = if deep {
@@ -183,7 +241,7 @@ fn collect_search_tiers(search_dirs: &[PathBuf]) -> Vec<Vec<PathBuf>> {
     });
 
     let mut tiers: Vec<Vec<PathBuf>> = Vec::new();
-    let mut current_key: Option<(u8, u8)> = None;
+    let mut current_key: Option<(u8, u8, u16)> = None;
     for path in all_paths {
         let key = path_priority_key(&path);
         if current_key != Some(key) {
@@ -195,7 +253,35 @@ fn collect_search_tiers(search_dirs: &[PathBuf]) -> Vec<Vec<PathBuf>> {
     tiers
 }
 
-fn path_priority_key(path: &Path) -> (u8, u8) {
+fn split_priority_tiers(tiers: &[Vec<PathBuf>]) -> (Vec<Vec<PathBuf>>, Vec<Vec<PathBuf>>) {
+    let split_at = tiers
+        .iter()
+        .position(|tier| !tier.is_empty() && !is_priority_path(&tier[0]))
+        .unwrap_or(tiers.len());
+    (tiers[..split_at].to_vec(), tiers[split_at..].to_vec())
+}
+
+fn collect_remaining_tiers(
+    tiers: &[Vec<PathBuf>],
+    matched_paths: &std::collections::HashSet<String>,
+) -> Vec<Vec<PathBuf>> {
+    tiers
+        .iter()
+        .map(|tier| {
+            tier.iter()
+                .filter(|path| !matched_paths.contains(&path_key(path)))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|tier| !tier.is_empty())
+        .collect()
+}
+
+fn count_tier_paths(tiers: &[Vec<PathBuf>]) -> usize {
+    tiers.iter().map(|tier| tier.len()).sum()
+}
+
+fn path_priority_key(path: &Path) -> (u8, u8, u16) {
     let ext_rank = match path
         .extension()
         .and_then(|e| e.to_str())
@@ -216,8 +302,216 @@ fn path_priority_key(path: &Path) -> (u8, u8) {
     } else {
         3
     };
-    (dir_rank, ext_rank)
+    let file_rank = filename_priority_rank(path);
+    (dir_rank, ext_rank, file_rank)
 }
+
+fn is_priority_path(path: &Path) -> bool {
+    filename_priority_rank(path) < non_priority_rank_base()
+}
+
+fn filename_priority_rank(path: &Path) -> u16 {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return 999;
+    };
+    let lower = file_name.to_ascii_lowercase();
+
+    if let Some((idx, _)) = EXACT_SEARCH_PRIORITY
+        .iter()
+        .enumerate()
+        .find(|(_, name)| lower == **name)
+    {
+        return idx as u16;
+    }
+
+    let family_base = EXACT_SEARCH_PRIORITY.len() as u16;
+    if let Some((idx, _)) = PREFIX_SEARCH_PRIORITY
+        .iter()
+        .enumerate()
+        .find(|(_, prefix)| lower.starts_with(**prefix))
+    {
+        return family_base + idx as u16;
+    }
+
+    non_priority_rank_base()
+}
+
+fn non_priority_rank_base() -> u16 {
+    EXACT_SEARCH_PRIORITY.len() as u16 + PREFIX_SEARCH_PRIORITY.len() as u16 + 100
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prompt_to_continue_deferred_scan(
+    func_name: &str,
+    deep: bool,
+    priority_export_files: usize,
+    priority_symbol_files: usize,
+    deferred_export_files: usize,
+    deferred_symbol_files: usize,
+    priority_elapsed: std::time::Duration,
+    cfg: &Config,
+    w: &mut dyn Write,
+    c: &Colors,
+) -> Result<bool, String> {
+    if cfg.json
+        || cfg.quiet
+        || !std::io::stdin().is_terminal()
+        || !std::io::stderr().is_terminal()
+        || deferred_export_files == 0
+    {
+        return Ok(true);
+    }
+
+    let estimate = estimate_remaining_duration(
+        priority_elapsed,
+        priority_export_files + priority_symbol_files,
+        deferred_export_files + deferred_symbol_files,
+    );
+
+    writeln!(w).ok();
+    writeln!(w, "{}", c.bold(&c.b_mag("Priority Search Complete:"))).ok();
+    writeln!(w, "  {} {}", c.dim("Target   :"), c.cyan(func_name)).ok();
+    writeln!(
+        w,
+        "  {} {}",
+        c.dim("Next     :"),
+        c.dim(if deep {
+            "remaining System32 / SysWOW64 / driver images (exports + symbols)"
+        } else {
+            "remaining System32 / SysWOW64 / driver images (exports)"
+        })
+    )
+    .ok();
+    writeln!(
+        w,
+        "  {} {}",
+        c.dim("Exports  :"),
+        c.cyan(&deferred_export_files.to_string())
+    )
+    .ok();
+    if deep {
+        writeln!(
+            w,
+            "  {} {}",
+            c.dim("Symbols  :"),
+            c.cyan(&format!("~{}", deferred_symbol_files))
+        )
+        .ok();
+    }
+    writeln!(
+        w,
+        "  {} {}",
+        c.dim("Estimate :"),
+        c.cyan(&format_duration(estimate))
+    )
+    .ok();
+    eprint!("\nContinue beyond the priority DLL set? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("read prompt response: {}", e))?;
+    let answer = answer.trim();
+    Ok(matches!(answer, "y" | "Y" | "yes" | "YES" | "Yes"))
+}
+
+fn estimate_remaining_duration(
+    elapsed: std::time::Duration,
+    processed_units: usize,
+    remaining_units: usize,
+) -> std::time::Duration {
+    if processed_units == 0 || remaining_units == 0 {
+        return std::time::Duration::ZERO;
+    }
+    let nanos_per_unit = elapsed.as_nanos() / processed_units as u128;
+    let remaining_nanos = nanos_per_unit.saturating_mul(remaining_units as u128);
+    let capped = remaining_nanos.min(u64::MAX as u128);
+    std::time::Duration::from_nanos(capped as u64)
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        format!("~{}s", secs.max(1))
+    } else if secs < 3600 {
+        format!("~{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("~{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+const EXACT_SEARCH_PRIORITY: &[&str] = &[
+    "ntoskrnl.exe",
+    "ntdll.dll",
+    "kernelbase.dll",
+    "kernel32.dll",
+    "advapi32.dll",
+    "user32.dll",
+    "gdi32.dll",
+    "gdi32full.dll",
+    "combase.dll",
+    "ole32.dll",
+    "oleaut32.dll",
+    "rpcrt4.dll",
+    "ucrtbase.dll",
+    "msvcrt.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "ws2_32.dll",
+    "winhttp.dll",
+    "wininet.dll",
+    "sechost.dll",
+    "secur32.dll",
+    "sspicli.dll",
+    "crypt32.dll",
+    "cryptbase.dll",
+    "bcrypt.dll",
+    "bcryptprimitives.dll",
+    "ncrypt.dll",
+    "psapi.dll",
+    "dbghelp.dll",
+    "dbgcore.dll",
+    "shlwapi.dll",
+    "shell32.dll",
+    "iphlpapi.dll",
+    "dnsapi.dll",
+    "wevtapi.dll",
+    "tdh.dll",
+    "advpack.dll",
+    "setupapi.dll",
+    "cfgmgr32.dll",
+    "wintrust.dll",
+    "urlmon.dll",
+    "winmm.dll",
+    "imm32.dll",
+    "version.dll",
+];
+
+const PREFIX_SEARCH_PRIORITY: &[&str] = &[
+    "api-ms-win-",
+    "ext-ms-win-",
+    "com",
+    "ole",
+    "rpc",
+    "bcrypt",
+    "crypt",
+    "ncrypt",
+    "winhttp",
+    "wininet",
+    "secur",
+    "sspi",
+    "wevt",
+    "tdh",
+    "evt",
+    "psapi",
+    "dbg",
+    "setup",
+    "cfgmgr",
+    "wdf",
+    "mf",
+    "dx",
+    "d3d",
+];
 
 #[allow(clippy::too_many_arguments)]
 fn stream_export_hits(
@@ -337,7 +631,16 @@ fn stream_symbol_hits(
     let pb = ProgressBar::new(total, c.on && !cfg.quiet, c.on);
     for tier in tiers {
         let before = results.len();
-        scan_symbol_bucket(tier, func_name, show_all, cfg, results, matched_paths, &pb)?;
+        let mut tier_hits = scan_symbol_bucket(tier, func_name, cfg, &pb);
+        tier_hits.sort_by(|a, b| {
+            a.dll_path
+                .to_ascii_lowercase()
+                .cmp(&b.dll_path.to_ascii_lowercase())
+        });
+        for hit in tier_hits {
+            matched_paths.insert(path_key(Path::new(&hit.dll_path)));
+            results.push(hit);
+        }
         if !show_all && results.len() > before {
             break;
         }
@@ -349,39 +652,40 @@ fn stream_symbol_hits(
 fn scan_symbol_bucket(
     all_paths: &[PathBuf],
     func_name: &str,
-    show_all: bool,
     cfg: &Config,
-    results: &mut Vec<LocateResult>,
-    matched_paths: &mut std::collections::HashSet<String>,
     pb: &ProgressBar,
-) -> Result<(), String> {
-    for dll_path in all_paths {
-        let label = dll_path.file_name().unwrap_or_default().to_string_lossy();
-        let raw = match std::fs::read(dll_path) {
-            Ok(r) => r,
-            Err(_) => {
-                pb.tick(&label);
-                continue;
-            }
-        };
-        let pe = match parse_pe(&raw) {
-            Ok(p) => p,
-            Err(_) => {
-                pb.tick(&label);
-                continue;
-            }
-        };
-        let dll_path_str = dll_path.to_string_lossy().to_string();
-        if let Some(rva) = load_pdb_symbol(
-            &dll_path_str,
-            func_name,
-            &cfg.sym_path,
-            &cfg.sym_server,
-            &cfg.pdb_file,
-            pe.image_base,
-            cfg.verbose,
-        ) {
-            let res = LocateResult {
+) -> Vec<LocateResult> {
+    all_paths
+        .par_iter()
+        .filter_map(|dll_path| {
+            let label = dll_path.file_name().unwrap_or_default().to_string_lossy();
+            let raw = match std::fs::read(dll_path) {
+                Ok(r) => r,
+                Err(_) => {
+                    pb.tick(&label);
+                    return None;
+                }
+            };
+            let pe = match parse_pe(&raw) {
+                Ok(p) => p,
+                Err(_) => {
+                    pb.tick(&label);
+                    return None;
+                }
+            };
+            let dll_path_str = dll_path.to_string_lossy().to_string();
+            let rva = load_pdb_symbol(
+                &dll_path_str,
+                func_name,
+                &cfg.sym_path,
+                &cfg.sym_server,
+                &cfg.pdb_file,
+                pe.image_base,
+                cfg.verbose,
+                cfg.reload,
+            );
+            pb.tick(&label);
+            rva.map(|rva| LocateResult {
                 dll: dll_path
                     .file_name()
                     .unwrap_or_default()
@@ -407,17 +711,9 @@ fn scan_symbol_bucket(
                 }),
                 kernel_component: String::new(),
                 kernel_symbol: String::new(),
-            };
-            matched_paths.insert(path_key(dll_path));
-            results.push(res);
-            pb.tick(&label);
-            if !show_all {
-                break;
-            }
-        }
-        pb.tick(&label);
-    }
-    Ok(())
+            })
+        })
+        .collect()
 }
 
 fn print_locate_result(w: &mut dyn Write, c: &Colors, r: &LocateResult) {

@@ -47,6 +47,9 @@ pub struct Cli {
     #[arg(long = "sym-server")]
     pub sym_server: Option<String>,
 
+    #[arg(long = "reload")]
+    pub reload: bool,
+
     #[arg(long = "no-pdb")]
     pub no_pdb: bool,
 
@@ -55,6 +58,9 @@ pub struct Cli {
 
     #[arg(long = "edrchk")]
     pub edrchk: bool,
+
+    #[arg(long = "unsafe-map-image")]
+    pub unsafe_map_image: bool,
 
     #[arg(long = "hookchk")]
     pub hookchk: bool,
@@ -239,9 +245,11 @@ pub struct Config {
     pub pdb_file: String,
     pub sym_path: String,
     pub sym_server: String,
+    pub reload: bool,
     pub no_pdb: bool,
     pub c_out: String,
     pub edrchk: bool,
+    pub unsafe_map_image: bool,
     pub hookchk: bool,
     pub intelli: bool,
 
@@ -309,9 +317,11 @@ impl Config {
             pdb_file: cli.pdb_file.clone().unwrap_or_default(),
             sym_path: cli.sym_path.clone().unwrap_or_default(),
             sym_server: cli.sym_server.clone().unwrap_or_default(),
+            reload: cli.reload,
             no_pdb: cli.no_pdb,
             c_out: cli.c_out.clone().unwrap_or_default(),
             edrchk: cli.edrchk,
+            unsafe_map_image: cli.unsafe_map_image,
             hookchk: cli.hookchk,
             intelli: cli.intelli,
             max_insns: cli.max_insns,

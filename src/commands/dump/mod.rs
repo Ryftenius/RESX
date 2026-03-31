@@ -149,6 +149,7 @@ pub fn run(
             &cfg.sym_server,
             &cfg.pdb_file,
             cfg.verbose,
+            cfg.reload,
         ) {
             Ok(symbols) => symbols,
             Err(err) => {
@@ -401,6 +402,7 @@ pub fn run(
             target_rva,
             &raw[file_off..],
             max_len,
+            cfg.unsafe_map_image,
         )?)
     } else {
         None
@@ -1146,6 +1148,7 @@ fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceImage> {
             &cfg.sym_server,
             &cfg.pdb_file,
             cfg.verbose,
+            cfg.reload,
         )
         .unwrap_or_default()
     };
@@ -1185,6 +1188,7 @@ fn resolve_kernel_symbol(
                 &cfg.pdb_file,
                 image.image_base,
                 cfg.verbose,
+                cfg.reload,
             ) {
                 return Some((rva, candidate));
             }
@@ -1976,6 +1980,7 @@ pub(crate) fn resolve_function(
             &cfg.pdb_file,
             image_base,
             cfg.verbose,
+            cfg.reload,
         ) {
             if !cfg.quiet {
                 writeln!(
@@ -2070,12 +2075,29 @@ fn print_edr_report(w: &mut dyn Write, edr: &EdrCheckResult, c: &Colors) {
     writeln!(w).ok();
     writeln!(w, "{}", c.bold(&c.b_blue("EDR / Hook Check:"))).ok();
     if !edr.in_memory_available {
-        writeln!(
-            w,
-            "{}",
-            c.warn("In-memory image unavailable for comparison")
-        )
-        .ok();
+        if edr.blocked_by_policy {
+            writeln!(
+                w,
+                "{}",
+                c.warn(
+                    "Comparison skipped: target image is not already loaded, and on-disk image mapping is disabled by policy"
+                )
+            )
+            .ok();
+            writeln!(
+                w,
+                "{}",
+                c.dim("  Use --unsafe-map-image only if you intentionally accept mapping an untrusted image into the current process")
+            )
+            .ok();
+        } else {
+            writeln!(
+                w,
+                "{}",
+                c.warn("In-memory image unavailable for comparison")
+            )
+            .ok();
+        }
         return;
     }
 
@@ -2128,6 +2150,11 @@ fn print_edr_report(w: &mut dyn Write, edr: &EdrCheckResult, c: &Colors) {
     )
     .ok();
     if edr.loaded_from_memory {
-        writeln!(w, "{}", c.dim("  Image was loaded for comparison")).ok();
+        writeln!(
+            w,
+            "{}",
+            c.warn("  Image was mapped into the current process for comparison")
+        )
+        .ok();
     }
 }

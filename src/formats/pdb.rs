@@ -1,10 +1,11 @@
 #[cfg(windows)]
 mod win {
     use crate::formats::pe::{parse_pe, read_u32};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::{c_void, CStr, CString};
     use std::path::{Path, PathBuf};
     use std::slice;
+    use std::sync::{Mutex, OnceLock};
 
     const DEFAULT_MS_SYMBOL_SERVER: &str = "http://msdl.microsoft.com/download/symbols";
     const IMAGE_DIRECTORY_ENTRY_DEBUG: usize = 6;
@@ -150,6 +151,7 @@ mod win {
     const SYM_TAG_DATA: u32 = 7;
     const SYM_TAG_PUBLIC: u32 = 10;
 
+    #[allow(clippy::too_many_arguments)]
     pub fn load_pdb_symbol(
         dll_path: &str,
         func_name: &str,
@@ -158,8 +160,33 @@ mod win {
         pdb_path: &str,
         image_base: u64,
         verbose: bool,
+        reload: bool,
     ) -> Option<u32> {
-        unsafe {
+        let lookup_key = pdb_lookup_cache_key(
+            dll_path, func_name, sym_path, sym_server, pdb_path, image_base,
+        );
+        if !reload {
+            if let Some(cached) = lookup_cache()
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&lookup_key).cloned())
+            {
+                return cached;
+            }
+            if let Some(cached_symbols) = symbol_cache().lock().ok().and_then(|cache| {
+                cache
+                    .get(&pdb_cache_key(dll_path, sym_path, sym_server, pdb_path))
+                    .cloned()
+            }) {
+                let cached = find_symbol_rva(&cached_symbols, func_name);
+                if let Ok(mut cache) = lookup_cache().lock() {
+                    cache.insert(lookup_key, cached);
+                }
+                return cached;
+            }
+        }
+
+        let result = unsafe {
             let lib = LoadLibraryA(c"dbghelp.dll".as_ptr() as *const u8);
             if lib.is_null() {
                 return None;
@@ -186,7 +213,8 @@ mod win {
 
             sym_set_options(0x00000002 | 0x00000004 | 0x00000010);
 
-            let resolved_pdb_path = resolve_pdb_path(dll_path, sym_server, pdb_path, verbose);
+            let resolved_pdb_path =
+                resolve_pdb_path(dll_path, sym_server, pdb_path, verbose, reload);
             let sp = build_search_path(dll_path, sym_path, sym_server, &resolved_pdb_path);
             if verbose {
                 eprintln!("  Symbol search path: {}", sp);
@@ -250,7 +278,11 @@ mod win {
                 return None;
             }
             Some((si.address - image_base) as u32)
+        };
+        if let Ok(mut cache) = lookup_cache().lock() {
+            cache.insert(lookup_key, result);
         }
+        result
     }
 
     pub fn load_pdb_symbols(
@@ -259,8 +291,20 @@ mod win {
         sym_server: &str,
         pdb_path: &str,
         verbose: bool,
+        reload: bool,
     ) -> Result<Vec<PdbSymbol>, String> {
-        unsafe {
+        let cache_key = pdb_cache_key(dll_path, sym_path, sym_server, pdb_path);
+        if !reload {
+            if let Some(cached) = symbol_cache()
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&cache_key).cloned())
+            {
+                return Ok(cached);
+            }
+        }
+
+        let result = unsafe {
             let lib = LoadLibraryA(c"dbghelp.dll".as_ptr() as *const u8);
             if lib.is_null() {
                 return Err("dbghelp.dll unavailable".to_owned());
@@ -288,7 +332,8 @@ mod win {
 
             sym_set_options(0x00000002 | 0x00000004 | 0x00000010);
 
-            let resolved_pdb_path = resolve_pdb_path(dll_path, sym_server, pdb_path, verbose);
+            let resolved_pdb_path =
+                resolve_pdb_path(dll_path, sym_server, pdb_path, verbose, reload);
             let sp = build_search_path(dll_path, sym_path, sym_server, &resolved_pdb_path);
             if verbose {
                 eprintln!("  Symbol search path: {}", sp);
@@ -352,7 +397,57 @@ mod win {
             out.sort_by(|a, b| a.rva.cmp(&b.rva).then_with(|| a.name.cmp(&b.name)));
             out.dedup_by(|a, b| a.rva == b.rva && a.name == b.name);
             Ok(out)
+        };
+        if let Ok(symbols) = &result {
+            if let Ok(mut cache) = symbol_cache().lock() {
+                cache.insert(cache_key, symbols.clone());
+            }
         }
+        result
+    }
+
+    fn symbol_cache() -> &'static Mutex<HashMap<String, Vec<PdbSymbol>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Vec<PdbSymbol>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn lookup_cache() -> &'static Mutex<HashMap<String, Option<u32>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Option<u32>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn pdb_cache_key(dll_path: &str, sym_path: &str, sym_server: &str, pdb_path: &str) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            dll_path.to_ascii_lowercase(),
+            sym_path.to_ascii_lowercase(),
+            sym_server.to_ascii_lowercase(),
+            pdb_path.to_ascii_lowercase()
+        )
+    }
+
+    fn pdb_lookup_cache_key(
+        dll_path: &str,
+        func_name: &str,
+        sym_path: &str,
+        sym_server: &str,
+        pdb_path: &str,
+        image_base: u64,
+    ) -> String {
+        format!(
+            "{}|{}|{}",
+            pdb_cache_key(dll_path, sym_path, sym_server, pdb_path),
+            image_base,
+            func_name.to_ascii_lowercase()
+        )
+    }
+
+    fn find_symbol_rva(symbols: &[PdbSymbol], func_name: &str) -> Option<u32> {
+        let want = func_name.to_ascii_lowercase();
+        symbols
+            .iter()
+            .find(|sym| sym.name.eq_ignore_ascii_case(&want))
+            .map(|sym| sym.rva)
     }
 
     unsafe extern "system" fn enum_symbol_cb(
@@ -542,12 +637,18 @@ mod win {
         }
     }
 
-    fn resolve_pdb_path(dll_path: &str, sym_server: &str, pdb_path: &str, verbose: bool) -> String {
+    fn resolve_pdb_path(
+        dll_path: &str,
+        sym_server: &str,
+        pdb_path: &str,
+        verbose: bool,
+        reload: bool,
+    ) -> String {
         if !pdb_path.is_empty() {
             return pdb_path.to_owned();
         }
 
-        match ensure_exact_pdb_cached(dll_path, sym_server, verbose) {
+        match ensure_exact_pdb_cached(dll_path, sym_server, verbose, reload) {
             Ok(Some(path)) => path,
             Ok(None) => String::new(),
             Err(err) => {
@@ -563,6 +664,7 @@ mod win {
         dll_path: &str,
         sym_server: &str,
         verbose: bool,
+        reload: bool,
     ) -> Result<Option<String>, String> {
         let raw =
             std::fs::read(dll_path).map_err(|e| format!("read image for debug info: {}", e))?;
@@ -579,7 +681,7 @@ mod win {
             .join(&info.pdb_name)
             .join(&info.guid_age)
             .join(&info.pdb_name);
-        if cache_path.is_file() {
+        if cache_path.is_file() && !reload {
             return Ok(Some(cache_path.to_string_lossy().into_owned()));
         }
 
@@ -888,6 +990,17 @@ mod win {
             }
         }
 
+        if let Ok(temp) = std::env::var("TEMP") {
+            let trimmed = temp.trim();
+            if !trimmed.is_empty() {
+                return Path::new(trimmed)
+                    .join("resx")
+                    .join("symbols")
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+
         r"C:\Symbols".to_owned()
     }
 
@@ -918,6 +1031,7 @@ pub fn load_pdb_symbol(
     _pdb_path: &str,
     _image_base: u64,
     _verbose: bool,
+    _reload: bool,
 ) -> Option<u32> {
     None
 }
@@ -940,6 +1054,7 @@ pub fn load_pdb_symbols(
     _sym_server: &str,
     _pdb_path: &str,
     _verbose: bool,
+    _reload: bool,
 ) -> Result<Vec<PdbSymbol>, String> {
     Err("PDB symbol enumeration is only supported on Windows".to_owned())
 }

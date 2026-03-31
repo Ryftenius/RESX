@@ -2,6 +2,7 @@
 pub struct EdrCheckResult {
     pub loaded_from_memory: bool,
     pub in_memory_available: bool,
+    pub blocked_by_policy: bool,
     pub compared_len: usize,
     pub modified: bool,
     pub disk_bytes: Vec<u8>,
@@ -34,11 +35,13 @@ mod win {
         target_rva: u32,
         disk_bytes: &[u8],
         compare_len: usize,
+        allow_image_mapping: bool,
     ) -> Result<EdrCheckResult, String> {
         if compare_len == 0 || disk_bytes.is_empty() {
             return Ok(EdrCheckResult {
                 loaded_from_memory: false,
                 in_memory_available: false,
+                blocked_by_policy: false,
                 compared_len: 0,
                 modified: false,
                 disk_bytes: Vec::new(),
@@ -52,6 +55,18 @@ mod win {
         let mut should_free = false;
         let mut module = unsafe { GetModuleHandleW(wide.as_ptr()) };
         if module.is_null() {
+            if !allow_image_mapping {
+                return Ok(EdrCheckResult {
+                    loaded_from_memory,
+                    in_memory_available: false,
+                    blocked_by_policy: true,
+                    compared_len: 0,
+                    modified: false,
+                    disk_bytes: disk_bytes[..compare_len.min(disk_bytes.len())].to_vec(),
+                    memory_bytes: Vec::new(),
+                    diff_offsets: Vec::new(),
+                });
+            }
             module = unsafe {
                 LoadLibraryExW(
                     wide.as_ptr(),
@@ -63,6 +78,7 @@ mod win {
                 return Ok(EdrCheckResult {
                     loaded_from_memory,
                     in_memory_available: false,
+                    blocked_by_policy: false,
                     compared_len: 0,
                     modified: false,
                     disk_bytes: disk_bytes[..compare_len.min(disk_bytes.len())].to_vec(),
@@ -97,6 +113,7 @@ mod win {
         Ok(EdrCheckResult {
             loaded_from_memory,
             in_memory_available: true,
+            blocked_by_policy: false,
             compared_len: len,
             modified: !diff_offsets.is_empty(),
             disk_bytes: disk,
@@ -122,10 +139,12 @@ pub fn check_prologue(
     _target_rva: u32,
     _disk_bytes: &[u8],
     _compare_len: usize,
+    _allow_image_mapping: bool,
 ) -> Result<EdrCheckResult, String> {
     Ok(EdrCheckResult {
         loaded_from_memory: false,
         in_memory_available: false,
+        blocked_by_policy: false,
         compared_len: 0,
         modified: false,
         disk_bytes: Vec::new(),

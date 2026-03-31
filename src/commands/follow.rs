@@ -191,6 +191,7 @@ fn resolve_target(
             &cfg.pdb_file,
             image_base,
             cfg.verbose,
+            cfg.reload,
         ) {
             if !cfg.quiet {
                 writeln!(

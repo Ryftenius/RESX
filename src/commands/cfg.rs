@@ -43,6 +43,7 @@ pub fn run(
             &cfg.sym_server,
             &cfg.pdb_file,
             cfg.verbose,
+            cfg.reload,
         )
         .unwrap_or_default()
     };
