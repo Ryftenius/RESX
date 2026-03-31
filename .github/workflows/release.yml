@@ -54,18 +54,33 @@ jobs:
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Update version tag to released commit
+      - name: Check whether version tag already exists on remote
+        id: release_state
+        shell: powershell
+        run: |
+          git fetch --tags origin
+          $existing = git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($existing)) {
+            "tag_exists=false" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            "tag_exists=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Create version tag
+        if: steps.release_state.outputs.tag_exists != 'true'
         shell: powershell
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${{ steps.version.outputs.tag }}" "${{ github.sha }}"
-          git push origin "refs/tags/${{ steps.version.outputs.tag }}" --force
+          git tag "${{ steps.version.outputs.tag }}" "${{ github.sha }}"
+          git push origin "refs/tags/${{ steps.version.outputs.tag }}"
 
       - name: Build release
+        if: steps.release_state.outputs.tag_exists != 'true'
         run: cargo build --release
 
       - name: Package artifacts
+        if: steps.release_state.outputs.tag_exists != 'true'
         shell: powershell
         run: |
           $artifactRoot = "dist"
@@ -81,6 +96,7 @@ jobs:
           }
 
       - name: Upload workflow artifacts
+        if: steps.release_state.outputs.tag_exists != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: resx-release-${{ steps.version.outputs.version }}
@@ -89,6 +105,7 @@ jobs:
             dist/*.sha256
 
       - name: Publish GitHub release
+        if: steps.release_state.outputs.tag_exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -97,3 +114,10 @@ jobs:
             dist/*.zip
             dist/*.sha256
           generate_release_notes: true
+          append_body: false
+
+      - name: Skip existing released version
+        if: steps.release_state.outputs.tag_exists == 'true'
+        shell: powershell
+        run: |
+          Write-Host "Release ${{ steps.version.outputs.tag }} already exists. Bump Cargo.toml version to publish a new release."
