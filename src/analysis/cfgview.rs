@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::disasm::{is_ret, Instruction};
 use crate::core::color::Colors;
+use crate::core::output::{apply_insn_color, highlight_symbolic_text};
 
 #[derive(Debug, Clone)]
 pub struct BlockEdge {
@@ -283,16 +284,22 @@ pub fn render_cfg_colored_with_edges(
                     .join(" ");
                 c.dim(&format!("{:<26}", raw))
             };
-            let text = c.b_white(&insn.text);
+            let mnemonic = apply_insn_color(insn, &format!("{:<10}", insn.mnemonic), c);
+            let operands = highlight_symbolic_text(&insn.operands, c);
             if insn.comment.is_empty() {
-                out.push_str(&format!("    {}  {}  {}\n", rva, bytes, text));
-            } else {
                 out.push_str(&format!(
-                    "    {}  {}  {}  {}\n",
-                    rva,
-                    bytes,
-                    text,
-                    c.green(&format!("; {}", insn.comment)),
+                    "    {}  {}  {} {}\n",
+                    rva, bytes, mnemonic, operands
+                ));
+            } else {
+                let comment = format!(
+                    "{}{}",
+                    c.dim("; "),
+                    highlight_symbolic_text(&insn.comment, c)
+                );
+                out.push_str(&format!(
+                    "    {}  {}  {} {}  {}\n",
+                    rva, bytes, mnemonic, operands, comment,
                 ));
             }
         }

@@ -1,6 +1,7 @@
 pub mod cfgview;
 pub mod disasm;
 pub mod edr;
+pub mod explain;
 pub mod follow;
 pub mod intelli;
 pub mod recomp;

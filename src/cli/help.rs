@@ -45,6 +45,7 @@ USAGE
 
   resx locate <funcname> [options]
   resx locate-sym <funcname> [options]
+  resx explain <name> [--prefix|--api] [options]
 
   resx yara <dll> <rule.yar> [options]
   resx update [options]
@@ -64,6 +65,7 @@ COMMANDS
   callers     Reverse-trace callers across the priority set.
   locate      Show export-backed matches in the priority list.
   locate-sym  Show export/symbol-backed matches in the priority list.
+  explain     Explain a prefix or API-style symbol name from the built-in glossary.
   yara        Scan a PE image with one or more YARA rules.
   update      Pull the latest version from the current git remote/branch.
   help        Show this help text.
@@ -82,6 +84,9 @@ DUMP / INTELLI OPTIONS
   --funcs                    show API call map: every CALL/JMP with its resolved target
   --funcs-depth <N>          recursively trace internal subs N levels deep (implies --funcs)
   --cfg text                 show a colour-coded basic control-flow graph
+  --explain                  explain the current dump target name with prefix/body glossary hints
+  --prefix                   force explain-mode prefix interpretation
+  --api                      force explain-mode API/symbol interpretation
   --follow-jmp               follow entry-point thunk (default: on)
   --no-follow-jmp            disable entry-point thunk following
   --rebase <addr>            compute rebased addresses
@@ -135,6 +140,9 @@ EXAMPLES
   resx priority
   resx locate NtOpenProcess --include-dir C:\Work\Drivers
   resx locate-sym NtOpenProcess --include-image .\mydriver.sys
+  resx explain Nt
+  resx explain NtQuerySystemInformation
+  resx dump ntoskrnl.exe NtQuerySystemInformation --explain
   resx syms .\J58.dll --pdb .\J58.pdb
   resx update
   resx intelli --example
@@ -160,6 +168,7 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "callers",
         "locate",
         "locate-sym",
+        "explain",
         "yara",
         "edrchk",
         "follow",
@@ -248,6 +257,10 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.push("--locate-sym".to_string());
             rewritten.extend(raw_args.iter().skip(2).cloned());
         }
+        "explain" => {
+            rewritten.push("--explain".to_string());
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+        }
         "yara" => {
             if raw_args.len() >= 4 {
                 rewritten.push(raw_args[2].clone());
@@ -330,6 +343,20 @@ LOCATE EXAMPLES
   resx locate NtOpenProcess --include-dir C:\Work\Drivers
   resx locate-sym RtlpHeapHandleError
   resx locate-sym NtOpenProcess --include-image .\mydriver.sys
+"#
+        }
+        "explain" => {
+            r#"
+EXPLAIN EXAMPLES
+  resx explain Nt
+  resx explain Zw
+  resx explain NtQuerySystemInformation
+  resx explain NtQuerySystemInformation --api --json
+  resx dump ntoskrnl.exe NtOpenProcess --explain
+
+NOTES
+  `explain` autodetects bare prefixes versus API-style symbols by default.
+  Use `--prefix` or `--api` only when you need to force one interpretation.
 "#
         }
         "priority" => {

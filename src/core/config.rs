@@ -224,6 +224,15 @@ pub struct Cli {
 
     #[arg(long = "update")]
     pub update: bool,
+
+    #[arg(long = "explain")]
+    pub explain: bool,
+
+    #[arg(long = "prefix")]
+    pub explain_prefix: bool,
+
+    #[arg(long = "api")]
+    pub explain_api: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -301,6 +310,9 @@ pub struct Config {
     pub filter_dll: String,
     pub locate: bool,
     pub locate_deep: bool,
+    pub explain: bool,
+    pub explain_prefix: bool,
+    pub explain_api: bool,
 }
 
 impl Config {
@@ -377,6 +389,9 @@ impl Config {
             filter_dll: cli.filter_dll.clone(),
             locate: cli.locate || cli.locate_deep,
             locate_deep: cli.locate_deep,
+            explain: cli.explain,
+            explain_prefix: cli.explain_prefix,
+            explain_api: cli.explain_api,
         }
     }
 

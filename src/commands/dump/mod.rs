@@ -1,13 +1,20 @@
+mod callmap;
 mod json;
+mod style;
+mod switchfmt;
 
-use iced_x86::{Mnemonic, OpKind, Register};
 use std::io::Write;
 use std::sync::OnceLock;
 
+use self::callmap::{
+    best_symbol_name_for_rva, print_api_calls, recover_local_switch_dispatch,
+    switch_dispatch_to_api_calls, QsiDispatcher,
+};
 use self::json::{
     hex_bytes, to_anomaly_json, to_edr_json, to_section_json, to_yara_json, ApiCallJson,
     FuncResult, InsnJson,
 };
+use self::switchfmt::{format_case_summary, format_target_symbol_spaced};
 use crate::analysis::cfgview::{
     detect_static_hook_indicators, render_cfg_colored_with_edges, render_cfg_text_with_edges,
     RecoveredIndirectEdge,
@@ -16,11 +23,13 @@ use crate::analysis::disasm::{
     collect_api_calls, disassemble_at, find_string_refs, find_xrefs, ApiCall, Instruction,
 };
 use crate::analysis::edr::{check_prologue, EdrCheckResult};
+use crate::analysis::explain::explain_symbol;
 use crate::analysis::intelli::{analyze_image, IntelliFinding};
 use crate::analysis::recomp::recomp_c;
 use crate::analysis::symbols::SymbolIndex;
 use crate::analysis::thunk::{follow_jmp_thunk, ThunkResolution};
 use crate::analysis::yara::scan_file;
+use crate::commands::explain::{config_mode as explain_mode, print_explain_text};
 use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::output::{
@@ -242,6 +251,7 @@ pub fn run(
                 hook_indicators: Vec::new(),
                 edrchk: None,
                 api_calls: Vec::new(),
+                explain: None,
             };
             let json = serde_json::to_string_pretty(&result).unwrap_or_default();
             writeln!(w, "{}", json).ok();
@@ -360,6 +370,11 @@ pub fn run(
         resolved_name = best_symbol_name_for_rva(&symbol_index, image_base, target_rva)
             .unwrap_or(resolved_name);
     }
+    let explain_result = if cfg.explain {
+        Some(explain_symbol(&resolved_name, explain_mode(cfg)))
+    } else {
+        None
+    };
 
     let edr_result = if cfg.edrchk {
         let max_len = insns
@@ -393,6 +408,11 @@ pub fn run(
     let recovered_cfg_edges = recovered_switch
         .as_ref()
         .map(|dispatch| to_cfg_edges(&insns, &dispatch.targets))
+        .unwrap_or_default();
+    // API calls synthesised from the switch-dispatch targets (merged later).
+    let switch_api_calls: Vec<ApiCall> = recovered_switch
+        .as_ref()
+        .map(|dispatch| switch_dispatch_to_api_calls(&insns, dispatch))
         .unwrap_or_default();
 
     if !cfg.json {
@@ -428,6 +448,9 @@ pub fn run(
                 ))
             )
             .ok();
+        }
+        if let Some(explain) = explain_result.as_ref() {
+            print_explain_text(w, explain, c, true);
         }
         print_insns(w, &insns, cfg, c);
         writeln!(
@@ -520,7 +543,20 @@ pub fn run(
     }
 
     let api_calls = if cfg.funcs_depth > 0 {
-        let calls = collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base);
+        let mut calls = collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base);
+
+        // Merge switch-dispatch targets.  First drop any unresolved register-indirect
+        // entry at the same JMP site (they are superseded by the resolved targets).
+        let switch_jmp_rvas: std::collections::HashSet<u32> =
+            switch_api_calls.iter().map(|c| c.rva).collect();
+        if !switch_jmp_rvas.is_empty() {
+            calls.retain(|c| {
+                !(c.is_indirect && c.target_rva == 0 && switch_jmp_rvas.contains(&c.rva))
+            });
+        }
+        calls.extend(switch_api_calls.iter().cloned());
+        calls.sort_by_key(|c| c.rva);
+
         if !cfg.json {
             print_api_calls(
                 w,
@@ -680,8 +716,11 @@ pub fn run(
                     dll: ac.dll.clone(),
                     is_import: ac.is_import,
                     is_indirect: ac.is_indirect,
+                    indirect_method: ac.indirect_method.clone(),
+                    switch_cases: ac.switch_cases.clone(),
                 })
                 .collect(),
+            explain: explain_result,
         };
         let json = serde_json::to_string_pretty(&result).unwrap_or_default();
         writeln!(w, "{}", json).ok();
@@ -725,842 +764,6 @@ fn count_dump_steps(cfg: &Config, only_metadata: bool, want_recomp: bool) -> usi
     total
 }
 
-/// 5-color DLL palette — excludes b_yellow/yellow (CALL/JMP), b_mag (Nt*/Zw*),
-/// and b_white (named internals) so each role stays visually distinct.
-fn dll_palette(c: &Colors, idx: usize, s: &str) -> String {
-    match idx % 5 {
-        0 => c.cyan(s),
-        1 => c.green(s),
-        2 => c.magenta(s),
-        3 => c.b_cyan(s),
-        _ => c.b_blue(s),
-    }
-}
-
-/// True for Nt*/Zw* Windows native-API names (syscall stubs, lowest UM layer).
-fn is_nt_api(label: &str) -> bool {
-    (label.starts_with("Nt") || label.starts_with("Zw"))
-        && label
-            .as_bytes()
-            .get(2)
-            .is_some_and(|b| b.is_ascii_uppercase())
-}
-
-/// Color the mnemonic: CALL → b_yellow, JMP → yellow  (matches disasm listing).
-fn color_kind(kind: &str, c: &Colors) -> String {
-    if kind == "call" {
-        c.b_yellow("CALL")
-    } else if kind == "syscall" {
-        c.b_red("SYSCALL")
-    } else {
-        c.yellow("JMP")
-    }
-}
-
-fn short_dll_name(name: &str) -> &str {
-    name.strip_suffix(".dll")
-        .or_else(|| name.strip_suffix(".DLL"))
-        .unwrap_or(name)
-}
-
-/// Colour a call target:
-///   Nt*/Zw* (any origin) → b_red    — syscall stub, highest visual priority; tag becomes [syscall]
-///   IAT import           → dim(dll.dll!) + palette-color(FuncName), one shade per DLL
-///   Named internal       → b_white   — resolved known symbol
-///   sub_XXXXXXXX         → yellow    — anonymous, address-only
-///   Indirect (call rax)  → dim       — unresolvable
-fn color_target(
-    call: &ApiCall,
-    c: &Colors,
-    dll_map: &mut std::collections::HashMap<String, usize>,
-) -> String {
-    let nt = is_nt_api(&call.label);
-    if call.is_import {
-        let dll_name = short_dll_name(&call.dll);
-        let key = dll_name.to_ascii_lowercase();
-        let n = dll_map.len();
-        let idx = *dll_map.entry(key).or_insert(n);
-        let func = if nt {
-            c.b_red(&call.label)
-        } else {
-            dll_palette(c, idx, &call.label)
-        };
-        format!("{}{}", c.dim(&format!("{}!", dll_name)), func)
-    } else if call.is_indirect {
-        c.dim(&call.label)
-    } else if nt {
-        c.b_red(&call.label)
-    } else if call.label.starts_with("sub_") {
-        c.yellow(&call.label)
-    } else {
-        c.b_white(&call.label)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_api_calls(
-    w: &mut dyn Write,
-    calls: &[ApiCall],
-    insns: &[Instruction],
-    func_name: &str,
-    c: &Colors,
-    raw: &[u8],
-    pe: &crate::formats::pe::PeFile,
-    symbol_index: &crate::analysis::symbols::SymbolIndex,
-    exports: &[Export],
-    arch: u32,
-    image_base: u64,
-    cfg: &Config,
-    root_rva: u32,
-) {
-    let synthetic_syscall = synthetic_syscall_call(insns, func_name);
-    let display_calls: Vec<ApiCall> = if let Some(call) = synthetic_syscall {
-        let mut merged = calls.to_vec();
-        if !merged.iter().any(|existing| {
-            existing.rva == call.rva && existing.label.eq_ignore_ascii_case(&call.label)
-        }) {
-            merged.push(call);
-        }
-        merged.sort_by_key(|call| call.rva);
-        merged
-    } else {
-        calls.to_vec()
-    };
-
-    writeln!(w).ok();
-    writeln!(
-        w,
-        "{}",
-        c.bold(&c.b_cyan(&format!(
-            "API Call Map for {}  [{} call site(s)]:",
-            func_name,
-            display_calls.len()
-        )))
-    )
-    .ok();
-
-    if display_calls.is_empty() {
-        writeln!(w, "{}", c.dim("  (no CALL/JMP targets found)")).ok();
-        return;
-    }
-
-    let mut visited = std::collections::HashSet::new();
-    visited.insert(root_rva);
-    // Shared DLL→color-index map so every level uses the same shade per DLL.
-    let mut dll_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let root_image = TraceImageView {
-        raw,
-        pe,
-        symbol_index,
-        exports,
-        arch,
-        image_base,
-    };
-
-    print_calls_recursive(
-        w,
-        &display_calls,
-        insns,
-        c,
-        &root_image,
-        cfg,
-        0,
-        &mut visited,
-        &mut dll_map,
-        "  ",
-    );
-}
-
-fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiCall> {
-    if !is_nt_api(func_name) {
-        return None;
-    }
-
-    let syscall_site = insns.iter().find(|insn| {
-        matches!(insn.iced.mnemonic(), Mnemonic::Syscall | Mnemonic::Sysenter)
-            || (insn.iced.mnemonic() == Mnemonic::Int && insn.iced.immediate8() == 0x2E)
-    })?;
-
-    Some(ApiCall {
-        rva: syscall_site.rva,
-        kind: "syscall".to_owned(),
-        target_rva: 0,
-        label: func_name.to_owned(),
-        dll: "ntdll.dll".to_owned(),
-        is_import: true,
-        is_indirect: false,
-    })
-}
-
-struct TraceImageView<'a> {
-    raw: &'a [u8],
-    pe: &'a crate::formats::pe::PeFile,
-    symbol_index: &'a crate::analysis::symbols::SymbolIndex,
-    exports: &'a [Export],
-    arch: u32,
-    image_base: u64,
-}
-
-struct LoadedTraceImage {
-    dll_name: String,
-    dll_path: String,
-    raw: Vec<u8>,
-    pe: crate::formats::pe::PeFile,
-    exports: Vec<Export>,
-    symbol_index: crate::analysis::symbols::SymbolIndex,
-    arch: u32,
-    image_base: u64,
-}
-
-impl LoadedTraceImage {
-    fn as_view(&self) -> TraceImageView<'_> {
-        TraceImageView {
-            raw: &self.raw,
-            pe: &self.pe,
-            symbol_index: &self.symbol_index,
-            exports: &self.exports,
-            arch: self.arch,
-            image_base: self.image_base,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_calls_recursive(
-    w: &mut dyn Write,
-    calls: &[ApiCall],
-    insns: &[Instruction],
-    c: &Colors,
-    image: &TraceImageView<'_>,
-    cfg: &Config,
-    depth: u32,
-    visited: &mut std::collections::HashSet<u32>,
-    dll_map: &mut std::collections::HashMap<String, usize>,
-    line_prefix: &str,
-) {
-    let last = calls.len().saturating_sub(1);
-    for (i, call) in calls.iter().enumerate() {
-        let is_last = i == last;
-        let branch = if is_last { "└──" } else { "├──" };
-        let syscall_target = resolve_syscall_trace_target(call, insns, cfg);
-
-        let can_recurse = !call.is_import
-            && !call.is_indirect
-            && call.target_rva != 0
-            && depth + 1 < cfg.funcs_depth
-            && !visited.contains(&call.target_rva);
-        let can_recurse_syscall = depth + 1 < cfg.funcs_depth && syscall_target.is_some();
-
-        let nt = is_nt_api(&call.label);
-        let tag = match (call.is_import, call.is_indirect, call.kind.as_str(), nt) {
-            (true, _, "jmp", true) => c.dim(" [syscall] [tail call]"),
-            (true, _, _, true) => c.dim(" [syscall]"),
-            (true, _, "jmp", false) => c.dim(" [import · tail call]"),
-            (true, _, _, false) => c.dim(" [import]"),
-            (_, true, _, _) => c.dim(" [indirect]"),
-            (_, _, "jmp", _) => c.dim(" [tail call]"),
-            _ => c.dim(" [internal]"),
-        };
-
-        let colored_target = color_target(call, c, dll_map);
-
-        writeln!(
-            w,
-            "{}{} {}  {}  {}{}",
-            line_prefix,
-            branch,
-            c.dim(&format!("0x{:X}", call.rva)),
-            color_kind(&call.kind, c),
-            colored_target,
-            tag,
-        )
-        .ok();
-
-        if let Some(target) = syscall_target.as_ref() {
-            let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
-            writeln!(
-                w,
-                "{}{} {}!{}",
-                detail_prefix,
-                c.dim("kernel:"),
-                c.cyan(short_dll_name(&target.image.dll_name)),
-                c.b_red(&target.symbol_name),
-            )
-            .ok();
-            if !target.classes.is_empty() {
-                let classes = target
-                    .classes
-                    .iter()
-                    .map(|v| format_class_value(*v))
-                    .collect::<Vec<_>>()
-                    .join("|");
-                writeln!(
-                    w,
-                    "{}{} {}",
-                    detail_prefix,
-                    c.dim("class :"),
-                    c.b_white(&classes)
-                )
-                .ok();
-            }
-        }
-
-        if can_recurse {
-            if let Some(file_off) = image.pe.rva_to_offset(call.target_rva) {
-                visited.insert(call.target_rva);
-                let mut sub_cfg = cfg.clone();
-                sub_cfg.max_insns = sub_cfg.max_insns.min(300);
-                if let Ok(sub_insns) = disassemble_at(
-                    image.raw,
-                    file_off,
-                    call.target_rva,
-                    image.arch,
-                    image.image_base,
-                    image.exports,
-                    Some(image.symbol_index),
-                    &sub_cfg,
-                ) {
-                    let sub_calls = collect_api_calls(
-                        &sub_insns,
-                        image.pe,
-                        image.raw,
-                        image.symbol_index,
-                        image.image_base,
-                    );
-                    if !sub_calls.is_empty() {
-                        let child_prefix =
-                            format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
-                        print_calls_recursive(
-                            w,
-                            &sub_calls,
-                            &sub_insns,
-                            c,
-                            image,
-                            cfg,
-                            depth + 1,
-                            visited,
-                            dll_map,
-                            &child_prefix,
-                        );
-                    }
-                }
-            }
-        } else if can_recurse_syscall {
-            let target = syscall_target.unwrap();
-            if let Some(file_off) = target.image.pe.rva_to_offset(target.rva) {
-                let mut sub_cfg = cfg.clone();
-                sub_cfg.max_insns = sub_cfg.max_insns.min(300);
-                if let Ok(sub_insns) = disassemble_at(
-                    &target.image.raw,
-                    file_off,
-                    target.rva,
-                    target.image.arch,
-                    target.image.image_base,
-                    &target.image.exports,
-                    Some(&target.image.symbol_index),
-                    &sub_cfg,
-                ) {
-                    let sub_calls = collect_api_calls(
-                        &sub_insns,
-                        &target.image.pe,
-                        &target.image.raw,
-                        &target.image.symbol_index,
-                        target.image.image_base,
-                    );
-                    if !sub_calls.is_empty() {
-                        let child_prefix =
-                            format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
-                        let kernel_view = target.image.as_view();
-                        print_calls_recursive(
-                            w,
-                            &sub_calls,
-                            &sub_insns,
-                            c,
-                            &kernel_view,
-                            cfg,
-                            depth + 1,
-                            visited,
-                            dll_map,
-                            &child_prefix,
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct SyscallTraceTarget {
-    image: LoadedTraceImage,
-    rva: u32,
-    symbol_name: String,
-    classes: Vec<u32>,
-}
-
-fn resolve_syscall_trace_target(
-    call: &ApiCall,
-    insns: &[Instruction],
-    cfg: &Config,
-) -> Option<SyscallTraceTarget> {
-    if !call.is_import || !is_nt_api(&call.label) {
-        return None;
-    }
-    let dll = call.dll.to_ascii_lowercase();
-    if !dll.eq("ntdll.dll") && !dll.eq("ntdll") {
-        return None;
-    }
-
-    for kernel_name in [
-        "ntoskrnl.exe",
-        "ntkrnlmp.exe",
-        "ntkrnlpa.exe",
-        "ntkrpamp.exe",
-    ] {
-        let Some(image) = load_trace_image(kernel_name, cfg) else {
-            continue;
-        };
-        if let Some((rva, symbol_name)) = resolve_kernel_symbol(&image, &call.label, cfg) {
-            if let Some(dispatch) = resolve_syscall_dispatch_target(call, insns, &image, rva, cfg) {
-                return Some(SyscallTraceTarget {
-                    image,
-                    rva: dispatch.rva,
-                    symbol_name: dispatch.symbol_name,
-                    classes: dispatch.classes,
-                });
-            }
-            return Some(SyscallTraceTarget {
-                image,
-                rva,
-                symbol_name,
-                classes: Vec::new(),
-            });
-        }
-    }
-
-    None
-}
-
-fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceImage> {
-    let dll_path = find_dll_path(name, cfg).ok()?;
-    let dll_name = dll_path.file_name()?.to_string_lossy().to_string();
-    let dll_path_str = dll_path.to_string_lossy().to_string();
-    let raw = std::fs::read(&dll_path).ok()?;
-    let pe = parse_pe(&raw).ok()?;
-    let exports = read_exports(&pe, &raw);
-    let pdb_symbols = if cfg.no_pdb {
-        Vec::new()
-    } else {
-        load_pdb_symbols(
-            &dll_path_str,
-            &cfg.sym_path,
-            &cfg.sym_server,
-            &cfg.pdb_file,
-            cfg.verbose,
-            cfg.reload,
-        )
-        .unwrap_or_default()
-    };
-    let symbol_index = SymbolIndex::from_exports_and_pdb(&exports, &pdb_symbols, pe.image_base);
-
-    Some(LoadedTraceImage {
-        dll_name,
-        dll_path: dll_path_str,
-        arch: pe.arch,
-        image_base: pe.image_base,
-        raw,
-        pe,
-        exports,
-        symbol_index,
-    })
-}
-
-fn resolve_kernel_symbol(
-    image: &LoadedTraceImage,
-    name: &str,
-    cfg: &Config,
-) -> Option<(u32, String)> {
-    for candidate in kernel_name_candidates(name) {
-        if let Some(export) = image
-            .exports
-            .iter()
-            .find(|e| e.name.eq_ignore_ascii_case(&candidate))
-        {
-            return Some((export.rva, export.name.clone()));
-        }
-        if !cfg.no_pdb {
-            if let Some(rva) = load_pdb_symbol(
-                &image.dll_path,
-                &candidate,
-                &cfg.sym_path,
-                &cfg.sym_server,
-                &cfg.pdb_file,
-                image.image_base,
-                cfg.verbose,
-                cfg.reload,
-            ) {
-                return Some((rva, candidate));
-            }
-        }
-    }
-    None
-}
-
-fn kernel_name_candidates(name: &str) -> Vec<String> {
-    let mut out = vec![name.to_owned()];
-    if let Some(rest) = name.strip_prefix("Nt") {
-        out.push(format!("Zw{}", rest));
-    } else if let Some(rest) = name.strip_prefix("Zw") {
-        out.push(format!("Nt{}", rest));
-    }
-    out
-}
-
-struct SyscallDispatchTarget {
-    rva: u32,
-    symbol_name: String,
-    classes: Vec<u32>,
-}
-
-fn resolve_syscall_dispatch_target(
-    call: &ApiCall,
-    caller_insns: &[Instruction],
-    kernel_image: &LoadedTraceImage,
-    syscall_rva: u32,
-    cfg: &Config,
-) -> Option<SyscallDispatchTarget> {
-    if !call.label.eq_ignore_ascii_case("NtQuerySystemInformation")
-        && !call.label.eq_ignore_ascii_case("ZwQuerySystemInformation")
-    {
-        return None;
-    }
-
-    let class_values =
-        infer_immediate_arg_values(caller_insns, call.rva, Register::ECX, Register::RCX);
-    if class_values.is_empty() {
-        return None;
-    }
-
-    let file_off = kernel_image.pe.rva_to_offset(syscall_rva)?;
-    let mut sub_cfg = cfg.clone();
-    sub_cfg.max_insns = 96;
-    let syscall_insns = disassemble_at(
-        &kernel_image.raw,
-        file_off,
-        syscall_rva,
-        kernel_image.arch,
-        kernel_image.image_base,
-        &kernel_image.exports,
-        Some(&kernel_image.symbol_index),
-        &sub_cfg,
-    )
-    .ok()?;
-
-    let dispatcher = parse_qsi_dispatcher(&syscall_insns)?;
-    let mut resolved: Vec<(u32, String, Vec<u32>)> = Vec::new();
-    for &class_value in &class_values {
-        if let Some(target_rva) = resolve_dispatch_rva(kernel_image, &dispatcher, class_value) {
-            let name = kernel_symbol_name(kernel_image, target_rva);
-            if let Some((_, _, classes)) =
-                resolved.iter_mut().find(|(rva, _, _)| *rva == target_rva)
-            {
-                classes.push(class_value);
-            } else {
-                resolved.push((target_rva, name, vec![class_value]));
-            }
-        }
-    }
-
-    if resolved.is_empty() {
-        return None;
-    }
-
-    let (rva, symbol_name, classes) = resolved[0].clone();
-    Some(SyscallDispatchTarget {
-        rva,
-        symbol_name,
-        classes,
-    })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct QsiDispatcher {
-    class_bias: u32,
-    max_index: u32,
-    index_table_rva: u32,
-    target_table_rva: u32,
-}
-
-fn parse_qsi_dispatcher(insns: &[Instruction]) -> Option<QsiDispatcher> {
-    let mut class_bias = None;
-    let mut max_index = None;
-    let mut index_table_rva = None;
-    let mut target_table_rva = None;
-    let mut saw_jump = false;
-
-    for insn in insns {
-        let iced = &insn.iced;
-        if let Some(bias) = extract_lea_sub_bias(iced) {
-            class_bias = Some(bias);
-        }
-        if iced.mnemonic() == Mnemonic::Cmp
-            && iced.op0_kind() == OpKind::Register
-            && iced.op0_register() == Register::EAX
-        {
-            max_index = immediate_value(iced);
-        }
-        if let Some(index_rva) = extract_index_table_rva(iced) {
-            index_table_rva = Some(index_rva);
-        }
-        if let Some(target_rva) = extract_target_table_rva(iced) {
-            target_table_rva = Some(target_rva);
-        }
-        if iced.mnemonic() == Mnemonic::Jmp && iced.op0_kind() == OpKind::Register {
-            saw_jump = true;
-        }
-    }
-
-    if !saw_jump {
-        return None;
-    }
-
-    Some(QsiDispatcher {
-        class_bias: class_bias?,
-        max_index: max_index?,
-        index_table_rva: index_table_rva?,
-        target_table_rva: target_table_rva?,
-    })
-}
-
-fn extract_lea_sub_bias(instr: &iced_x86::Instruction) -> Option<u32> {
-    if instr.mnemonic() == Mnemonic::Lea
-        && instr.op0_kind() == OpKind::Register
-        && matches!(instr.op0_register(), Register::EAX | Register::RAX)
-        && instr.op1_kind() == OpKind::Memory
-        && matches!(instr.memory_base(), Register::RCX | Register::ECX)
-        && instr.memory_index() == Register::None
-    {
-        let disp = instr.memory_displacement64() as i64;
-        if disp < 0 {
-            return Some((-disp) as u32);
-        }
-    }
-    if instr.mnemonic() == Mnemonic::Sub
-        && instr.op0_kind() == OpKind::Register
-        && matches!(instr.op0_register(), Register::EAX | Register::RAX)
-    {
-        return immediate_value(instr);
-    }
-    None
-}
-
-fn extract_index_table_rva(instr: &iced_x86::Instruction) -> Option<u32> {
-    if instr.mnemonic() != Mnemonic::Movzx
-        || instr.op0_kind() != OpKind::Register
-        || instr.op1_kind() != OpKind::Memory
-    {
-        return None;
-    }
-    if instr.op0_register() != Register::EAX
-        || instr.memory_base() != Register::RCX
-        || instr.memory_index() != Register::RAX
-    {
-        return None;
-    }
-    Some(instr.memory_displacement64() as u32)
-}
-
-fn extract_target_table_rva(instr: &iced_x86::Instruction) -> Option<u32> {
-    if instr.mnemonic() != Mnemonic::Mov
-        || instr.op0_kind() != OpKind::Register
-        || instr.op1_kind() != OpKind::Memory
-    {
-        return None;
-    }
-    if instr.memory_base() != Register::RCX
-        || instr.memory_index() != Register::RAX
-        || instr.memory_index_scale() != 4
-    {
-        return None;
-    }
-    Some(instr.memory_displacement64() as u32)
-}
-
-fn resolve_dispatch_rva(
-    image: &LoadedTraceImage,
-    dispatcher: &QsiDispatcher,
-    class_value: u32,
-) -> Option<u32> {
-    let adjusted = class_value.checked_sub(dispatcher.class_bias)?;
-    if adjusted > dispatcher.max_index {
-        return None;
-    }
-
-    let index_off = image
-        .pe
-        .rva_to_offset(dispatcher.index_table_rva.checked_add(adjusted)?)?;
-    let slot_index = *image.raw.get(index_off)? as u32;
-    let target_slot_rva = dispatcher
-        .target_table_rva
-        .checked_add(slot_index.checked_mul(4)?)?;
-    let target_off = image.pe.rva_to_offset(target_slot_rva)?;
-    let bytes = image.raw.get(target_off..target_off + 4)?;
-    let target_rva = u32::from_le_bytes(bytes.try_into().ok()?);
-    if target_rva == 0 {
-        return None;
-    }
-    Some(target_rva)
-}
-
-fn kernel_symbol_name(image: &LoadedTraceImage, target_rva: u32) -> String {
-    let target_va = image.image_base + target_rva as u64;
-    if let Some(hit) = image.symbol_index.lookup(target_va) {
-        if hit.displacement == 0 {
-            return hit.symbol.name;
-        }
-        return format!("{}+0x{:X}", hit.symbol.name, hit.displacement);
-    }
-    format!("sub_{:08X}", target_rva)
-}
-
-fn infer_immediate_arg_values(
-    insns: &[Instruction],
-    call_rva: u32,
-    arg32: Register,
-    arg64: Register,
-) -> Vec<u32> {
-    let Some(pos) = insns.iter().position(|insn| insn.rva == call_rva) else {
-        return Vec::new();
-    };
-    let mut values = Vec::new();
-
-    for insn in insns[..pos].iter().rev().take(16) {
-        match insn.iced.mnemonic() {
-            Mnemonic::Mov => {
-                if insn.iced.op0_kind() == OpKind::Register {
-                    let dst = insn.iced.op0_register();
-                    if dst == arg32 || dst == arg64 {
-                        if let Some(value) = immediate_value(&insn.iced) {
-                            values.push(value);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            Mnemonic::Xor => {
-                if insn.iced.op0_kind() == OpKind::Register
-                    && insn.iced.op1_kind() == OpKind::Register
-                    && insn.iced.op0_register() == insn.iced.op1_register()
-                {
-                    let dst = insn.iced.op0_register();
-                    if dst == arg32 || dst == arg64 {
-                        values.push(0);
-                    }
-                }
-            }
-            Mnemonic::Jne
-            | Mnemonic::Je
-            | Mnemonic::Ja
-            | Mnemonic::Jae
-            | Mnemonic::Jb
-            | Mnemonic::Jbe => {}
-            _ => {}
-        }
-    }
-
-    values.sort_unstable();
-    values.dedup();
-    values
-}
-
-fn immediate_value(instr: &iced_x86::Instruction) -> Option<u32> {
-    match instr.op1_kind() {
-        OpKind::Immediate8 => Some(instr.immediate8to32() as u32),
-        OpKind::Immediate16 => Some(instr.immediate16() as u32),
-        OpKind::Immediate32 => Some(instr.immediate32()),
-        OpKind::Immediate32to64 => Some(instr.immediate32to64() as u32),
-        OpKind::Immediate64 => Some(instr.immediate64() as u32),
-        _ => None,
-    }
-}
-
-fn format_class_value(value: u32) -> String {
-    format!("0x{:X}", value)
-}
-
-fn best_symbol_name_for_rva(
-    symbol_index: &SymbolIndex,
-    image_base: u64,
-    rva: u32,
-) -> Option<String> {
-    let va = image_base + rva as u64;
-    let hit = symbol_index.lookup(va)?;
-    if hit.displacement == 0 {
-        return Some(hit.symbol.name);
-    }
-    Some(format!("{}+0x{:X}", hit.symbol.name, hit.displacement))
-}
-
-fn recover_local_switch_dispatch(
-    insns: &[Instruction],
-    raw: &[u8],
-    pe: &crate::formats::pe::PeFile,
-    symbol_index: &SymbolIndex,
-    image_base: u64,
-) -> Option<RecoveredSwitchDispatch> {
-    let dispatcher = parse_qsi_dispatcher(insns)?;
-    let mut grouped: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
-
-    for class_value in
-        dispatcher.class_bias..=dispatcher.class_bias.saturating_add(dispatcher.max_index)
-    {
-        let Some(target_rva) = resolve_dispatch_rva_local(raw, pe, &dispatcher, class_value) else {
-            continue;
-        };
-        grouped.entry(target_rva).or_default().push(class_value);
-    }
-
-    let targets = grouped
-        .into_iter()
-        .map(|(target_rva, classes)| RecoveredSwitchTarget {
-            target_rva,
-            symbol_name: best_symbol_name_for_rva(symbol_index, image_base, target_rva)
-                .unwrap_or_else(|| format!("sub_{:08X}", target_rva)),
-            classes,
-        })
-        .collect();
-
-    Some(RecoveredSwitchDispatch {
-        dispatcher,
-        targets,
-    })
-}
-
-fn resolve_dispatch_rva_local(
-    raw: &[u8],
-    pe: &crate::formats::pe::PeFile,
-    dispatcher: &QsiDispatcher,
-    class_value: u32,
-) -> Option<u32> {
-    let adjusted = class_value.checked_sub(dispatcher.class_bias)?;
-    if adjusted > dispatcher.max_index {
-        return None;
-    }
-
-    let index_off = pe.rva_to_offset(dispatcher.index_table_rva.checked_add(adjusted)?)?;
-    let slot_index = *raw.get(index_off)? as u32;
-    let target_slot_rva = dispatcher
-        .target_table_rva
-        .checked_add(slot_index.checked_mul(4)?)?;
-    let target_off = pe.rva_to_offset(target_slot_rva)?;
-    let bytes = raw.get(target_off..target_off + 4)?;
-    let target_rva = u32::from_le_bytes(bytes.try_into().ok()?);
-    if target_rva == 0 {
-        return None;
-    }
-    Some(target_rva)
-}
-
 fn to_cfg_edges(
     insns: &[Instruction],
     recovered_switch: &[RecoveredSwitchTarget],
@@ -1585,135 +788,16 @@ fn to_cfg_edges(
         .collect()
 }
 
-fn print_switch_map(
-    w: &mut dyn Write,
-    dispatch: &RecoveredSwitchDispatch,
-    semantics: Option<&SwitchSemanticInfo>,
-    c: &Colors,
-) {
-    writeln!(w, "\n{}", c.bold(&c.b_mag("Switch Map:"))).ok();
-    if let Some(sem) = semantics {
-        writeln!(
-            w,
-            "  {} {}",
-            c.dim("Selector :"),
-            c.cyan(&format!(
-                "{} ({})",
-                sem.selector_param.name, sem.selector_enum.type_name
-            )),
-        )
-        .ok();
-        writeln!(
-            w,
-            "  {} {}",
-            c.dim("Params   :"),
-            c.cyan(&sem.params.len().to_string())
-        )
-        .ok();
-        let params = sem
-            .params
-            .iter()
-            .map(|p| format!("{} {}", p.type_name, p.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !params.is_empty() {
-            writeln!(w, "  {} {}", c.dim("Prototype:"), c.b_white(&params)).ok();
-        }
-    }
-    writeln!(
-        w,
-        "  {} {}  {} {}  {} {}",
-        c.dim("Bias     :"),
-        c.cyan(&format_class_value(dispatch.dispatcher.class_bias)),
-        c.dim("Max      :"),
-        c.cyan(&format_class_value(dispatch.dispatcher.max_index)),
-        c.dim("Targets  :"),
-        c.cyan(&dispatch.targets.len().to_string())
-    )
-    .ok();
-    writeln!(
-        w,
-        "  {} {}",
-        c.dim("Remap    :"),
-        c.cyan(&format!(
-            "RVA 0x{:08X}",
-            dispatch.dispatcher.index_table_rva
-        )),
-    )
-    .ok();
-    writeln!(
-        w,
-        "  {} {}",
-        c.dim("Table    :"),
-        c.cyan(&format!(
-            "RVA 0x{:08X}",
-            dispatch.dispatcher.target_table_rva
-        ))
-    )
-    .ok();
-    writeln!(w).ok();
-    for target in &dispatch.targets {
-        writeln!(
-            w,
-            "  {}  {}",
-            c.b_white(&target.symbol_name),
-            c.dim(&format!("[RVA 0x{:08X}]", target.target_rva))
-        )
-        .ok();
-        let case_text =
-            format_case_values_with_names(&target.classes, semantics.map(|s| &s.selector_enum));
-        for (idx, line) in wrap_cases(&case_text, 96).iter().enumerate() {
-            let prefix = if idx == 0 {
-                "    When  : "
-            } else {
-                "            "
-            };
-            writeln!(w, "{}{}", prefix, c.cyan(line)).ok();
-        }
-        writeln!(w).ok();
-    }
-}
-
-fn format_case_summary(classes: &[u32]) -> String {
-    let preview = summarize_case_values(classes, 4);
-    format!("{} case(s): {}", classes.len(), preview)
-}
-
-fn format_case_values(classes: &[u32]) -> String {
-    let mut parts = Vec::new();
-    let mut i = 0usize;
-    while i < classes.len() {
-        let start = classes[i];
-        let mut end = start;
-        while i + 1 < classes.len() && classes[i + 1] == end + 1 {
-            i += 1;
-            end = classes[i];
-        }
-        if start == end {
-            parts.push(format_class_value(start));
-        } else {
-            parts.push(format!(
-                "{}..{}",
-                format_class_value(start),
-                format_class_value(end)
-            ));
-        }
-        i += 1;
-    }
-    parts.join(", ")
-}
-
-fn format_case_values_with_names(classes: &[u32], header_enum: Option<&HeaderEnum>) -> String {
+fn case_value_lines(classes: &[u32], header_enum: Option<&HeaderEnum>) -> Vec<String> {
     let Some(header_enum) = header_enum else {
-        return format_case_values(classes);
+        return case_value_lines_plain(classes);
     };
-
-    let mut parts = Vec::new();
+    let mut lines = Vec::new();
     let mut i = 0usize;
     while i < classes.len() {
         let value = classes[i];
         if let Some(name) = header_enum.members.get(&value) {
-            parts.push(format!("{} ({})", name, format_class_value(value)));
+            lines.push(format!("{} (0x{:X})", name, value));
             i += 1;
         } else {
             let start = value;
@@ -1727,60 +811,138 @@ fn format_case_values_with_names(classes: &[u32], header_enum: Option<&HeaderEnu
                 end = classes[i];
             }
             if start == end {
-                parts.push(format_class_value(start));
+                lines.push(format!("0x{:02X}", start));
             } else {
-                parts.push(format!(
-                    "{}..{}",
-                    format_class_value(start),
-                    format_class_value(end)
-                ));
+                lines.push(format!("0x{:02X}..0x{:02X}", start, end));
             }
             i += 1;
         }
     }
-    parts.join(", ")
+    lines
 }
 
-fn summarize_case_values(classes: &[u32], limit: usize) -> String {
-    let values = format_case_values(classes);
-    let parts: Vec<&str> = values.split(", ").collect();
-    if parts.len() <= limit {
-        values
-    } else {
-        format!(
-            "{}, +{} more",
-            parts[..limit].join(", "),
-            parts.len() - limit
+fn case_value_lines_plain(classes: &[u32]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut i = 0usize;
+    while i < classes.len() {
+        let start = classes[i];
+        let mut end = start;
+        while i + 1 < classes.len() && classes[i + 1] == end + 1 {
+            i += 1;
+            end = classes[i];
+        }
+        if start == end {
+            lines.push(format!("0x{:02X}", start));
+        } else {
+            lines.push(format!("0x{:02X}..0x{:02X}", start, end));
+        }
+        i += 1;
+    }
+    lines
+}
+
+fn print_switch_map(
+    w: &mut dyn Write,
+    dispatch: &RecoveredSwitchDispatch,
+    semantics: Option<&SwitchSemanticInfo>,
+    c: &Colors,
+) {
+    writeln!(w, "\n{}", c.bold(&c.b_mag("Switch Map"))).ok();
+    writeln!(w, "{}", c.dim("----------")).ok();
+    writeln!(w).ok();
+
+    if let Some(sem) = semantics {
+        writeln!(
+            w,
+            "{}  {}",
+            c.dim("Selector  :"),
+            c.cyan(&format!(
+                "{} ({})",
+                sem.selector_param.name, sem.selector_enum.type_name
+            )),
         )
+        .ok();
+        writeln!(
+            w,
+            "{}  {}",
+            c.dim("Params    :"),
+            c.cyan(&sem.params.len().to_string()),
+        )
+        .ok();
+        writeln!(w, "{}", c.dim("Prototype :")).ok();
+        let last = sem.params.len().saturating_sub(1);
+        for (idx, p) in sem.params.iter().enumerate() {
+            let suffix = if idx < last { "," } else { "" };
+            writeln!(
+                w,
+                "    {}{}",
+                c.b_white(&format!("{} {}", p.type_name, p.name)),
+                c.dim(suffix),
+            )
+            .ok();
+        }
+        writeln!(w).ok();
     }
-}
 
-fn wrap_cases(s: &str, width: usize) -> Vec<String> {
-    if s.len() <= width {
-        return vec![s.to_owned()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for part in s.split(", ") {
-        let candidate_len = if current.is_empty() {
-            part.len()
-        } else {
-            current.len() + 2 + part.len()
-        };
-        if !current.is_empty() && candidate_len > width {
-            out.push(current);
-            current = part.to_owned();
-        } else {
-            if !current.is_empty() {
-                current.push_str(", ");
-            }
-            current.push_str(part);
+    writeln!(
+        w,
+        "{}  {}",
+        c.dim("Bias      :"),
+        c.cyan(&format!("0x{:X}", dispatch.dispatcher.class_bias)),
+    )
+    .ok();
+    writeln!(
+        w,
+        "{}  {}",
+        c.dim("Max       :"),
+        c.cyan(&format!("0x{:X}", dispatch.dispatcher.max_index)),
+    )
+    .ok();
+    writeln!(
+        w,
+        "{}  {}",
+        c.dim("Targets   :"),
+        c.cyan(&dispatch.targets.len().to_string()),
+    )
+    .ok();
+    writeln!(w).ok();
+    writeln!(
+        w,
+        "{}  {}",
+        c.dim("Remap     :"),
+        c.cyan(&format!(
+            "RVA 0x{:08X}",
+            dispatch.dispatcher.index_table_rva
+        )),
+    )
+    .ok();
+    writeln!(
+        w,
+        "{}  {}",
+        c.dim("Table     :"),
+        c.cyan(&format!(
+            "RVA 0x{:08X}",
+            dispatch.dispatcher.target_table_rva
+        )),
+    )
+    .ok();
+
+    for target in &dispatch.targets {
+        writeln!(w).ok();
+        writeln!(w).ok();
+        writeln!(
+            w,
+            "{}  {}",
+            c.b_white(&format_target_symbol_spaced(&target.symbol_name)),
+            c.dim(&format!("[RVA 0x{:08X}]", target.target_rva)),
+        )
+        .ok();
+        writeln!(w, "{}", c.dim("When :")).ok();
+        for line in case_value_lines(&target.classes, semantics.map(|s| &s.selector_enum)) {
+            writeln!(w, "    {}", c.cyan(&line)).ok();
         }
     }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    out
+    writeln!(w).ok();
 }
 
 fn load_switch_semantics(function_name: &str) -> Option<SwitchSemanticInfo> {

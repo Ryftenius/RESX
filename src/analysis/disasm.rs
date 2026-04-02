@@ -360,11 +360,122 @@ pub struct ApiCall {
     pub dll: String,     // non-empty for IAT imports
     pub is_import: bool,
     pub is_indirect: bool,
+    /// How the indirect target was seen/resolved, e.g. "rax ← IAT [rip+0x1234]".
+    /// None for direct (non-indirect) calls.
+    pub indirect_method: Option<String>,
+    /// Selector values that route to this switch-dispatch target.
+    /// Empty for non-switch entries.  Printed on a `when:` sub-line.
+    pub switch_cases: Vec<u32>,
+}
+
+/// Short lowercase name for a register, normalized to 64-bit form.
+fn register_short_name(reg: Register) -> String {
+    format!("{:?}", reg.full_register()).to_lowercase()
+}
+
+/// Describes how an indirect register's value originated (backward dataflow, up to 16 insns).
+struct RegSource {
+    label: String,
+    dll: String,
+    is_import: bool,
+    /// Human-readable description of how the register was loaded, e.g. "rax ← IAT [rip+0x1234]".
+    method: String,
+    target_rva: u32,
+}
+
+/// Scan backwards from `call_idx` looking for the most recent def of `target_reg`.
+/// Handles:
+///   - `mov reg, [rip+rel32]` or `mov reg, [abs]`  → IAT resolution attempt
+///   - `add reg, other`                             → returns None (table-dispatch, handled upstream)
+///   - Anything else                                → returns None
+fn track_indirect_register(
+    insns: &[Instruction],
+    call_idx: usize,
+    target_reg: Register,
+    image_base: u64,
+    pe: &PeFile,
+    raw: &[u8],
+) -> Option<RegSource> {
+    use iced_x86::Mnemonic;
+    let full_target = target_reg.full_register();
+
+    for insn in insns[..call_idx].iter().rev().take(16) {
+        if insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Register {
+            continue;
+        }
+        let dst = insn.iced.op0_register().full_register();
+        if dst != full_target {
+            continue;
+        }
+
+        return match insn.iced.mnemonic() {
+            Mnemonic::Mov if insn.iced.op1_kind() == OpKind::Memory => {
+                let slot_va = if insn.iced.memory_base() == Register::RIP
+                    || insn.iced.memory_base() == Register::EIP
+                {
+                    insn.iced.ip_rel_memory_address()
+                } else if insn.iced.memory_base() == Register::None
+                    && insn.iced.memory_index() == Register::None
+                {
+                    insn.iced.memory_displacement64()
+                } else {
+                    // indexed or based memory — too complex to follow here
+                    return None;
+                };
+
+                let load_desc = if insn.iced.memory_base() == Register::RIP
+                    || insn.iced.memory_base() == Register::EIP
+                {
+                    format!("[rip+0x{:X}]", insn.iced.memory_displacement64())
+                } else {
+                    format!("[0x{:X}]", slot_va)
+                };
+                let reg_name = register_short_name(target_reg);
+
+                if slot_va != 0 && slot_va >= image_base {
+                    let slot_rva = (slot_va - image_base) as u32;
+                    if let Some((dll, func)) =
+                        crate::formats::pe::resolve_iat_slot(pe, raw, slot_rva)
+                    {
+                        return Some(RegSource {
+                            label: func,
+                            dll,
+                            is_import: true,
+                            method: format!("{reg_name} ← {load_desc} (IAT)"),
+                            target_rva: 0,
+                        });
+                    }
+                }
+                // Memory load but not a recognised IAT slot.
+                Some(RegSource {
+                    label: format!("[{reg_name} ← {load_desc}]"),
+                    dll: String::new(),
+                    is_import: false,
+                    method: format!("{reg_name} ← {load_desc} (ptr)"),
+                    target_rva: 0,
+                })
+            }
+            // ADD modifying the target register is the tail of a table-dispatch sequence
+            // (e.g. `add r9, rcx`).  The switch-dispatch path handles those; bail here.
+            Mnemonic::Add => None,
+            // LEA usually loads a table base, not a call target.
+            Mnemonic::Lea => None,
+            // Any other def of the register — stop.
+            _ => None,
+        };
+    }
+
+    None
 }
 
 /// Walk `insns` and resolve every CALL/JMP to its target name.
-/// Handles direct calls (using the symbol index) and indirect IAT calls
-/// (using `resolve_iat_slot`).
+/// Handles direct calls (using the symbol index), indirect IAT calls
+/// (`resolve_iat_slot`), and register-indirect calls (backward register tracking).
+///
+/// Register-indirect *JMPs* that cannot be resolved here are **skipped** — their
+/// targets are resolved by the switch-dispatch path in the caller and merged in
+/// afterwards.  Register-indirect *CALLs* that cannot be resolved are always
+/// emitted so the caller has full visibility of every call site.
 pub fn collect_api_calls(
     insns: &[Instruction],
     pe: &PeFile,
@@ -374,7 +485,7 @@ pub fn collect_api_calls(
 ) -> Vec<ApiCall> {
     let mut results = Vec::new();
 
-    for insn in insns {
+    for (idx, insn) in insns.iter().enumerate() {
         if !insn.is_call && !insn.is_jmp {
             continue;
         }
@@ -396,6 +507,8 @@ pub fn collect_api_calls(
                 dll: String::new(),
                 is_import: false,
                 is_indirect: false,
+                indirect_method: None,
+                switch_cases: Vec::new(),
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
             // Indirect call/jmp — most commonly `call [rip+rel32]` through the IAT.
@@ -414,6 +527,13 @@ pub fn collect_api_calls(
             if slot_va != 0 && slot_va >= image_base {
                 let slot_rva = (slot_va - image_base) as u32;
                 if let Some((dll, func)) = crate::formats::pe::resolve_iat_slot(pe, raw, slot_rva) {
+                    let iat_method = if insn.iced.memory_base() == Register::RIP
+                        || insn.iced.memory_base() == Register::EIP
+                    {
+                        format!("IAT [rip+0x{:X}]", insn.iced.memory_displacement64())
+                    } else {
+                        format!("IAT [0x{:X}]", slot_va)
+                    };
                     results.push(ApiCall {
                         rva: insn.rva,
                         kind,
@@ -422,6 +542,8 @@ pub fn collect_api_calls(
                         dll,
                         is_import: true,
                         is_indirect: true,
+                        indirect_method: Some(iat_method),
+                        switch_cases: Vec::new(),
                     });
                     continue;
                 }
@@ -433,6 +555,13 @@ pub fn collect_api_calls(
             } else {
                 format!("[{}]", insn.operands)
             };
+            let mem_method = if insn.iced.memory_base() == Register::RIP
+                || insn.iced.memory_base() == Register::EIP
+            {
+                format!("[rip+0x{:X}]", insn.iced.memory_displacement64())
+            } else {
+                format!("[{}]", insn.operands)
+            };
             results.push(ApiCall {
                 rva: insn.rva,
                 kind,
@@ -441,9 +570,44 @@ pub fn collect_api_calls(
                 dll: String::new(),
                 is_import: false,
                 is_indirect: true,
+                indirect_method: Some(mem_method),
+                switch_cases: Vec::new(),
             });
+        } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Register {
+            // Register-indirect call/jmp: `call rax`, `jmp r9`, etc.
+            // Attempt to resolve by scanning backwards for the register's source.
+            let reg = insn.iced.op0_register();
+            let reg_name = register_short_name(reg);
+
+            if let Some(src) = track_indirect_register(insns, idx, reg, image_base, pe, raw) {
+                results.push(ApiCall {
+                    rva: insn.rva,
+                    kind,
+                    target_rva: src.target_rva,
+                    label: src.label,
+                    dll: src.dll,
+                    is_import: src.is_import,
+                    is_indirect: true,
+                    indirect_method: Some(src.method),
+                    switch_cases: Vec::new(),
+                });
+            } else if insn.is_call {
+                // Unresolved CALL via register — always emit so the call site is visible.
+                results.push(ApiCall {
+                    rva: insn.rva,
+                    kind,
+                    target_rva: 0,
+                    label: format!("[via {reg_name}]"),
+                    dll: String::new(),
+                    is_import: false,
+                    is_indirect: true,
+                    indirect_method: Some(format!("unresolved register {reg_name}")),
+                    switch_cases: Vec::new(),
+                });
+            }
+            // Unresolved JMP via register: skip here — the switch-dispatch path in
+            // the caller resolves and merges those targets separately.
         }
-        // else: call_target==0 and not a memory operand (e.g. `call rax`) — skip
     }
 
     results

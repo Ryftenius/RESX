@@ -222,7 +222,7 @@ impl StageProgress {
     }
 }
 
-fn apply_insn_color(insn: &Instruction, s: &str, c: &Colors) -> String {
+pub(crate) fn apply_insn_color(insn: &Instruction, s: &str, c: &Colors) -> String {
     let m = insn.iced.mnemonic();
     if insn.bytes.len() == 1 && insn.bytes[0] == 0xCC {
         return c.dim(s);
@@ -272,6 +272,168 @@ fn apply_insn_color(insn: &Instruction, s: &str, c: &Colors) -> String {
     c.b_white(s)
 }
 
+pub(crate) fn highlight_symbolic_text(text: &str, c: &Colors) -> String {
+    let mut out = String::new();
+    let mut token = String::new();
+
+    for ch in text.chars() {
+        if is_symbol_char(ch) {
+            token.push(ch);
+            continue;
+        }
+        if !token.is_empty() {
+            out.push_str(&highlight_symbol_token(&token, c));
+            token.clear();
+        }
+        out.push(ch);
+    }
+
+    if !token.is_empty() {
+        out.push_str(&highlight_symbol_token(&token, c));
+    }
+
+    out
+}
+
+fn is_symbol_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '!' | '?' | '@' | '$' | '.' | '+' | '-')
+}
+
+#[derive(Clone, Copy)]
+struct SymbolStyle {
+    prefix: &'static str,
+    colorize: fn(&Colors, &str) -> String,
+}
+
+fn subsystem_symbol_style(label: &str) -> Option<SymbolStyle> {
+    const STYLES: &[SymbolStyle] = &[
+        SymbolStyle {
+            prefix: "FsRtl",
+            colorize: Colors::b_cyan,
+        },
+        SymbolStyle {
+            prefix: "Psp",
+            colorize: Colors::green,
+        },
+        SymbolStyle {
+            prefix: "Sep",
+            colorize: Colors::b_mag,
+        },
+        SymbolStyle {
+            prefix: "Cmp",
+            colorize: Colors::magenta,
+        },
+        SymbolStyle {
+            prefix: "Rtl",
+            colorize: Colors::cyan,
+        },
+        SymbolStyle {
+            prefix: "Etw",
+            colorize: Colors::green,
+        },
+        SymbolStyle {
+            prefix: "Hal",
+            colorize: Colors::yellow,
+        },
+        SymbolStyle {
+            prefix: "Ke",
+            colorize: Colors::b_blue,
+        },
+        SymbolStyle {
+            prefix: "Ki",
+            colorize: Colors::b_blue,
+        },
+        SymbolStyle {
+            prefix: "Mm",
+            colorize: Colors::b_cyan,
+        },
+        SymbolStyle {
+            prefix: "Cm",
+            colorize: Colors::magenta,
+        },
+        SymbolStyle {
+            prefix: "Io",
+            colorize: Colors::b_yellow,
+        },
+        SymbolStyle {
+            prefix: "Po",
+            colorize: Colors::yellow,
+        },
+        SymbolStyle {
+            prefix: "Cc",
+            colorize: Colors::cyan,
+        },
+        SymbolStyle {
+            prefix: "Ex",
+            colorize: Colors::green,
+        },
+        SymbolStyle {
+            prefix: "Ps",
+            colorize: Colors::b_cyan,
+        },
+        SymbolStyle {
+            prefix: "Se",
+            colorize: Colors::b_mag,
+        },
+        SymbolStyle {
+            prefix: "Ob",
+            colorize: Colors::b_white,
+        },
+        SymbolStyle {
+            prefix: "Base",
+            colorize: Colors::b_cyan,
+        },
+    ];
+
+    STYLES.iter().copied().find(|style| {
+        label.starts_with(style.prefix)
+            && label
+                .as_bytes()
+                .get(style.prefix.len())
+                .is_some_and(|b| b.is_ascii_uppercase())
+    })
+}
+
+fn is_nt_symbol(label: &str) -> bool {
+    (label.starts_with("Nt") || label.starts_with("Zw"))
+        && label
+            .as_bytes()
+            .get(2)
+            .is_some_and(|b| b.is_ascii_uppercase())
+}
+
+fn looks_named_symbol(label: &str) -> bool {
+    label.len() > 3
+        && label.chars().any(|ch| ch.is_ascii_uppercase())
+        && label.chars().any(|ch| ch.is_ascii_lowercase())
+}
+
+fn highlight_symbol_token(token: &str, c: &Colors) -> String {
+    if let Some((dll, sym)) = token.split_once('!') {
+        let right = highlight_symbol_token(sym, c);
+        return format!("{}!{}", c.dim(dll), right);
+    }
+
+    if let Some(rest) = token.strip_prefix("_imp_") {
+        return format!("{}{}", c.dim("_imp_"), highlight_symbol_token(rest, c));
+    }
+
+    if is_nt_symbol(token) {
+        return c.b_red(token);
+    }
+    if token.starts_with("sub_") {
+        return c.yellow(token);
+    }
+    if let Some(style) = subsystem_symbol_style(token) {
+        return (style.colorize)(c, token);
+    }
+    if looks_named_symbol(token) {
+        return c.b_white(token);
+    }
+
+    token.to_owned()
+}
+
 pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &Colors) {
     let addr_w = if cfg.addr_width == 0 {
         8
@@ -302,11 +464,15 @@ pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &C
         };
 
         let mnem = apply_insn_color(insn, &format!("{:<10}", insn.mnemonic), c);
-        let ops = c.b_white(&insn.operands);
+        let ops = highlight_symbolic_text(&insn.operands, c);
 
         let mut line = format!("  {}  {}{} {}", addr, byte_str, mnem, ops);
         if !insn.comment.is_empty() {
-            line.push_str(&c.dim(&format!("  ; {}", insn.comment)));
+            line.push_str(&format!(
+                "{}{}",
+                c.dim("  ; "),
+                highlight_symbolic_text(&insn.comment, c)
+            ));
         }
         if cfg.show_offsets {
             line.push_str(&c.dim(&format!("  [off: 0x{:X}]", insn.file_off)));

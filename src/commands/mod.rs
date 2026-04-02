@@ -1,5 +1,6 @@
 pub mod cfg;
 pub mod dump;
+pub mod explain;
 pub mod follow;
 pub mod intelli;
 pub mod locate;

@@ -53,16 +53,19 @@ pub fn run(func_name: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Resu
         .ok();
     }
 
-    let mut search_dirs: Vec<PathBuf> = merged_priority_dirs(cfg);
+    let mut search_roots: Vec<(PathBuf, bool)> = merged_priority_dirs(cfg)
+        .into_iter()
+        .map(|dir| (dir, true))
+        .collect();
     for p in &cfg.extra_paths {
-        search_dirs.push(PathBuf::from(p));
+        search_roots.push((PathBuf::from(p), false));
     }
     for p in &cfg.scan_dirs {
-        search_dirs.push(PathBuf::from(p));
+        search_roots.push((PathBuf::from(p), false));
     }
 
     let mut results: Vec<LocateResult> = Vec::new();
-    let tiers = collect_search_tiers(&search_dirs, &priority);
+    let tiers = collect_search_tiers(&search_roots, &priority);
     let mut matched_paths = std::collections::HashSet::new();
 
     stream_export_hits(
@@ -174,11 +177,14 @@ fn print_locate_results(
     Ok(())
 }
 
-fn collect_search_tiers(search_dirs: &[PathBuf], priority: &PriorityMatcher) -> Vec<Vec<PathBuf>> {
+fn collect_search_tiers(
+    search_roots: &[(PathBuf, bool)],
+    priority: &PriorityMatcher,
+) -> Vec<Vec<PathBuf>> {
     let mut seen = std::collections::HashSet::new();
     let mut all_paths: Vec<PathBuf> = Vec::new();
-    for dir in search_dirs {
-        if let Ok(v) = glob_system_binaries(dir) {
+    for (dir, enforce_priority) in search_roots {
+        if let Ok(v) = glob_system_binaries(dir, priority, *enforce_priority) {
             for path in v {
                 let key = path_key(&path);
                 if seen.insert(key) {
@@ -593,7 +599,11 @@ fn path_key(path: &Path) -> String {
     path.to_string_lossy().to_ascii_lowercase()
 }
 
-fn glob_system_binaries(dir: &PathBuf) -> Result<Vec<PathBuf>, std::io::Error> {
+fn glob_system_binaries(
+    dir: &PathBuf,
+    priority: &PriorityMatcher,
+    enforce_priority: bool,
+) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -608,6 +618,9 @@ fn glob_system_binaries(dir: &PathBuf) -> Result<Vec<PathBuf>, std::io::Error> {
             })
             .unwrap_or(false);
         if matches {
+            if enforce_priority && !priority.is_priority_path(&path) {
+                continue;
+            }
             files.push(path);
         }
     }

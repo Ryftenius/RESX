@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::analysis::edr::EdrCheckResult;
+use crate::analysis::explain::ExplainResult;
 use crate::analysis::intelli::IntelliFinding;
 use crate::analysis::yara::YaraMatch;
 use crate::formats::pe::{PeAnomaly, PeSection};
@@ -71,6 +72,8 @@ pub(crate) struct FuncResult {
     pub(crate) edrchk: Option<EdrJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) api_calls: Vec<ApiCallJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) explain: Option<ExplainResult>,
 }
 
 #[derive(Serialize)]
@@ -117,6 +120,10 @@ pub(crate) struct ApiCallJson {
     pub(crate) dll: String,
     pub(crate) is_import: bool,
     pub(crate) is_indirect: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) indirect_method: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) switch_cases: Vec<u32>,
 }
 
 #[derive(Serialize)]

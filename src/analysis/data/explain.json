@@ -1,0 +1,652 @@
+{
+  "prefixes": [
+    {
+      "key": "Nt",
+      "title": "Native API",
+      "kind": "native-api",
+      "layer": "user-visible Native API syscall layer",
+      "summary": "User-visible Native API syscall entrypoint, typically reached from user mode through ntdll and serviced in the kernel.",
+      "routine_phrase": "Native API routine",
+      "notes": [
+        "Often paired with a matching Zw* form in kernel code.",
+        "Common in ntdll.dll and ntoskrnl.exe exports."
+      ]
+    },
+    {
+      "key": "Zw",
+      "title": "Zw Native API",
+      "kind": "native-api",
+      "layer": "kernel-mode Native API layer",
+      "summary": "Kernel-mode form of a Native API service. Zw* names usually map to the same service family as Nt* with call-context differences.",
+      "routine_phrase": "Zw Native API routine",
+      "notes": [
+        "Usually used by kernel-mode callers.",
+        "Probe and previous-mode behavior can differ from the Nt* path."
+      ]
+    },
+    {
+      "key": "Ps",
+      "title": "Process Manager",
+      "kind": "subsystem",
+      "layer": "process and thread manager",
+      "summary": "Process manager routines for processes, threads, jobs, silos, and related executive objects.",
+      "routine_phrase": "process manager routine",
+      "notes": [
+        "Often deals with EPROCESS, ETHREAD, tokens, and silo state."
+      ]
+    },
+    {
+      "key": "Psp",
+      "title": "Process Manager Private",
+      "kind": "subsystem",
+      "layer": "private process manager internals",
+      "summary": "Private process manager helper used inside the kernel implementation rather than as a public executive entrypoint.",
+      "routine_phrase": "private process manager helper",
+      "notes": [
+        "Usually implementation detail behind Ps* services."
+      ]
+    },
+    {
+      "key": "Ex",
+      "title": "Executive Support",
+      "kind": "subsystem",
+      "layer": "executive support layer",
+      "summary": "Executive support routines for handles, pools, rundown protection, push locks, resources, and general kernel services.",
+      "routine_phrase": "executive support routine",
+      "notes": [
+        "Common in handle-table, locking, and pool-management code."
+      ]
+    },
+    {
+      "key": "Ke",
+      "title": "Kernel Executive",
+      "kind": "subsystem",
+      "layer": "core kernel primitive layer",
+      "summary": "Core kernel primitive routines for IRQL, synchronization, scheduling, APCs, timers, and processor state.",
+      "routine_phrase": "kernel primitive routine",
+      "notes": [
+        "Generally stable kernel building blocks used by higher layers."
+      ]
+    },
+    {
+      "key": "Ki",
+      "title": "Kernel Internal",
+      "kind": "subsystem",
+      "layer": "private kernel internals",
+      "summary": "Private kernel internals, commonly tied to traps, dispatch, APC delivery, interrupt paths, or scheduler implementation details.",
+      "routine_phrase": "private kernel internal",
+      "notes": [
+        "Usually lower-level and less stable than Ke* entrypoints."
+      ]
+    },
+    {
+      "key": "Se",
+      "title": "Security Reference Monitor",
+      "kind": "subsystem",
+      "layer": "security subsystem",
+      "summary": "Security subsystem routines for subject context capture, access checks, auditing, descriptors, and token-related work.",
+      "routine_phrase": "security subsystem routine",
+      "notes": [
+        "Often appears around access checks and privilege evaluation."
+      ]
+    },
+    {
+      "key": "Sep",
+      "title": "Security Private",
+      "kind": "subsystem",
+      "layer": "private security internals",
+      "summary": "Private security subsystem helpers behind Se* entrypoints, frequently involved in auditing, privilege checks, and access-state plumbing.",
+      "routine_phrase": "private security helper",
+      "notes": [
+        "Usually internal implementation detail rather than a public executive surface."
+      ]
+    },
+    {
+      "key": "Ob",
+      "title": "Object Manager",
+      "kind": "subsystem",
+      "layer": "object manager",
+      "summary": "Object manager routines for object lookup, naming, handle creation, referencing, and lifetime management.",
+      "routine_phrase": "object manager routine",
+      "notes": [
+        "Common around handles, reference counts, and object namespace operations."
+      ]
+    },
+    {
+      "key": "Obp",
+      "title": "Object Manager Private",
+      "kind": "subsystem",
+      "layer": "private object manager internals",
+      "summary": "Private object manager helper used internally for handle tracing, reference bookkeeping, and namespace implementation details.",
+      "routine_phrase": "private object manager helper",
+      "notes": [
+        "Usually backs higher-level Ob* operations."
+      ]
+    },
+    {
+      "key": "Rtl",
+      "title": "Runtime Library",
+      "kind": "subsystem",
+      "layer": "runtime support library",
+      "summary": "Runtime support routines for strings, memory, SIDs, exceptions, lists, and general helper logic used across user and kernel mode.",
+      "routine_phrase": "runtime helper",
+      "notes": [
+        "Many Rtl* helpers exist in both ntdll and ntoskrnl contexts."
+      ]
+    },
+    {
+      "key": "FsRtl",
+      "title": "File System Runtime Library",
+      "kind": "subsystem",
+      "layer": "file-system runtime helper layer",
+      "summary": "Filesystem runtime helpers used by file systems and filter drivers for name handling, oplocks, notifications, and common FS support code.",
+      "routine_phrase": "filesystem runtime helper",
+      "notes": [
+        "Longer prefix than Rtl; should win during prefix matching."
+      ]
+    },
+    {
+      "key": "Mm",
+      "title": "Memory Manager",
+      "kind": "subsystem",
+      "layer": "memory manager",
+      "summary": "Memory manager routines for virtual memory, sections, paging, faults, MDLs, and address-space operations.",
+      "routine_phrase": "memory manager routine",
+      "notes": [
+        "Common around section mapping, protection changes, and fault handling."
+      ]
+    },
+    {
+      "key": "Io",
+      "title": "I/O Manager",
+      "kind": "subsystem",
+      "layer": "I/O manager",
+      "summary": "I/O manager routines for IRPs, device objects, file objects, driver dispatch, and request routing.",
+      "routine_phrase": "I/O manager routine",
+      "notes": [
+        "Frequently used by drivers and filesystem code."
+      ]
+    },
+    {
+      "key": "Cm",
+      "title": "Configuration Manager",
+      "kind": "subsystem",
+      "layer": "registry/configuration manager",
+      "summary": "Registry and configuration manager routines for hive, key, and value operations.",
+      "routine_phrase": "configuration manager routine",
+      "notes": [
+        "Registry-oriented kernel subsystem."
+      ]
+    },
+    {
+      "key": "Cmp",
+      "title": "Configuration Manager Private",
+      "kind": "subsystem",
+      "layer": "private registry/configuration manager internals",
+      "summary": "Private configuration manager internals used behind Cm* registry operations.",
+      "routine_phrase": "private configuration manager helper",
+      "notes": [
+        "Usually implementation detail for registry code paths."
+      ]
+    },
+    {
+      "key": "Hal",
+      "title": "Hardware Abstraction Layer",
+      "kind": "subsystem",
+      "layer": "hardware abstraction layer",
+      "summary": "HAL routines abstract interrupt controllers, timers, processors, buses, and other platform-specific hardware behavior.",
+      "routine_phrase": "HAL routine",
+      "notes": [
+        "Often platform and chipset sensitive."
+      ]
+    },
+    {
+      "key": "Etw",
+      "title": "Event Tracing for Windows",
+      "kind": "subsystem",
+      "layer": "event tracing subsystem",
+      "summary": "ETW tracing routines for logging structured events, telemetry, and provider activity.",
+      "routine_phrase": "ETW tracing routine",
+      "notes": [
+        "Common around audit, diagnostics, and telemetry paths."
+      ]
+    },
+    {
+      "key": "Cc",
+      "title": "Cache Manager",
+      "kind": "subsystem",
+      "layer": "cache manager",
+      "summary": "Cache manager routines for file caching, lazy writing, read-ahead, and cache coherency support.",
+      "routine_phrase": "cache manager routine",
+      "notes": [
+        "Frequently used by filesystem drivers."
+      ]
+    },
+    {
+      "key": "Po",
+      "title": "Power Manager",
+      "kind": "subsystem",
+      "layer": "power manager",
+      "summary": "Power manager routines for sleep states, device power transitions, and system power policy.",
+      "routine_phrase": "power manager routine",
+      "notes": [
+        "Appears in platform power policy and device state handling."
+      ]
+    },
+    {
+      "key": "Exp",
+      "title": "Executive Private",
+      "kind": "subsystem",
+      "layer": "private executive support internals",
+      "summary": "Private executive support helpers that implement the internal mechanisms behind public Ex* services, including handle tables, callback objects, system information dispatch, resource management, and pool bookkeeping.",
+      "routine_phrase": "private executive helper",
+      "notes": [
+        "Implementation-layer counterpart to Ex*; not directly callable from drivers.",
+        "Commonly encountered in handle-table walk, callback-object, and system-info paths.",
+        "Longer prefix than Ex and must win prefix matching against it."
+      ]
+    },
+    {
+      "key": "Ldr",
+      "title": "Loader",
+      "kind": "subsystem",
+      "layer": "PE image loader",
+      "summary": "PE image loader routines for DLL loading, image mapping, relocations, imports, and TLS initialization in both user and kernel mode.",
+      "routine_phrase": "loader routine",
+      "notes": [
+        "User-mode Ldr* lives in ntdll; kernel-mode variants appear in ntoskrnl.",
+        "Common in injection, shellcode, and DLL-hijacking analysis."
+      ]
+    },
+    {
+      "key": "Wmi",
+      "title": "Windows Management Instrumentation",
+      "kind": "subsystem",
+      "layer": "WMI / kernel tracing layer",
+      "summary": "WMI and kernel-tracing routines for provider registration, data-block dispatch, and event notification.",
+      "routine_phrase": "WMI kernel routine",
+      "notes": [
+        "Overlaps with ETW paths in modern builds."
+      ]
+    },
+    {
+      "key": "Dbg",
+      "title": "Debug Support",
+      "kind": "subsystem",
+      "layer": "kernel debug support layer",
+      "summary": "Kernel debug-support routines for breakpoint management, debug-port I/O, and debugger communication.",
+      "routine_phrase": "debug support routine",
+      "notes": [
+        "Appears in kernel debugger attach and breakpoint paths."
+      ]
+    },
+    {
+      "key": "Vf",
+      "title": "Driver Verifier",
+      "kind": "subsystem",
+      "layer": "driver verifier layer",
+      "summary": "Driver Verifier routines that instrument pool, IRP, and lock operations to catch driver bugs at runtime.",
+      "routine_phrase": "driver verifier routine",
+      "notes": [
+        "Only active when verifier is enabled; presence indicates instrumented code paths."
+      ]
+    }
+  ],
+  "verbs": [
+    { "key": "Query", "summary": "Retrieve information without directly modifying the target state.", "phrase": "queries" },
+    { "key": "Set", "summary": "Modify an existing setting, property, or state value.", "phrase": "sets" },
+    { "key": "Open", "summary": "Open an existing object and usually return a handle.", "phrase": "opens" },
+    { "key": "Create", "summary": "Create a new object or system resource.", "phrase": "creates" },
+    { "key": "Close", "summary": "Close a handle or terminate access to an object.", "phrase": "closes" },
+    { "key": "Read", "summary": "Read data from the target object or address range.", "phrase": "reads" },
+    { "key": "Write", "summary": "Write data into the target object or address range.", "phrase": "writes" },
+    { "key": "Map", "summary": "Map one object or range into an address space or view.", "phrase": "maps" },
+    { "key": "Unmap", "summary": "Remove a previous mapping from an address space or view.", "phrase": "unmaps" },
+    { "key": "Allocate", "summary": "Reserve or commit resources such as memory.", "phrase": "allocates" },
+    { "key": "Free", "summary": "Release previously allocated resources.", "phrase": "frees" },
+    { "key": "Protect", "summary": "Change protection attributes such as memory access permissions.", "phrase": "changes protection on" },
+    { "key": "Reference", "summary": "Acquire or increment a reference to an object.", "phrase": "references" },
+    { "key": "Dereference", "summary": "Release or decrement a reference to an object.", "phrase": "dereferences" },
+    { "key": "Capture", "summary": "Snapshot or copy caller-supplied state into a trusted kernel-owned form.", "phrase": "captures" },
+    { "key": "Release", "summary": "Release previously captured or acquired context/state.", "phrase": "releases" },
+    { "key": "Delete", "summary": "Delete or tear down an existing object or state block.", "phrase": "deletes" },
+    { "key": "Lookup", "summary": "Search for and resolve a target object or entry.", "phrase": "looks up" },
+    { "key": "Raise", "summary": "Raise an exception, status, or execution level.", "phrase": "raises" },
+    { "key": "Check", "summary": "Test a condition or validate a state.", "phrase": "checks" },
+    { "key": "Flush", "summary": "Flush buffered or cached state.", "phrase": "flushes" },
+    { "key": "Duplicate", "summary": "Duplicate an existing object, handle, or reference.", "phrase": "duplicates" }
+  ],
+  "objects": [
+    { "key": "SystemInformation", "summary": "System-wide information classes and kernel or OS state.", "phrase": "system-wide information classes" },
+    { "key": "InformationProcess", "summary": "Process information classes or process properties.", "phrase": "process information classes" },
+    { "key": "InformationThread", "summary": "Thread information classes or thread properties.", "phrase": "thread information classes" },
+    { "key": "VirtualMemory", "summary": "Virtual memory regions and address-space state.", "phrase": "virtual memory regions" },
+    { "key": "ViewOfSection", "summary": "A mapped view of a section object in an address space.", "phrase": "a section view into an address space" },
+    { "key": "Section", "summary": "A section object, typically used for mapped files or shared memory.", "phrase": "section objects" },
+    { "key": "Process", "summary": "A process object.", "phrase": "process objects" },
+    { "key": "Thread", "summary": "A thread object.", "phrase": "thread objects" },
+    { "key": "File", "summary": "A file object or filesystem target.", "phrase": "file objects" },
+    { "key": "Object", "summary": "A generic executive object or object-manager managed target.", "phrase": "objects" },
+    { "key": "Handle", "summary": "A handle table entry or object handle.", "phrase": "handles" },
+    { "key": "Token", "summary": "A security token representing identity and privileges.", "phrase": "security tokens" },
+    { "key": "Sid", "summary": "A security identifier.", "phrase": "security identifiers" },
+    { "key": "AccessState", "summary": "Captured access-check state used during security evaluation.", "phrase": "access-state blocks" },
+    { "key": "SubjectContext", "summary": "Captured subject context for security checks and auditing.", "phrase": "subject contexts" },
+    { "key": "Privilege", "summary": "Privilege state or privilege-check information.", "phrase": "privilege state" },
+    { "key": "Pool", "summary": "Kernel pool memory.", "phrase": "kernel pool memory" },
+    { "key": "PushLock", "summary": "A push lock synchronization primitive.", "phrase": "push locks" },
+    { "key": "Address", "summary": "An address or address-based wait target.", "phrase": "addresses" },
+    { "key": "ApcDelivery", "summary": "Kernel APC delivery state.", "phrase": "kernel APC delivery state" },
+    { "key": "DatatypeMisalignment", "summary": "A datatype misalignment exception condition.", "phrase": "datatype misalignment exceptions" }
+  ],
+  "exact_symbols": [
+    {
+      "symbol": "NtQuerySystemInformation",
+      "summary": "Queries a selected system-information class from the Native API layer.",
+      "notes": [
+        "The exact data returned depends on the SYSTEM_INFORMATION_CLASS value.",
+        "Frequently used by diagnostics, enumeration, and security tooling."
+      ]
+    },
+    {
+      "symbol": "NtOpenProcess",
+      "summary": "Opens a process object and returns a handle after validating access.",
+      "notes": [
+        "Typically feeds object-manager and security checks before handle creation."
+      ]
+    },
+    {
+      "symbol": "NtOpenThread",
+      "summary": "Opens a thread object and returns a handle after validating access.",
+      "notes": [
+        "Often parallels NtOpenProcess but targets ETHREAD-backed objects."
+      ]
+    },
+    {
+      "symbol": "NtQueryInformationProcess",
+      "summary": "Queries one of several process information classes for a target process.",
+      "notes": [
+        "The meaning of the buffer depends on PROCESSINFOCLASS."
+      ]
+    },
+    {
+      "symbol": "NtQueryInformationThread",
+      "summary": "Queries one of several thread information classes for a target thread.",
+      "notes": [
+        "The meaning of the buffer depends on THREADINFOCLASS."
+      ]
+    },
+    {
+      "symbol": "NtAllocateVirtualMemory",
+      "summary": "Allocates or reserves virtual memory in a process address space.",
+      "notes": [
+        "Common in loaders, allocators, and code-injection workflows."
+      ]
+    },
+    {
+      "symbol": "NtFreeVirtualMemory",
+      "summary": "Releases or decommits virtual memory in a process address space.",
+      "notes": [
+        "Pairs naturally with NtAllocateVirtualMemory."
+      ]
+    },
+    {
+      "symbol": "NtProtectVirtualMemory",
+      "summary": "Changes access protections on a virtual memory region.",
+      "notes": [
+        "Common in JIT, loader, and memory-permission transitions."
+      ]
+    },
+    {
+      "symbol": "NtReadVirtualMemory",
+      "summary": "Reads memory from a target process address space.",
+      "notes": [
+        "Common in debuggers, diagnostics, and memory-inspection tools."
+      ]
+    },
+    {
+      "symbol": "NtWriteVirtualMemory",
+      "summary": "Writes memory into a target process address space.",
+      "notes": [
+        "Common in debuggers, injectors, and patching workflows."
+      ]
+    },
+    {
+      "symbol": "NtCreateFile",
+      "summary": "Creates or opens a file object through the Native API path.",
+      "notes": [
+        "The create disposition and options determine whether this behaves like open, create, overwrite, or supersede."
+      ]
+    },
+    {
+      "symbol": "NtCreateSection",
+      "summary": "Creates a section object for mapped files, images, or shared memory.",
+      "notes": [
+        "Section objects are commonly consumed by mapping and image-loading paths."
+      ]
+    },
+    {
+      "symbol": "NtMapViewOfSection",
+      "summary": "Maps a section view into a process address space.",
+      "notes": [
+        "Common in image loading, shared memory, and injection chains."
+      ]
+    },
+    {
+      "symbol": "NtUnmapViewOfSection",
+      "summary": "Removes a previously mapped section view from a process address space.",
+      "notes": [
+        "Often paired with NtMapViewOfSection."
+      ]
+    },
+    {
+      "symbol": "NtDuplicateObject",
+      "summary": "Duplicates a handle or object reference into a target process handle table.",
+      "notes": [
+        "Used for handle transfer and brokered access patterns."
+      ]
+    },
+    {
+      "symbol": "NtClose",
+      "summary": "Closes a handle and releases the associated handle-table reference.",
+      "notes": [
+        "Simple surface, but the object-manager cleanup it triggers can be deeper."
+      ]
+    },
+    {
+      "symbol": "PsOpenProcess",
+      "summary": "Internal process-manager helper that performs the kernel-side work behind opening a process object.",
+      "notes": [
+        "Often appears under NtOpenProcess in ntoskrnl call maps."
+      ]
+    },
+    {
+      "symbol": "PsReferencePrimaryTokenWithTag",
+      "summary": "References a process primary token with tagged object-reference bookkeeping.",
+      "notes": [
+        "Useful when tracking token access and object lifetime."
+      ]
+    },
+    {
+      "symbol": "KiCheckForKernelApcDelivery",
+      "summary": "Internal kernel routine that checks whether pending kernel APC delivery should occur.",
+      "notes": [
+        "Sits in low-level scheduler and APC state transitions."
+      ]
+    },
+    {
+      "symbol": "SepPrivilegeCheck",
+      "summary": "Private security helper that evaluates requested privileges against the current security context.",
+      "notes": [
+        "Common during object-open and access-validation paths."
+      ]
+    },
+    {
+      "symbol": "SeCaptureSubjectContext",
+      "summary": "Captures the current subject security context for later access checks or auditing.",
+      "notes": [
+        "Usually paired with SeReleaseSubjectContext."
+      ]
+    },
+    {
+      "symbol": "SeReleaseSubjectContext",
+      "summary": "Releases a previously captured subject context.",
+      "notes": [
+        "Cleanup companion to SeCaptureSubjectContext."
+      ]
+    },
+    {
+      "symbol": "RtlEqualSid",
+      "summary": "Compares two security identifiers to determine whether they represent the same SID.",
+      "notes": [
+        "Common in security and token code paths."
+      ]
+    },
+    {
+      "symbol": "ExpQuerySystemInformation",
+      "summary": "Private executive helper that performs the real work behind NtQuerySystemInformation after the dispatch table routes to the correct handler.",
+      "notes": [
+        "Called from NtQuerySystemInformation's indirect dispatch; handles the actual buffer fill for the given SYSTEM_INFORMATION_CLASS.",
+        "Most system-info classes ultimately end up here before delegating to subsystem-specific helpers."
+      ]
+    },
+    {
+      "symbol": "ExpCreateCallback",
+      "summary": "Creates a callback object used by the executive callback notification mechanism.",
+      "notes": [
+        "Backs ExCreateCallback; callback objects are used by PsSet* and other notify-routine registrations.",
+        "The callback object stores a list of registered routines invoked by ExpNotifyCallback."
+      ]
+    },
+    {
+      "symbol": "ExpDeleteCallback",
+      "summary": "Tears down a callback object and releases its associated resources.",
+      "notes": [
+        "Called when the last reference to a callback object is released."
+      ]
+    },
+    {
+      "symbol": "ExpNotifyCallback",
+      "summary": "Fires all routines registered against a callback object in sequence.",
+      "notes": [
+        "Backs ExNotifyCallback; iterates the callback object's registration list.",
+        "Common in driver notification, power, and configuration-change paths."
+      ]
+    },
+    {
+      "symbol": "ExpRegisterCallback",
+      "summary": "Registers a routine with an existing callback object.",
+      "notes": [
+        "Backs ExRegisterCallback; adds a CALLBACK_REGISTRATION to the object's list."
+      ]
+    },
+    {
+      "symbol": "ExpUnregisterCallback",
+      "summary": "Removes a previously registered routine from a callback object.",
+      "notes": [
+        "Backs ExUnregisterCallback; must be balanced with ExpRegisterCallback."
+      ]
+    },
+    {
+      "symbol": "ExpLookupHandleTableEntry",
+      "summary": "Looks up a handle-table entry by handle value in the executive handle table.",
+      "notes": [
+        "Core of the handle-table B-tree walk; called from ObpReferenceObjectByHandle and related paths.",
+        "Returns a locked EXHANDLE_TABLE_ENTRY pointer; caller must release the lock."
+      ]
+    },
+    {
+      "symbol": "ExpAllocateHandleTable",
+      "summary": "Allocates a new executive handle table, optionally inheriting entries from a parent.",
+      "notes": [
+        "Called at process/session creation or when the handle table must be expanded.",
+        "The resulting table is managed by the object manager via Ob* routines."
+      ]
+    },
+    {
+      "symbol": "ExpFreeHandleTable",
+      "summary": "Releases all storage belonging to an executive handle table.",
+      "notes": [
+        "Called on process teardown after all handles have been closed.",
+        "Walks the table structure and frees each page of handle entries."
+      ]
+    },
+    {
+      "symbol": "ExpFindHandleEntry",
+      "summary": "Finds a handle table entry by scanning the table for a matching object pointer.",
+      "notes": [
+        "Reverse-direction lookup compared to ExpLookupHandleTableEntry.",
+        "Less common; appears in auditing and handle-trace code paths."
+      ]
+    },
+    {
+      "symbol": "ExpDupHandleCallback",
+      "summary": "Callback invoked per handle entry during a handle-table duplication walk.",
+      "notes": [
+        "Used by NtDuplicateObject and process-fork paths to propagate inheritable handles."
+      ]
+    },
+    {
+      "symbol": "ExpRundownHandleTable",
+      "summary": "Walks a handle table and closes all remaining handles during process rundown.",
+      "notes": [
+        "Called late in process teardown to ensure no leaked handles remain.",
+        "Triggers object-manager cleanup for each still-open handle."
+      ]
+    },
+    {
+      "symbol": "ExpGetSystemControlValues",
+      "summary": "Retrieves system control values from the registry for kernel-mode configuration.",
+      "notes": [
+        "Reads NLS, memory, and subsystem tuning parameters during initialization.",
+        "Called from system-information paths and early boot configuration."
+      ]
+    },
+    {
+      "symbol": "ExpProfileDelete",
+      "summary": "Deletes a kernel performance-profiling object.",
+      "notes": [
+        "Backs NtStopProfile / profile object lifecycle; releases profiling buffers and timers."
+      ]
+    },
+    {
+      "symbol": "ExpWaitForResource",
+      "summary": "Blocks the calling thread until a ERESOURCE exclusive or shared acquisition succeeds.",
+      "notes": [
+        "Slow path of ExAcquireResourceExclusiveLite / ExAcquireResourceSharedLite.",
+        "Puts the caller into a wait state; appears in heavily-contended resource code paths."
+      ]
+    },
+    {
+      "symbol": "ExpWorkerThread",
+      "summary": "Entry point for executive worker threads that process items queued to the ExWorkerQueue.",
+      "notes": [
+        "Worker threads call this loop to dequeue and execute WORK_QUEUE_ITEM callbacks.",
+        "Critical path for asynchronous kernel operations; stalls here indicate queue backup."
+      ]
+    },
+    {
+      "symbol": "ExpInsertWorkQueue",
+      "summary": "Inserts a WORK_QUEUE_ITEM onto the appropriate executive worker queue.",
+      "notes": [
+        "Backs ExQueueWorkItem; selects the CriticalWorkQueue, DelayedWorkQueue, or HyperCriticalWorkQueue."
+      ]
+    },
+    {
+      "symbol": "ExpSetTimerResolution",
+      "summary": "Sets the system timer resolution to the requested 100-ns tick interval.",
+      "notes": [
+        "Backs NtSetTimerResolution; affects the global timer tick period.",
+        "Resolution changes are reference-counted across callers."
+      ]
+    },
+    {
+      "symbol": "ExpBoostOwnerThread",
+      "summary": "Priority-boosts the thread that owns a resource or push lock to reduce contention.",
+      "notes": [
+        "Called when a waiter is blocked on a resource held by a lower-priority thread.",
+        "Part of the priority-inheritance mechanism in resource/push-lock paths."
+      ]
+    }
+  ]
+}

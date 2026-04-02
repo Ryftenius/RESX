@@ -23,6 +23,18 @@ pub fn dispatch(
         return commands::update::run(cfg, w, c);
     }
 
+    if cfg.explain {
+        let term = if !func_arg.is_empty() {
+            &func_arg
+        } else {
+            &dll_arg
+        };
+        if term.is_empty() {
+            return Err("Specify a symbol or prefix to explain".to_owned());
+        }
+        return commands::explain::run(term, cfg, w, c);
+    }
+
     if is_locate_mode(cfg, &dll_arg, &func_arg) {
         let name = if !func_arg.is_empty() {
             &func_arg
@@ -90,6 +102,7 @@ fn is_locate_mode(cfg: &Config, dll_arg: &str, func_arg: &str) -> bool {
             && !cfg.pechk
             && !cfg.hookchk
             && !cfg.intelli
+            && !cfg.explain
             && cfg.cfg_view.is_empty()
             && cfg.yara.is_empty())
 }
