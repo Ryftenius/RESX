@@ -38,6 +38,8 @@ resx dump <dll> <function>
 resx dump <dll> --at <rva>
 resx dump <dll> --ordinal <n>
 resx cfg <dll> <function>
+resx cfg <dll> --at <rva>
+resx cfg <dll> --ordinal <n>
 resx intelli <dll> [function]
 resx peinfo <dll>
 resx sections <dll>
@@ -49,6 +51,7 @@ resx priority
 resx callers <dll> <function>
 resx locate <name>
 resx locate-sym <name>
+resx explain <name>
 resx yara <dll> <rule.yar>
 ```
 
@@ -56,7 +59,7 @@ resx yara <dll> <rule.yar>
 
 - It resolves internal targets from exports and enumerated PDB symbols instead of stopping at the export table.
 - It can recover structured switch dispatchers instead of leaving you with `jmp r9`.
-- It can show disassembly, call maps, CFG edges, and pseudo-C in one pass.
+- It can show disassembly, call maps, CFG edges, and pseudo-C in one pass, with consistent API/symbol highlighting across `dump` and `cfg`.
 - It exposes `intelli` as a first-class triage command instead of hiding it behind a flag.
 - It is designed to be useful on real Windows internals work, not just “dump exports and quit.”
 
@@ -207,11 +210,15 @@ block_00AE0FF7:  [6 insn]  range 0x00AE0FF7..0x00AE1013
 
 ```powershell
 resx dump ntdll.dll NtOpenProcess --cfg text --hookchk
+resx cfg ntdll.dll --at 0x161F40
 resx intelli suspicious.dll
 resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
 resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx callers .\blackbird.sys BLACKBIRDNtAllocateVirtualMemoryHookStub --depth 2
+resx locate NtOpenProcess
+resx locate NtOpenProcess --include-dir C:\Work\Drivers
+resx explain NtQuerySystemInformation --api
 resx syms ntoskrnl.exe --verbose
 resx yara suspicious.dll .\rules\triage.yar
 ```
@@ -220,10 +227,12 @@ resx yara suspicious.dll .\rules\triage.yar
 
 - Semantic switch labels come from parsed SDK metadata when available. Structural switch recovery still works without the SDK.
 - `intelli` is a command alias for `dump` with triage enabled, so it accepts normal dump-side options too.
-- `locate` / `locate-sym` return all matches inside the priority set by default.
+- `cfg` supports the same target selectors as `dump`: function name, `--at <rva>`, or `--ordinal <n>`.
+- `locate` / `locate-sym` search only the priority set by default instead of walking all of `System32` / `SysWOW64`.
 - `callers` scans the priority set by default.
 - Use `--include-dir` and `--include-image` when you want to widen the scan beyond the priority set for `locate` or `callers`.
 - `resx priority` opens the generated priority config JSON. Edit priority directories, exact names, prefixes, and regexes there.
+- `explain` is a first-class command for prefix and API-name breakdowns, and `dump --explain` reuses the same glossary engine inline.
 - `--edrchk` only compares against images that are already loaded in memory by default. RESX does not provide a real sandbox/container. `--unsafe-map-image` re-enables the old fallback of mapping an on-disk image into the current process and should be treated as unsafe for untrusted samples.
 - `resx update` requires a git checkout with a configured `origin`.
 - Use `resx help` or `resx <command> --example` for the live command help.
