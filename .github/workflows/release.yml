@@ -15,8 +15,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event.workflow_run.head_branch || github.ref_name }}
-  cancel-in-progress: true
+  group: release-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
 
 jobs:
   build-and-publish:
@@ -47,27 +47,36 @@ jobs:
             throw 'Unable to read version from Cargo.toml'
           }
           $version = $matches[1]
-          $runNumber = if ("${{ github.event_name }}" -eq "workflow_run") { "${{ github.event.workflow_run.run_number }}" } else { "${{ github.run_number }}" }
-          $runAttempt = if ("${{ github.event_name }}" -eq "workflow_run") { "${{ github.event.workflow_run.run_attempt }}" } else { "${{ github.run_attempt }}" }
           $shortSha = "${{ github.event.workflow_run.head_sha || github.sha }}".Substring(0, 7)
-          $tag = "v$version-ci.$runNumber.$runAttempt"
-          $releaseName = "resx v$version CI build $runNumber.$runAttempt"
-          $artifactSuffix = "ci.$runNumber.$runAttempt"
+          $tag = "v$version"
+          $releaseName = "resx v$version"
+          $artifactName = "resx-$version-windows-x86_64"
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "run_number=$runNumber" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "run_attempt=$runAttempt" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "short_sha=$shortSha" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "release_name=$releaseName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "artifact_suffix=$artifactSuffix" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "artifact_name=$artifactName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Create version tag
+      - name: Check release state
+        id: release_state
         shell: powershell
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.tag }}" "${{ github.event.workflow_run.head_sha || github.sha }}"
-          git push origin "refs/tags/${{ steps.version.outputs.tag }}"
+          git fetch --force --tags origin
+          $tagRef = "refs/tags/${{ steps.version.outputs.tag }}"
+          $remoteTag = git ls-remote --tags origin $tagRef
+          if ([string]::IsNullOrWhiteSpace($remoteTag)) {
+            "tag_exists=false" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+
+          $targetSha = "${{ github.event.workflow_run.head_sha || github.sha }}"
+          $resolvedTagSha = git rev-list -n 1 "${{ steps.version.outputs.tag }}"
+
+          if ($resolvedTagSha -ne $targetSha) {
+            throw "Version tag ${{ steps.version.outputs.tag }} already exists on commit $resolvedTagSha, but this run targets $targetSha. Bump Cargo.toml version before publishing again."
+          }
+
+          "tag_exists=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Build release
         run: cargo build --release
@@ -76,7 +85,7 @@ jobs:
         shell: powershell
         run: |
           $artifactRoot = "dist"
-          $artifactName = "resx-${{ steps.version.outputs.version }}-windows-x86_64-${{ steps.version.outputs.artifact_suffix }}"
+          $artifactName = "${{ steps.version.outputs.artifact_name }}"
           $artifactDir = Join-Path $artifactRoot $artifactName
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           Copy-Item target\release\resx.exe $artifactDir\
@@ -90,10 +99,19 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: resx-release-${{ steps.version.outputs.version }}-${{ steps.version.outputs.artifact_suffix }}
+          name: resx-release-${{ steps.version.outputs.version }}
           path: |
             dist/*.zip
             dist/*.sha256
+
+      - name: Create version tag
+        if: steps.release_state.outputs.tag_exists != 'true'
+        shell: powershell
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}" "${{ github.event.workflow_run.head_sha || github.sha }}"
+          git push origin "refs/tags/${{ steps.version.outputs.tag }}"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -105,10 +123,10 @@ jobs:
             dist/*.zip
             dist/*.sha256
           generate_release_notes: true
-          append_body: true
-          prerelease: true
+          overwrite_files: true
+          append_body: false
+          prerelease: false
           body: |
-            CI release metadata:
+            Release metadata:
             - Cargo version: `${{ steps.version.outputs.version }}`
-            - CI run: `${{ steps.version.outputs.run_number }}.${{ steps.version.outputs.run_attempt }}`
             - Commit: `${{ steps.version.outputs.short_sha }}`

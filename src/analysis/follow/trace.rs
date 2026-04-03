@@ -5,14 +5,15 @@ use std::sync::{
 };
 
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::analysis::follow::scan::{
-    scan_image_for_callers, CallSite, Caller, FollowScanConfig, ScanImage,
+    import_lookup_key, CallSite, Caller, FollowScanConfig, ScanImage,
 };
 use crate::core::color::Colors;
-use crate::core::output::AsyncProgress;
+use crate::core::output::{AsyncProgress, StageProgress};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuncRef {
     pub dll: String,
     pub dll_path: String,
@@ -73,8 +74,7 @@ pub struct CallNode {
 
 pub struct TraceCtx<'a> {
     pub cfg: &'a FollowScanConfig,
-    pub scan_images: &'a [ScanImage],
-    pub target_arch: u32,
+    pub graph: &'a GlobalCallGraph,
     pub visited: Mutex<std::collections::HashSet<String>>,
     pub total: AtomicUsize,
 }
@@ -94,72 +94,160 @@ impl<'a> TraceCtx<'a> {
     }
 }
 
+pub struct GlobalCallGraph {
+    direct: std::collections::HashMap<DirectTarget, Vec<Caller>>,
+    imports: std::collections::HashMap<String, Vec<Caller>>,
+    image_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DirectTarget {
+    dll_base: String,
+    rva: u32,
+}
+
+impl DirectTarget {
+    fn from_func(func: &FuncRef) -> Self {
+        Self {
+            dll_base: func.dll_base.clone(),
+            rva: func.rva,
+        }
+    }
+}
+
+impl GlobalCallGraph {
+    pub fn build(
+        scan_images: &[ScanImage],
+        cfg: &FollowScanConfig,
+        target_arch: u32,
+        c: &Colors,
+    ) -> Self {
+        let lane_count = cfg.workers.clamp(1, 8);
+        let progress = AsyncProgress::new(scan_images.len(), lane_count, c.on && !cfg.quiet, c.on);
+        let loaded: Vec<_> = scan_images
+            .par_iter()
+            .filter_map(|image| {
+                let lane = rayon::current_thread_index().unwrap_or(0);
+                let label = image.path.file_name().unwrap_or_default().to_string_lossy();
+                let loaded = image.index(cfg).cloned();
+                progress.tick(lane, &label);
+                loaded
+            })
+            .collect();
+        progress.finish();
+
+        let mut stage = StageProgress::new(3, c.on && !cfg.quiet, c.on);
+        stage.tick("merging direct caller buckets");
+
+        let mut direct: std::collections::HashMap<DirectTarget, Vec<Caller>> =
+            std::collections::HashMap::new();
+        let mut imports: std::collections::HashMap<String, Vec<Caller>> =
+            std::collections::HashMap::new();
+
+        for index in &loaded {
+            let arch_match = match cfg.arch.as_str() {
+                "x86" | "32" => index.arch == 32,
+                "x64" | "64" => index.arch == 64,
+                _ => target_arch == 0 || index.arch == target_arch,
+            };
+            if !arch_match {
+                continue;
+            }
+
+            for (target_rva, callers) in &index.direct {
+                direct
+                    .entry(DirectTarget {
+                        dll_base: index.dll_base_lower.clone(),
+                        rva: *target_rva,
+                    })
+                    .or_default()
+                    .extend(callers.iter().cloned());
+            }
+
+            for (key, callers) in &index.imports {
+                imports
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(callers.iter().cloned());
+            }
+        }
+
+        stage.tick("deduping direct caller buckets");
+        for callers in direct.values_mut() {
+            dedup_callers(callers);
+        }
+        stage.tick("deduping import caller buckets");
+        for callers in imports.values_mut() {
+            dedup_callers(callers);
+        }
+        stage.finish();
+
+        Self {
+            direct,
+            imports,
+            image_count: loaded.len(),
+        }
+    }
+
+    pub fn image_count(&self) -> usize {
+        self.image_count
+    }
+
+    fn callers_for(&self, target: &FuncRef) -> Vec<Caller> {
+        let mut merged: Vec<Caller> = Vec::new();
+        if let Some(direct) = self.direct.get(&DirectTarget::from_func(target)) {
+            merged.extend(direct.iter().cloned());
+        }
+        if let Some(imports) = self
+            .imports
+            .get(&import_lookup_key(&target.dll_base, &target.name))
+        {
+            merged.extend(imports.iter().cloned());
+        }
+        dedup_callers(&mut merged);
+        merged
+    }
+}
+
+fn dedup_callers(callers: &mut Vec<Caller>) {
+    let mut merged: std::collections::BTreeMap<String, Caller> = std::collections::BTreeMap::new();
+    for caller in callers.drain(..) {
+        let key = caller.func.key().to_owned();
+        let entry = merged.entry(key).or_insert_with(|| Caller {
+            func: caller.func.clone(),
+            sites: Vec::new(),
+        });
+        entry.sites.extend(caller.sites);
+    }
+    *callers = merged
+        .into_values()
+        .map(|mut caller| {
+            caller
+                .sites
+                .sort_by(|a, b| a.rva.cmp(&b.rva).then_with(|| a.pattern.cmp(&b.pattern)));
+            caller
+                .sites
+                .dedup_by(|a, b| a.rva == b.rva && a.pattern == b.pattern);
+            caller
+        })
+        .collect();
+}
+
 // Flat storage node used during BFS construction.
 struct FlatEntry {
     func: FuncRef,
     sites: Vec<CallSite>,
     depth: usize,
     truncated: bool,
-    children: Vec<usize>, // indices into flat vec
+    children: Vec<usize>,
 }
 
-fn scan_frontier(
-    frontier: &[(FuncRef, usize)],
-    ctx: &TraceCtx<'_>,
-    progress: &AsyncProgress,
-) -> Vec<Vec<Caller>> {
-    let job_count = frontier.len().saturating_mul(ctx.scan_images.len());
-    if job_count == 0 {
-        return vec![Vec::new(); frontier.len()];
-    }
-
-    let jobs: Vec<(usize, usize)> = (0..frontier.len())
-        .flat_map(|frontier_idx| {
-            (0..ctx.scan_images.len()).map(move |image_idx| (frontier_idx, image_idx))
-        })
-        .collect();
-
-    let mut grouped: Vec<Vec<Caller>> = vec![Vec::new(); frontier.len()];
-    let mut hits: Vec<(usize, Caller)> = jobs
-        .par_iter()
-        .flat_map_iter(|(frontier_idx, image_idx)| {
-            let (target, _) = &frontier[*frontier_idx];
-            let image = &ctx.scan_images[*image_idx];
-            let image_name = image.path.file_name().unwrap_or_default().to_string_lossy();
-            let label = format!("{}!{}  <-  {}", target.dll, target.name, image_name);
-            let lane = rayon::current_thread_index().unwrap_or(0);
-            let callers = scan_image_for_callers(image, target, ctx.target_arch, ctx.cfg);
-            progress.tick(lane, &label);
-            callers
-                .into_iter()
-                .map(move |caller| (*frontier_idx, caller))
-        })
-        .collect();
-
-    if !ctx.cfg.filter_dll.is_empty() {
-        let f = ctx.cfg.filter_dll.to_lowercase();
-        hits.retain(|(_, caller)| caller.func.dll.to_lowercase().contains(&f));
-    }
-
-    for (frontier_idx, caller) in hits.drain(..) {
-        grouped[frontier_idx].push(caller);
-    }
-    for callers in &mut grouped {
-        callers.sort_by(|a, b| a.func.key().cmp(b.func.key()));
-    }
-    grouped
-}
-
-/// Build a caller graph for `root` using breadth-first expansion so that all
-/// `(target, image)` scan jobs at the same depth level can be balanced by one
-/// shared work queue.
 pub fn build_call_tree(
     root: FuncRef,
     ctx: &TraceCtx<'_>,
     w: &mut dyn Write,
     c: &Colors,
 ) -> CallNode {
-    // Flat storage; index 0 is always the root.
     let mut flat: Vec<FlatEntry> = vec![FlatEntry {
         func: root.clone(),
         sites: Vec::new(),
@@ -167,8 +255,6 @@ pub fn build_call_tree(
         truncated: false,
         children: Vec::new(),
     }];
-
-    // BFS frontier: (FuncRef to expand, its index in flat)
     let mut frontier: Vec<(FuncRef, usize)> = vec![(root, 0)];
 
     for depth in 0..ctx.cfg.depth {
@@ -176,40 +262,41 @@ pub fn build_call_tree(
             break;
         }
 
-        let n = frontier.len();
-        let scan_total = ctx.scan_images.len();
-
         if !ctx.cfg.quiet {
-            let msg = if n == 1 {
+            let msg = if frontier.len() == 1 {
                 format!(
-                    "depth {}  ·  scanning {} files for 1 target",
-                    depth, scan_total
+                    "depth {}  ·  querying global caller graph built from {} files",
+                    depth,
+                    ctx.graph.image_count()
                 )
             } else {
                 format!(
-                    "depth {}  ·  scanning {} files for {} targets in parallel",
-                    depth, scan_total, n
+                    "depth {}  ·  querying {} targets against global caller graph ({} files indexed)",
+                    depth,
+                    frontier.len(),
+                    ctx.graph.image_count()
                 )
             };
             writeln!(w, "{}", c.info(&msg)).ok();
             w.flush().ok();
         }
 
-        let total_jobs = n.saturating_mul(scan_total);
-        let lane_count = ctx.cfg.workers.clamp(1, 8);
-        let progress = AsyncProgress::new(total_jobs, lane_count, c.on && !ctx.cfg.quiet, c.on);
-        let callers_by_target = scan_frontier(&frontier, ctx, &progress);
-        progress.finish();
-
-        // Serial: wire results into the flat vec and build the next frontier.
         let mut next_frontier: Vec<(FuncRef, usize)> = Vec::new();
         let mut found_this_level = 0usize;
 
-        for ((_, parent_idx), mut callers) in frontier.iter().zip(callers_by_target.into_iter()) {
+        for (target, parent_idx) in &frontier {
+            let mut callers = ctx.graph.callers_for(target);
+            if !ctx.cfg.filter_dll.is_empty() {
+                let filter = ctx.cfg.filter_dll.to_lowercase();
+                callers.retain(|caller| caller.func.dll.to_lowercase().contains(&filter));
+            }
+            callers.sort_by(|a, b| a.func.key().cmp(b.func.key()));
+
             if ctx.cfg.max_callers > 0 && callers.len() > ctx.cfg.max_callers {
                 callers.truncate(ctx.cfg.max_callers);
                 flat[*parent_idx].truncated = true;
             }
+
             for caller in callers {
                 if ctx.check_total() {
                     flat[*parent_idx].truncated = true;
@@ -249,7 +336,6 @@ pub fn build_call_tree(
         frontier = next_frontier;
     }
 
-    // Reconstruct the CallNode tree from the flat vec using stored children indices.
     fn to_call_node(idx: usize, flat: &[FlatEntry]) -> CallNode {
         let e = &flat[idx];
         CallNode {

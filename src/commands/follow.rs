@@ -6,7 +6,7 @@ use crate::analysis::follow::output::{
 use crate::analysis::follow::scan::{
     build_scan_list, find_target_dll, FollowScanConfig, ScanImage,
 };
-use crate::analysis::follow::trace::{build_call_tree, FuncRef, TraceCtx};
+use crate::analysis::follow::trace::{build_call_tree, FuncRef, GlobalCallGraph, TraceCtx};
 use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::formats::pdb::load_pdb_symbol;
@@ -84,13 +84,15 @@ pub fn run(
 
     let scan_paths = build_scan_list(&scan_cfg, &dll_path);
     let scan_images: Vec<ScanImage> = scan_paths.into_iter().map(ScanImage::new).collect();
+    let graph = GlobalCallGraph::build(&scan_images, &scan_cfg, pe.arch, c);
     if !cfg.quiet {
         writeln!(
             w,
             "{}",
             c.info(&format!(
-                "Scan list: {} file(s)  |  depth: {}  |  workers: {}",
+                "Scan list: {} file(s)  |  indexed: {}  |  depth: {}  |  workers: {}",
                 scan_images.len(),
+                graph.image_count(),
                 scan_cfg.depth,
                 scan_cfg.workers
             ))
@@ -102,8 +104,7 @@ pub fn run(
     visited.insert(target.key().to_owned());
     let ctx = TraceCtx {
         cfg: &scan_cfg,
-        scan_images: &scan_images,
-        target_arch: pe.arch,
+        graph: &graph,
         visited: std::sync::Mutex::new(visited),
         total: std::sync::atomic::AtomicUsize::new(0usize),
     };

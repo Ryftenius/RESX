@@ -14,24 +14,13 @@
 
 RESX is built for fast terminal-first reversing: exports, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, switch-table analysis, caller tracing, PE inspection, YARA, and triage.
 
-## Build
+## BUILD
 
 ```powershell
 cargo build --release
 ```
 
-## Version And Update
-
-```powershell
-resx version
-resx update
-```
-
-`resx update` is for a git checkout. It runs a fast-forward pull against the current branch on `origin`.
-
-PDB downloads are cached on disk and symbol enumerations are reused in-process. Use `--reload` when you want to bypass both and force a fresh symbol load.
-
-## Core Commands
+## COMMANDS
 
 ```powershell
 resx dump <dll> <function>
@@ -53,9 +42,12 @@ resx locate <name>
 resx locate-sym <name>
 resx explain <name>
 resx yara <dll> <rule.yar>
+resx update
+resx help
+resx <command> --example
 ```
 
-## Why It Reads Differently
+## READ DIFFERENTLY
 
 - It resolves internal targets from exports and enumerated PDB symbols instead of stopping at the export table.
 - It can recover structured switch dispatchers instead of leaving you with `jmp r9`.
@@ -63,7 +55,7 @@ resx yara <dll> <rule.yar>
 - It exposes `intelli` as a first-class triage command instead of hiding it behind a flag.
 - It is designed to be useful on real Windows internals work, not just “dump exports and quit.”
 
-## Showcase
+## SHOWCASE
 
 ### Kernel Symbol Resolution
 
@@ -93,7 +85,7 @@ API Call Map for KiSystemCall64  [37 call site(s)]:
    0x6BE183  CALL  KiExceptionDispatch [internal]
 ```
 
-### Intelli Triage As A Real Command
+### Intelli Triage
 
 ```text
 > resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
@@ -206,35 +198,36 @@ block_00AE0FF7:  [6 insn]  range 0x00AE0FF7..0x00AE1013
 [*] Loaded symbols: type=pdb
 ```
 
-## Quick Examples
+## EXAMPLES
 
 ```powershell
 resx dump ntdll.dll NtOpenProcess --cfg text --hookchk
+resx dump kernel32.dll CreateFileW --funcs --xrefs
 resx cfg ntdll.dll --at 0x161F40
 resx intelli suspicious.dll
 resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
+resx peinfo .\blackbird.sys
+resx sections ntdll.dll
+resx eat kernel32.dll
+resx iat kernel32.dll
+resx pechk suspicious.dll
 resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx callers .\blackbird.sys BLACKBIRDNtAllocateVirtualMemoryHookStub --depth 2
 resx locate NtOpenProcess
 resx locate NtOpenProcess --include-dir C:\Work\Drivers
+resx locate-sym RtlpHeapHandleError
 resx explain NtQuerySystemInformation --api
 resx syms ntoskrnl.exe --verbose
 resx yara suspicious.dll .\rules\triage.yar
+resx update
 ```
 
-## Notes
+## COMMAND NOTES
 
-- Semantic switch labels come from parsed SDK metadata when available. Structural switch recovery still works without the SDK.
-- `intelli` is a command alias for `dump` with triage enabled, so it accepts normal dump-side options too.
-- `cfg` supports the same target selectors as `dump`: function name, `--at <rva>`, or `--ordinal <n>`.
-- `locate` / `locate-sym` search only the priority set by default instead of walking all of `System32` / `SysWOW64`.
-- `callers` scans the priority set by default.
-- Use `--include-dir` and `--include-image` when you want to widen the scan beyond the priority set for `locate` or `callers`.
-- `resx priority` opens the generated priority config JSON. Edit priority directories, exact names, prefixes, and regexes there.
-- `explain` is a first-class command for prefix and API-name breakdowns, and `dump --explain` reuses the same glossary engine inline.
-- `--edrchk` only compares against images that are already loaded in memory by default. RESX does not provide a real sandbox/container. `--unsafe-map-image` re-enables the old fallback of mapping an on-disk image into the current process and should be treated as unsafe for untrusted samples.
-- `resx update` requires a git checkout with a configured `origin`.
-- Use `resx help` or `resx <command> --example` for the live command help.
-
-See `COMMANDS.md` for the full command surface.
+- `cfg` is a shorthand command for graph output and supports name, `--at <rva>`, or `--ordinal <n>`.
+- `intelli` is a first-class shorthand for dump-driven heuristic triage.
+- `peinfo` reports image kind, subsystem, signer state, debug/PDB presence, compiler/runtime hints, and hardening flags such as `ASLR`, `NXCOMPAT`, `CFG`, `XFG`, and related load-config metadata.
+- `sections`, `eat`, `iat`, `syms`, and `pechk` are direct shorthand commands, not separate binaries.
+- `update` pulls the latest code from the current git remote/branch in a source checkout.
+- `resx help` shows full CLI usage and `resx <command> --example` prints focused examples for that command.

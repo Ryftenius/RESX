@@ -31,6 +31,8 @@ USAGE
   resx dump <dll> --at <rva> [options]
   resx dump <dll> --ordinal <n> [options]
   resx cfg <dll> <function> [options]
+  resx cfg <dll> --at <rva> [options]
+  resx cfg <dll> --ordinal <n> [options]
   resx intelli <dll> [function] [options]
 
   resx peinfo <dll> [options]
@@ -53,7 +55,7 @@ USAGE
 
 COMMANDS
   dump        Disassemble or reconstruct one target by name, RVA, or ordinal.
-  cfg         Show a control-flow graph view for one target.
+  cfg         Show a control-flow graph view for one target by name, RVA, or ordinal.
   intelli     Run heuristic triage over a target image or function.
   peinfo      Show PE metadata, version resources, signer info, and headers.
   sections    Show section layout, entropy, and protection expectations.
@@ -132,9 +134,17 @@ GLOBAL OPTIONS
 
 EXAMPLES
   resx dump kernel32.dll CreateFileW --recomp --bytes
+  resx dump kernel32.dll CreateFileW --funcs --xrefs
   resx intelli suspicious.dll
   resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
+  resx peinfo .\blackbird.sys
+  resx sections ntdll.dll
+  resx eat kernel32.dll
+  resx iat kernel32.dll
+  resx syms ntoskrnl.exe --verbose
+  resx pechk .\sample.dll
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
+  resx cfg ntdll.dll --at 0x161F40
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
   resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
   resx priority
@@ -144,8 +154,9 @@ EXAMPLES
   resx explain NtQuerySystemInformation
   resx dump ntoskrnl.exe NtQuerySystemInformation --explain
   resx syms .\J58.dll --pdb .\J58.pdb
+  resx yara suspicious.dll .\rules\triage.yar
   resx update
-  resx intelli --example
+  resx peinfo --example
 "#,
         name = APP_NAME,
         version = env!("CARGO_PKG_VERSION"),
@@ -324,6 +335,51 @@ CFG EXAMPLES
   resx cfg ntdll.dll NtOpenProcess
   resx cfg ntoskrnl.exe NtQuerySystemInformation
   resx cfg ntdll.dll --at 0x161F40
+  resx cfg user32.dll --ordinal 650
+"#
+        }
+        "peinfo" => {
+            r#"
+PEINFO EXAMPLES
+  resx peinfo .\blackbird.sys
+  resx peinfo ntdll.dll
+  resx peinfo .\sample.exe --json
+
+NOTES
+  Reports PE layout, subsystem, image kind, debug info, symbols, signer state,
+  compiler/runtime heuristics, and hardening flags like ASLR, NX, CFG, and CET-related markers.
+"#
+        }
+        "sections" => {
+            r#"
+SECTIONS EXAMPLES
+  resx sections ntdll.dll
+  resx sections .\blackbird.sys
+  resx sections .\sample.dll --json
+"#
+        }
+        "eat" => {
+            r#"
+EAT EXAMPLES
+  resx eat kernel32.dll
+  resx eat ntdll.dll --json
+"#
+        }
+        "iat" => {
+            r#"
+IAT EXAMPLES
+  resx iat kernel32.dll
+  resx iat suspicious.dll --json
+"#
+        }
+        "yara" => {
+            r#"
+YARA EXAMPLES
+  resx yara suspicious.dll .\rules\triage.yar
+  resx yara ntdll.dll .\rules\exports.yar --json
+
+NOTES
+  Accepts one or more rule files through the `yara` shorthand command or `--yara`.
 "#
         }
         "follow" | "callers" => {
@@ -374,6 +430,7 @@ NOTES
 SYMBOL EXAMPLES
   resx dump ntdll.dll RtlpHeapHandleError --verbose
   resx dump ntdll.dll RtlpHeapHandleError --sym-path "C:\Symbols"
+  resx syms ntoskrnl.exe --verbose
   resx syms .\J58.dll --pdb .\J58.pdb
 "#
         }

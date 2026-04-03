@@ -31,6 +31,7 @@ pub struct AsyncProgress {
     active: bool,
     color: bool,
     render_lock: Mutex<()>,
+    render_every: usize,
 }
 
 impl AsyncProgress {
@@ -56,6 +57,7 @@ impl AsyncProgress {
             active,
             color,
             render_lock: Mutex::new(()),
+            render_every: (total / 64).max(1),
         }
     }
 
@@ -64,10 +66,12 @@ impl AsyncProgress {
             return;
         }
         let lane = lane.min(self.lanes.len().saturating_sub(1));
-        self.done.fetch_add(1, Ordering::Relaxed);
+        let done = self.done.fetch_add(1, Ordering::Relaxed) + 1;
         self.lanes[lane].done.fetch_add(1, Ordering::Relaxed);
         *self.lanes[lane].label.lock().unwrap() = label.to_owned();
-        self.render();
+        if done == self.total || done.is_multiple_of(self.render_every) {
+            self.render();
+        }
     }
 
     fn render(&self) {
