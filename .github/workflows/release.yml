@@ -35,6 +35,13 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: resx-vscode/package-lock.json
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
@@ -43,19 +50,31 @@ jobs:
         shell: powershell
         run: |
           $cargo = Get-Content resx/Cargo.toml -Raw
+          $extension = Get-Content resx-vscode/package.json -Raw | ConvertFrom-Json
           if ($cargo -notmatch 'version\s*=\s*"([^"]+)"') {
             throw 'Unable to read version from resx/Cargo.toml'
           }
           $version = $matches[1]
+          $extensionVersion = [string]$extension.version
+          if ($extensionVersion -ne $version) {
+            throw "Version mismatch: resx/Cargo.toml=$version, resx-vscode/package.json=$extensionVersion"
+          }
           $shortSha = "${{ github.event.workflow_run.head_sha || github.sha }}".Substring(0, 7)
           $tag = "v$version"
           $releaseName = "resx v$version"
           $artifactName = "resx-$version-windows-x86_64"
+          $publishRoot = "publish"
+          $publishDir = Join-Path $publishRoot "resx-$version-publish"
+          $vsixName = "resx-vscode-$version.vsix"
           "version=$version" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "extension_version=$extensionVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "short_sha=$shortSha" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "release_name=$releaseName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "artifact_name=$artifactName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "publish_root=$publishRoot" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "publish_dir=$publishDir" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "vsix_name=$vsixName" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Check release state
         id: release_state
@@ -78,32 +97,32 @@ jobs:
 
           "tag_exists=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Build release
-        run: cargo build --release
-
-      - name: Package artifacts
+      - name: Materialize signing certificate
+        id: signing
         shell: powershell
         run: |
-          $artifactRoot = "dist"
-          $artifactName = "${{ steps.version.outputs.artifact_name }}"
-          $artifactDir = Join-Path $artifactRoot $artifactName
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          Copy-Item target\release\resx.exe $artifactDir\
-          Copy-Item README.md $artifactDir\
-          Copy-Item COMMANDS.md $artifactDir\
-          Copy-Item resx\Cargo.toml (Join-Path $artifactDir "resx.Cargo.toml")
-          Compress-Archive -Path "$artifactDir\*" -DestinationPath "$artifactRoot\$artifactName.zip" -Force
-          Get-FileHash "$artifactRoot\$artifactName.zip" -Algorithm SHA256 | ForEach-Object {
-            "$($_.Hash.ToLower())  $artifactName.zip" | Out-File "$artifactRoot\$artifactName.zip.sha256" -Encoding ascii
-          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "resx-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.RESX_SIGNING_PFX_BASE64 }}"))
+          "pfx_path=$pfxPath" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build signed CLI and VSIX
+        shell: powershell
+        run: |
+          ./build.ps1 `
+            -Configuration release `
+            -OutputRoot "${{ steps.version.outputs.publish_root }}" `
+            -PfxPath "${{ steps.signing.outputs.pfx_path }}" `
+            -PfxPassword "${{ secrets.RESX_PFX_PASSWORD }}"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: resx-release-${{ steps.version.outputs.version }}
           path: |
-            dist/*.zip
-            dist/*.sha256
+            ${{ steps.version.outputs.publish_root }}/*.zip
+            ${{ steps.version.outputs.publish_root }}/*.sha256
+            ${{ steps.version.outputs.publish_dir }}/cli/**
+            ${{ steps.version.outputs.publish_dir }}/vscode/**
 
       - name: Create version tag
         if: steps.release_state.outputs.tag_exists != 'true'
@@ -114,6 +133,14 @@ jobs:
           git tag "${{ steps.version.outputs.tag }}" "${{ github.event.workflow_run.head_sha || github.sha }}"
           git push origin "refs/tags/${{ steps.version.outputs.tag }}"
 
+      - name: Publish VS Code extension
+        shell: powershell
+        working-directory: resx-vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          npx --yes @vscode/vsce publish --packagePath "..\${{ steps.version.outputs.publish_dir }}\vscode\${{ steps.version.outputs.vsix_name }}"
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -121,8 +148,10 @@ jobs:
           name: ${{ steps.version.outputs.release_name }}
           target_commitish: ${{ github.event.workflow_run.head_sha || github.sha }}
           files: |
-            dist/*.zip
-            dist/*.sha256
+            ${{ steps.version.outputs.publish_root }}/*.zip
+            ${{ steps.version.outputs.publish_root }}/*.sha256
+            ${{ steps.version.outputs.publish_dir }}/vscode/${{ steps.version.outputs.vsix_name }}
+            ${{ steps.version.outputs.publish_dir }}/vscode/${{ steps.version.outputs.vsix_name }}.sha256
           generate_release_notes: true
           overwrite_files: true
           append_body: false
