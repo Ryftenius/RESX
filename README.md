@@ -14,6 +14,8 @@
 
 RESX is built for fast terminal-first reversing: exports, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, switch-table analysis, caller tracing, PE inspection, YARA, and triage.
 
+The Rust CLI now lives under `resx/` and the repository root is a Cargo workspace that also houses the VS Code extension.
+
 ## VS Code Extension
 
 The repository also includes `resx-vscode`, the Visual Studio Code extension for browsing PE binaries with the same RESX engine.

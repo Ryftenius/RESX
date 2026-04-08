@@ -4,6 +4,8 @@ RESX Binary Viewer is the Visual Studio Code extension for inspecting Windows PE
 
 It opens `.exe`, `.dll`, and `.sys` files in a custom editor and gives you a focused binary-analysis workspace inside VS Code.
 
+The Rust CLI crate now lives in `../resx`, while this extension remains in `resx-vscode`.
+
 ## Features
 
 - PE overview, sections, exports, imports, symbols, types, and triage views
