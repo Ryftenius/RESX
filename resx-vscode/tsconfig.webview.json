@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "node",
+    "lib": ["ES2020", "DOM"],
+    "outDir": "./media",
+    "rootDir": "./media-src",
+    "removeComments": true,
+    "sourceMap": false,
+    "noCheck": true,
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "files": [
+    "./media-src/main.ts",
+    "./media-src/cfg.ts",
+    "./media-src/tables.ts"
+  ]
+}
