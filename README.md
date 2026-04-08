@@ -21,6 +21,7 @@ The repository also includes `resx-vscode`, the Visual Studio Code extension for
 - Open `.exe`, `.dll`, and `.sys` files directly in a custom editor
 - Run `RESX: Locate`, `RESX: Locate Symbol`, or `RESX: Dump` from the command palette
 - `RESX: Dump` loads exports and PDB-backed symbols for the selected module with progress feedback before opening the function
+- Use the `Dev` tab to inspect every `resx` command invocation, arguments, timing, and stderr/error output inside the viewer
 - Jump straight into resolved system binaries such as `C:\Windows\System32\ntdll.dll`
 
 Extension metadata and Marketplace packaging live in `resx-vscode/package.json`.
