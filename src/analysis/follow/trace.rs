@@ -98,6 +98,7 @@ pub struct GlobalCallGraph {
     direct: std::collections::HashMap<DirectTarget, Vec<Caller>>,
     imports: std::collections::HashMap<String, Vec<Caller>>,
     image_count: usize,
+    total_file_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -186,11 +187,16 @@ impl GlobalCallGraph {
             direct,
             imports,
             image_count: loaded.len(),
+            total_file_bytes: loaded.iter().map(|idx| idx.file_len).sum(),
         }
     }
 
     pub fn image_count(&self) -> usize {
         self.image_count
+    }
+
+    pub fn total_file_bytes(&self) -> u64 {
+        self.total_file_bytes
     }
 
     fn callers_for(&self, target: &FuncRef) -> Vec<Caller> {

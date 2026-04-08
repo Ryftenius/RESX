@@ -84,6 +84,7 @@ pub fn run(
         .ok_or_else(|| format!("RVA 0x{:08X}: not in any section", target_rva))?;
     let insns = disassemble_at(
         &raw,
+        &pe,
         file_off,
         target_rva,
         arch,

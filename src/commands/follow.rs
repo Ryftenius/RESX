@@ -144,6 +144,33 @@ pub fn run(
                 ))
             )
             .ok();
+            if cfg.verbose {
+                writeln!(w, "{}", c.bold(&c.b_blue("Verbose Work Summary:"))).ok();
+                writeln!(
+                    w,
+                    "  {:<20} {}",
+                    c.bold("FilesRequested"),
+                    scan_images.len()
+                )
+                .ok();
+                writeln!(
+                    w,
+                    "  {:<20} {}",
+                    c.bold("FilesIndexed"),
+                    graph.image_count()
+                )
+                .ok();
+                writeln!(
+                    w,
+                    "  {:<20} {}",
+                    c.bold("BytesIndexed"),
+                    graph.total_file_bytes()
+                )
+                .ok();
+                writeln!(w, "  {:<20} {}", c.bold("ExportsScanned"), exports.len()).ok();
+                writeln!(w, "  {:<20} {}", c.bold("CallerRefs"), total_refs).ok();
+                writeln!(w, "  {:<20} {}", c.bold("UniqueFunctions"), unique_fns).ok();
+            }
         }
     }
 

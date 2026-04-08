@@ -152,6 +152,7 @@ pub struct ImportEntry {
     pub ordinal: u16,
     pub hint: u16,
     pub by_ord: bool,
+    pub slot_rva: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +221,20 @@ pub struct PeLoadConfigInfo {
     pub guard_flags: u32,
     pub guard_eh_continuation_count: u64,
     pub guard_xfg_check_function_pointer: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeRuntimeFunctionInfo {
+    pub begin_rva: u32,
+    pub end_rva: u32,
+    pub unwind_info_rva: u32,
+    pub unwind_version: u8,
+    pub unwind_flags: u8,
+    pub prolog_size: u8,
+    pub unwind_code_count: u8,
+    pub frame_register: u8,
+    pub frame_offset: u8,
+    pub exception_handler_rva: u32,
 }
 
 #[derive(Debug)]

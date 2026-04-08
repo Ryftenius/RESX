@@ -132,6 +132,7 @@ pub struct MitigationsJson {
     pub high_entropy_va: bool,
     pub nx_compat: bool,
     pub no_seh: bool,
+    pub seh_available: bool,
     pub force_integrity: bool,
     pub appcontainer: bool,
     pub wdm_driver: bool,
@@ -150,6 +151,9 @@ pub struct MitigationsJson {
     pub delay_load_iat_protected: bool,
     pub security_cookie: bool,
     pub safe_seh: bool,
+    pub se_handler_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub veh_imports: Vec<String>,
 }
 
 pub struct BuildAssessment {

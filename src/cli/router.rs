@@ -35,6 +35,15 @@ pub fn dispatch(
         return commands::explain::run(term, cfg, w, c);
     }
 
+    if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("types") {
+        let dll = &dll_arg;
+        let query = &func_arg;
+        if dll.is_empty() {
+            return Err("Use `resx types <dll> [query]`".to_owned());
+        }
+        return commands::types::run(dll, query, cfg, w, c);
+    }
+
     if is_locate_mode(cfg, &dll_arg, &func_arg) {
         let name = if !func_arg.is_empty() {
             &func_arg
@@ -76,7 +85,7 @@ pub fn dispatch(
     }
     if dll_arg.is_empty() {
         return Err(
-            "Specify a command such as dump, cfg, intelli, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, yara, update, or help".to_owned(),
+            "Specify a command such as dump, cfg, intelli, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, yara, update, or help".to_owned(),
         );
     }
 

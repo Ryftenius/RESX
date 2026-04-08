@@ -34,6 +34,7 @@ USAGE
   resx cfg <dll> --at <rva> [options]
   resx cfg <dll> --ordinal <n> [options]
   resx intelli <dll> [function] [options]
+  resx types <dll> [query] [options]
 
   resx peinfo <dll> [options]
   resx sections <dll> [options]
@@ -57,6 +58,7 @@ COMMANDS
   dump        Disassemble or reconstruct one target by name, RVA, or ordinal.
   cfg         Show a control-flow graph view for one target by name, RVA, or ordinal.
   intelli     Run heuristic triage over a target image or function.
+  types       Browse PDB-backed type names and symbol references.
   peinfo      Show PE metadata, version resources, signer info, and headers.
   sections    Show section layout, entropy, and protection expectations.
   eat         Dump the Export Address Table.
@@ -81,7 +83,7 @@ DUMP / INTELLI OPTIONS
   --unsafe-map-image         allow mapping an on-disk image into RESX for checks that need memory bytes
   --hookchk                  show static entry-hook / thunk indicators
   --intelli                  run heuristic triage
-  --xrefs                    show call targets (deduplicated flat list)
+  --xrefs                    show incoming intra-image CALL/JMP references to the target
   --strings                  show referenced string literals
   --funcs                    show API call map: every CALL/JMP with its resolved target
   --funcs-depth <N>          recursively trace internal subs N levels deep (implies --funcs)
@@ -108,10 +110,11 @@ FOLLOW OPTIONS
   --show-rva                 show owning function RVA
   --show-site                show call-site RVA(s)
   --filter-dll <text>        restrict caller DLL names
-  --include-dir <dir>        add extra directories to scan
+  --include-dir <dir>        add extra directories to scan (.dll/.sys, plus .exe with --scan-exe)
   --include-image <dll>      explicitly include extra images to scan
   --scan-exe                 include EXEs
-  --include <glob>           include filter
+  --include <glob>           include filter across the whole scan list
+  --scope-file <glob>        filter only files discovered via --include-dir (alias: --include-file)
   --exclude <glob>           exclude filter
   --max-dll-size <mb>        max image size
   --workers <n>              parallel workers
@@ -147,6 +150,7 @@ EXAMPLES
   resx cfg ntdll.dll --at 0x161F40
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
   resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
+  resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
   resx priority
   resx locate NtOpenProcess --include-dir C:\Work\Drivers
   resx locate-sym NtOpenProcess --include-image .\mydriver.sys
@@ -219,6 +223,7 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
     let mut rewritten = vec![raw_args[0].clone()];
     match cmd.as_str() {
         "dump" => rewritten.extend(raw_args.iter().skip(2).cloned()),
+        "types" => rewritten.extend(raw_args.iter().skip(2).cloned()),
         "cfg" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--cfg".to_string());
@@ -388,6 +393,7 @@ CALLERS EXAMPLES
   resx callers kernel32.dll CreateFileW
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
   resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
+  resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
   resx callers user32.dll MessageBoxW --scan-exe --show-site --json
 "#
         }

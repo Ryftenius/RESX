@@ -26,10 +26,11 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
                 json!({
                     "dll":     d.dll,
                     "imports": d.entries.iter().map(|e| json!({
-                        "name":    e.name,
-                        "ordinal": e.ordinal,
-                        "hint":    e.hint,
-                        "by_ord":  e.by_ord,
+                    "name":    e.name,
+                    "ordinal": e.ordinal,
+                    "hint":    e.hint,
+                    "by_ord":  e.by_ord,
+                    "slot_rva": format!("0x{:08X}", e.slot_rva),
                     })).collect::<Vec<_>>(),
                 })
             })

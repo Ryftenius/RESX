@@ -3,7 +3,15 @@ use iced_x86::{Mnemonic, OpKind, Register};
 use crate::analysis::disasm::{is_jcc, Instruction};
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::known::describe_known_address;
-use crate::formats::pe::Export;
+use crate::formats::pe::{Export, PeRuntimeFunctionInfo};
+
+#[derive(Debug, Clone)]
+struct RecompPrototype {
+    return_type: String,
+    calling_convention: String,
+    params: Vec<String>,
+    raw_type_name: String,
+}
 
 fn fmt_op(
     instr: &iced_x86::Instruction,
@@ -176,6 +184,7 @@ pub fn recomp_c(
     arch: u32,
     image_base: u64,
     symbols: Option<&SymbolIndex>,
+    unwind: Option<&PeRuntimeFunctionInfo>,
     _cfg: &crate::core::config::Config,
 ) -> String {
     if insns.is_empty() {
@@ -192,11 +201,14 @@ pub fn recomp_c(
         }
     }
 
-    let (cc, param_regs): (&str, &[&str]) = if arch == 64 {
+    let (default_cc, param_regs): (&str, &[&str]) = if arch == 64 {
         ("__fastcall", &["rcx", "rdx", "r8", "r9"])
     } else {
         ("__stdcall", &[])
     };
+    let prototype = symbols
+        .and_then(|idx| idx.exact(image_base + exp.rva as u64))
+        .and_then(|sym| parse_pdb_prototype(&sym.type_name, default_cc));
 
     let mut used_params = 0usize;
     for insn in insns {
@@ -215,9 +227,53 @@ pub fn recomp_c(
         used_params = 4;
     }
 
-    let ret_type = "NTSTATUS";
+    let ret_type = prototype
+        .as_ref()
+        .map(|p| p.return_type.as_str())
+        .unwrap_or("NTSTATUS");
+    let cc = prototype
+        .as_ref()
+        .map(|p| p.calling_convention.as_str())
+        .unwrap_or(default_cc);
+
+    if let Some(proto) = prototype.as_ref() {
+        sb.push_str(&format!("// PDB type: {}\n", proto.raw_type_name));
+    }
+    if let Some(unwind) = unwind {
+        sb.push_str(&format!(
+            "// .pdata: range=0x{:08X}-0x{:08X} unwind=0x{:08X} version={} prolog={} unwind_codes={} flags=0x{:X}",
+            unwind.begin_rva,
+            unwind.end_rva,
+            unwind.unwind_info_rva,
+            unwind.unwind_version,
+            unwind.prolog_size,
+            unwind.unwind_code_count,
+            unwind.unwind_flags
+        ));
+        if unwind.frame_register != 0 {
+            sb.push_str(&format!(
+                " frame_reg={} frame_off={}",
+                reg_num_name(unwind.frame_register),
+                unwind.frame_offset
+            ));
+        }
+        if unwind.exception_handler_rva != 0 {
+            sb.push_str(&format!(" handler=0x{:08X}", unwind.exception_handler_rva));
+        }
+        sb.push('\n');
+    }
+
     sb.push_str(&format!("{} {} {}(\n", ret_type, cc, exp.name));
-    if used_params == 0 {
+    if let Some(proto) = prototype.as_ref() {
+        if proto.params.is_empty() {
+            sb.push_str("    void\n");
+        } else {
+            for (i, param) in proto.params.iter().enumerate() {
+                let sep = if i + 1 == proto.params.len() { "" } else { "," };
+                sb.push_str(&format!("    {}{} \n", param, sep));
+            }
+        }
+    } else if used_params == 0 {
         sb.push_str("    void\n");
     } else {
         for i in 0..used_params {
@@ -354,6 +410,93 @@ pub fn recomp_c(
 
     sb.push_str("}\n");
     sb
+}
+
+fn parse_pdb_prototype(type_name: &str, default_cc: &str) -> Option<RecompPrototype> {
+    let raw = type_name.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let open = raw.rfind('(')?;
+    let close = raw.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+
+    let params_text = raw[open + 1..close].trim();
+    let prefix = raw[..open].trim().trim_end_matches('*').trim();
+    let (return_type, calling_convention) = split_return_and_cc(prefix, default_cc);
+    let params = parse_params(params_text);
+
+    Some(RecompPrototype {
+        return_type: if return_type.is_empty() {
+            "NTSTATUS".to_owned()
+        } else {
+            return_type
+        },
+        calling_convention,
+        params,
+        raw_type_name: raw.to_owned(),
+    })
+}
+
+fn split_return_and_cc(prefix: &str, default_cc: &str) -> (String, String) {
+    let ccs = [
+        "__cdecl",
+        "__stdcall",
+        "__fastcall",
+        "__thiscall",
+        "__vectorcall",
+    ];
+    for cc in ccs {
+        if let Some(pos) = prefix.find(cc) {
+            let ret = prefix[..pos].trim().trim_matches('(').trim().to_owned();
+            return (ret, cc.to_owned());
+        }
+    }
+    (
+        prefix.trim().trim_matches('(').trim().to_owned(),
+        default_cc.to_owned(),
+    )
+}
+
+fn parse_params(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("void") {
+        return Vec::new();
+    }
+
+    trimmed
+        .split(',')
+        .enumerate()
+        .map(|(idx, raw)| {
+            let ty = raw.trim().trim_matches('(').trim_matches(')').trim();
+            let ty = if ty.is_empty() { "void*" } else { ty };
+            format!("{ty} param_{}", idx + 1)
+        })
+        .collect()
+}
+
+fn reg_num_name(reg: u8) -> &'static str {
+    match reg {
+        1 => "rcx",
+        2 => "rdx",
+        3 => "rbx",
+        4 => "rsp",
+        5 => "rbp",
+        6 => "rsi",
+        7 => "rdi",
+        8 => "r8",
+        9 => "r9",
+        10 => "r10",
+        11 => "r11",
+        12 => "r12",
+        13 => "r13",
+        14 => "r14",
+        15 => "r15",
+        _ => "?",
+    }
 }
 
 fn preserves_flags(m: Mnemonic) -> bool {

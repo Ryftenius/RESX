@@ -7,8 +7,9 @@ use std::io::Write;
 use std::sync::OnceLock;
 
 use self::callmap::{
-    best_symbol_name_for_rva, print_api_calls, recover_local_switch_dispatch,
-    switch_dispatch_to_api_calls, QsiDispatcher,
+    best_symbol_name_for_rva, print_api_calls, recover_local_switch_dispatch, render_api_call_tree,
+    resolve_syscall_call_details, switch_dispatch_to_api_calls, synthetic_syscall_api_call,
+    QsiDispatcher,
 };
 use self::json::{
     hex_bytes, to_anomaly_json, to_edr_json, to_section_json, to_yara_json, ApiCallJson,
@@ -38,7 +39,10 @@ use crate::core::output::{
 };
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
-use crate::formats::pe::{parse_pe, read_exports, read_imports, Export};
+use crate::formats::pe::{
+    find_iat_slots_by_name, parse_pe, read_exports, read_imports, read_runtime_function,
+    resolve_iat_slot, Export,
+};
 
 #[derive(Debug, Clone)]
 struct RecoveredSwitchTarget {
@@ -174,6 +178,7 @@ pub fn run(
     let symbol_index = SymbolIndex::from_exports_and_pdb(&exports, &pdb_symbols, image_base);
     let imports = read_imports(&pe, &raw);
     progress.tick("reading import table");
+    let import_count: usize = imports.iter().map(|dll| dll.entries.len()).sum();
     let yara_matches = if cfg.yara.is_empty() {
         Vec::new()
     } else {
@@ -242,6 +247,9 @@ pub fn run(
                 insn_count: 0,
                 pdb_loaded: !pdb_symbols.is_empty(),
                 followed_jmp: String::new(),
+                is_import_slot: false,
+                import_target_dll: String::new(),
+                import_target_name: String::new(),
                 instructions: Vec::new(),
                 xrefs: Vec::new(),
                 strings: Vec::new(),
@@ -251,6 +259,8 @@ pub fn run(
                 hook_indicators: Vec::new(),
                 edrchk: None,
                 api_calls: Vec::new(),
+                api_call_tree: String::new(),
+                current_syscall: None,
                 explain: None,
             };
             let json = serde_json::to_string_pretty(&result).unwrap_or_default();
@@ -285,6 +295,7 @@ pub fn run(
     let mut target_rva = target_rva;
 
     let mut followed_desc = String::new();
+    let import_slot_target = resolve_iat_slot(&pe, &raw, target_rva);
 
     let entry_thunk = follow_jmp_thunk(&raw, &pe, target_rva);
 
@@ -301,6 +312,7 @@ pub fn run(
                         writeln!(w, "{}", c.bold(&c.b_yellow(&title))).ok();
                         if let Ok(stub_insns) = disassemble_at(
                             &raw,
+                            &pe,
                             file_off,
                             target_rva,
                             arch,
@@ -355,6 +367,7 @@ pub fn run(
 
     let insns = disassemble_at(
         &raw,
+        &pe,
         file_off,
         target_rva,
         arch,
@@ -415,6 +428,130 @@ pub fn run(
         .map(|dispatch| switch_dispatch_to_api_calls(&insns, dispatch))
         .unwrap_or_default();
 
+    let switch_semantics = recovered_switch
+        .as_ref()
+        .and_then(|_| load_switch_semantics(&resolved_name));
+
+    let mut hook_indicators = if want_hookchk {
+        detect_static_hook_indicators(&insns, entry_thunk.as_ref())
+    } else {
+        Vec::new()
+    };
+    if let Some(edr) = &edr_result {
+        if edr.modified {
+            hook_indicators.push(format!(
+                "in-memory prologue differs from disk at {} offset(s)",
+                edr.diff_offsets.len()
+            ));
+        }
+    }
+    let xrefs = if cfg.show_xrefs {
+        let x = find_xrefs(&raw, &pe, &exports, target_rva, &resolved_name);
+        progress.tick("collecting cross references");
+        x
+    } else {
+        Vec::new()
+    };
+
+    let str_refs = if cfg.show_strings {
+        let s = find_string_refs(&raw, &pe, &insns);
+        progress.tick("finding string references");
+        s
+    } else {
+        Vec::new()
+    };
+
+    let api_calls = if cfg.funcs_depth > 0 {
+        let mut calls = collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base);
+
+        // Merge switch-dispatch targets.  First drop any unresolved register-indirect
+        // entry at the same JMP site (they are superseded by the resolved targets).
+        let switch_jmp_rvas: std::collections::HashSet<u32> =
+            switch_api_calls.iter().map(|c| c.rva).collect();
+        if !switch_jmp_rvas.is_empty() {
+            calls.retain(|c| {
+                !(c.is_indirect && c.target_rva == 0 && switch_jmp_rvas.contains(&c.rva))
+            });
+        }
+        calls.extend(switch_api_calls.iter().cloned());
+        calls.sort_by_key(|c| c.rva);
+        progress.tick("building API call map");
+        calls
+    } else {
+        Vec::new()
+    };
+    let api_call_tree = if cfg.funcs_depth > 0 {
+        render_api_call_tree(
+            &api_calls,
+            &insns,
+            &resolved_name,
+            &raw,
+            &pe,
+            &symbol_index,
+            &exports,
+            arch,
+            image_base,
+            cfg,
+            target_rva,
+        )
+    } else {
+        String::new()
+    };
+    let current_syscall = synthetic_syscall_api_call(&insns, &resolved_name)
+        .and_then(|call| resolve_syscall_call_details(&call, &insns, cfg));
+
+    let intelli_findings = if want_intelli {
+        let findings = analyze_image(&raw, &imports, Some(&insns));
+        progress.tick("running Intelli triage");
+        findings
+    } else {
+        Vec::new()
+    };
+
+    let recomp_str = if want_recomp {
+        let runtime_function = read_runtime_function(&pe, &raw, target_rva);
+        let exp = Export {
+            name: resolved_name.clone(),
+            ordinal: 0,
+            rva: target_rva,
+            forward_to: String::new(),
+        };
+        let s = recomp_c(
+            &insns,
+            &exp,
+            arch,
+            image_base,
+            Some(&symbol_index),
+            runtime_function.as_ref(),
+            cfg,
+        );
+        progress.tick("reconstructing C output");
+        if !cfg.c_out.is_empty() {
+            std::fs::write(&cfg.c_out, &s)
+                .map_err(|e| format!("write C output '{}': {}", cfg.c_out, e))?;
+            if !cfg.quiet {
+                writeln!(
+                    w,
+                    "{}",
+                    c.ok(&format!("Wrote C reconstruction to {}", cfg.c_out))
+                )
+                .ok();
+            }
+        }
+        s
+    } else {
+        String::new()
+    };
+
+    let cfg_text = if want_cfg {
+        let plain = render_cfg_text_with_edges(&insns, image_base, &recovered_cfg_edges);
+        progress.tick("building control-flow graph");
+        plain
+    } else {
+        String::new()
+    };
+
+    progress.finish();
     if !cfg.json {
         writeln!(w).ok();
         let mut title = format!("{}!{}  [RVA 0x{:08X}", dll_name, resolved_name, target_rva);
@@ -463,104 +600,46 @@ pub fn run(
             ))
         )
         .ok();
-    }
 
-    let switch_semantics = recovered_switch
-        .as_ref()
-        .and_then(|_| load_switch_semantics(&resolved_name));
-
-    if !cfg.json {
         if let Some(dispatch) = recovered_switch.as_ref() {
             print_switch_map(w, dispatch, switch_semantics.as_ref(), c);
         }
-    }
-
-    if let Some(edr) = &edr_result {
-        print_edr_report(w, edr, c);
-    }
-
-    let mut hook_indicators = if want_hookchk {
-        detect_static_hook_indicators(&insns, entry_thunk.as_ref())
-    } else {
-        Vec::new()
-    };
-    if let Some(edr) = &edr_result {
-        if edr.modified {
-            hook_indicators.push(format!(
-                "in-memory prologue differs from disk at {} offset(s)",
-                edr.diff_offsets.len()
-            ));
+        if let Some(edr) = &edr_result {
+            print_edr_report(w, edr, c);
         }
-    }
-    if want_hookchk && !cfg.json {
-        writeln!(w).ok();
-        writeln!(w, "{}", c.bold(&c.b_mag("Hook Indicators:"))).ok();
-        if hook_indicators.is_empty() {
-            writeln!(w, "{}", c.dim("  (none detected)")).ok();
-        } else {
-            for finding in &hook_indicators {
-                writeln!(w, "  {}", c.warn(finding)).ok();
+        if want_hookchk {
+            writeln!(w).ok();
+            writeln!(w, "{}", c.bold(&c.b_mag("Hook Indicators:"))).ok();
+            if hook_indicators.is_empty() {
+                writeln!(w, "{}", c.dim("  (none detected)")).ok();
+            } else {
+                for finding in &hook_indicators {
+                    writeln!(w, "  {}", c.warn(finding)).ok();
+                }
             }
         }
-    }
-
-    let xrefs = if cfg.show_xrefs {
-        let x = find_xrefs(&insns, &exports, image_base);
-        if !cfg.json {
-            writeln!(w, "{}", c.bold("\nCall Targets (xrefs out):")).ok();
-            if x.is_empty() {
+        if cfg.show_xrefs {
+            writeln!(w, "{}", c.bold("\nCross References:")).ok();
+            if xrefs.is_empty() {
                 writeln!(w, "{}", c.dim("  (none)")).ok();
             }
-            for r in &x {
+            for r in &xrefs {
                 writeln!(w, "  {}", c.cyan(r)).ok();
             }
         }
-        x
-    } else {
-        Vec::new()
-    };
-    if cfg.show_xrefs {
-        progress.tick("collecting call targets");
-    }
-
-    let str_refs = if cfg.show_strings {
-        let s = find_string_refs(&raw, &pe, &insns);
-        if !cfg.json {
+        if cfg.show_strings {
             writeln!(w, "{}", c.bold("\nString References:")).ok();
-            if s.is_empty() {
+            if str_refs.is_empty() {
                 writeln!(w, "{}", c.dim("  (none)")).ok();
             }
-            for r in &s {
+            for r in &str_refs {
                 writeln!(w, "  {}", c.green(r)).ok();
             }
         }
-        s
-    } else {
-        Vec::new()
-    };
-    if cfg.show_strings {
-        progress.tick("finding string references");
-    }
-
-    let api_calls = if cfg.funcs_depth > 0 {
-        let mut calls = collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base);
-
-        // Merge switch-dispatch targets.  First drop any unresolved register-indirect
-        // entry at the same JMP site (they are superseded by the resolved targets).
-        let switch_jmp_rvas: std::collections::HashSet<u32> =
-            switch_api_calls.iter().map(|c| c.rva).collect();
-        if !switch_jmp_rvas.is_empty() {
-            calls.retain(|c| {
-                !(c.is_indirect && c.target_rva == 0 && switch_jmp_rvas.contains(&c.rva))
-            });
-        }
-        calls.extend(switch_api_calls.iter().cloned());
-        calls.sort_by_key(|c| c.rva);
-
-        if !cfg.json {
+        if cfg.funcs_depth > 0 {
             print_api_calls(
                 w,
-                &calls,
+                &api_calls,
                 &insns,
                 &resolved_name,
                 c,
@@ -574,60 +653,14 @@ pub fn run(
                 target_rva,
             );
         }
-        progress.tick("building API call map");
-        calls
-    } else {
-        Vec::new()
-    };
-
-    let intelli_findings = if want_intelli {
-        let findings = analyze_image(&raw, &imports, Some(&insns));
-        if !cfg.json {
-            print_intelli_findings(w, &findings, c);
+        if want_intelli {
+            print_intelli_findings(w, &intelli_findings, c);
         }
-        findings
-    } else {
-        Vec::new()
-    };
-    if want_intelli && !only_metadata {
-        progress.tick("running Intelli triage");
-    }
-
-    let recomp_str = if want_recomp {
-        let exp = Export {
-            name: resolved_name.clone(),
-            ordinal: 0,
-            rva: target_rva,
-            forward_to: String::new(),
-        };
-        let s = recomp_c(&insns, &exp, arch, image_base, Some(&symbol_index), cfg);
-        if !cfg.c_out.is_empty() {
-            std::fs::write(&cfg.c_out, &s)
-                .map_err(|e| format!("write C output '{}': {}", cfg.c_out, e))?;
-            if !cfg.quiet {
-                writeln!(
-                    w,
-                    "{}",
-                    c.ok(&format!("Wrote C reconstruction to {}", cfg.c_out))
-                )
-                .ok();
-            }
-        }
-        if cfg.recomp && !cfg.json {
+        if cfg.recomp {
             writeln!(w).ok();
-            print_c_recomp(w, &s, c);
+            print_c_recomp(w, &recomp_str, c);
         }
-        s
-    } else {
-        String::new()
-    };
-    if want_recomp {
-        progress.tick("reconstructing C output");
-    }
-
-    let cfg_text = if want_cfg {
-        let plain = render_cfg_text_with_edges(&insns, image_base, &recovered_cfg_edges);
-        if !cfg.json {
+        if want_cfg {
             writeln!(w, "\n{}", c.bold(&c.b_blue("Control Flow Graph:"))).ok();
             let colored =
                 render_cfg_colored_with_edges(&insns, image_base, c, &recovered_cfg_edges);
@@ -636,15 +669,59 @@ pub fn run(
                 writeln!(w).ok();
             }
         }
-        plain
-    } else {
-        String::new()
-    };
-    if want_cfg {
-        progress.tick("building control-flow graph");
+        if cfg.verbose {
+            let disassembled_bytes: usize = insns.iter().map(|i| i.bytes.len()).sum();
+            writeln!(w).ok();
+            writeln!(w, "{}", c.bold(&c.b_blue("Verbose Work Summary:"))).ok();
+            writeln!(w, "  {:<20} {}", c.bold("FilesRead"), 1).ok();
+            writeln!(w, "  {:<20} {}", c.bold("BytesRead"), raw.len()).ok();
+            writeln!(
+                w,
+                "  {:<20} {}",
+                c.bold("BytesDisassembled"),
+                disassembled_bytes
+            )
+            .ok();
+            writeln!(w, "  {:<20} {}", c.bold("InstructionsDecoded"), insns.len()).ok();
+            writeln!(w, "  {:<20} {}", c.bold("ExportsScanned"), exports.len()).ok();
+            writeln!(w, "  {:<20} {}", c.bold("ImportsScanned"), import_count).ok();
+            writeln!(
+                w,
+                "  {:<20} {}",
+                c.bold("PdbSymbolsLoaded"),
+                pdb_symbols.len()
+            )
+            .ok();
+            if !cfg.yara.is_empty() {
+                writeln!(w, "  {:<20} {}", c.bold("YaraRules"), cfg.yara.len()).ok();
+                writeln!(w, "  {:<20} {}", c.bold("YaraMatches"), yara_matches.len()).ok();
+            }
+            if cfg.show_xrefs {
+                writeln!(w, "  {:<20} {}", c.bold("CrossReferences"), xrefs.len()).ok();
+            }
+            if cfg.show_strings {
+                writeln!(w, "  {:<20} {}", c.bold("StringRefs"), str_refs.len()).ok();
+            }
+            if want_intelli {
+                writeln!(
+                    w,
+                    "  {:<20} {}",
+                    c.bold("IntelliFindings"),
+                    intelli_findings.len()
+                )
+                .ok();
+            }
+            if want_cfg {
+                writeln!(
+                    w,
+                    "  {:<20} {}",
+                    c.bold("RecoveredCfgEdges"),
+                    recovered_cfg_edges.len()
+                )
+                .ok();
+            }
+        }
     }
-
-    progress.finish();
     if cfg.json {
         let result = FuncResult {
             dll: dll_name,
@@ -673,6 +750,15 @@ pub fn run(
             insn_count: insns.len(),
             pdb_loaded,
             followed_jmp: followed_desc,
+            is_import_slot: import_slot_target.is_some(),
+            import_target_dll: import_slot_target
+                .as_ref()
+                .map(|(dll, _)| dll.clone())
+                .unwrap_or_default(),
+            import_target_name: import_slot_target
+                .as_ref()
+                .map(|(_, name)| name.clone())
+                .unwrap_or_default(),
             instructions: insns
                 .iter()
                 .map(|i| InsnJson {
@@ -704,22 +790,40 @@ pub fn run(
             edrchk: edr_result.as_ref().map(to_edr_json),
             api_calls: api_calls
                 .iter()
-                .map(|ac| ApiCallJson {
-                    rva: format!("0x{:08X}", ac.rva),
-                    kind: ac.kind.clone(),
-                    target_rva: if ac.target_rva != 0 {
-                        format!("0x{:08X}", ac.target_rva)
-                    } else {
-                        String::new()
-                    },
-                    label: ac.label.clone(),
-                    dll: ac.dll.clone(),
-                    is_import: ac.is_import,
-                    is_indirect: ac.is_indirect,
-                    indirect_method: ac.indirect_method.clone(),
-                    switch_cases: ac.switch_cases.clone(),
+                .map(|ac| {
+                    let syscall = resolve_syscall_call_details(ac, &insns, cfg).map(|details| {
+                        self::json::SyscallJson {
+                            service_number: details.service_number.map(|n| format!("0x{:X}", n)),
+                            kernel_module: details.kernel_module,
+                            kernel_symbol: details.kernel_symbol,
+                            kernel_rva: format!("0x{:08X}", details.kernel_rva),
+                        }
+                    });
+                    ApiCallJson {
+                        rva: format!("0x{:08X}", ac.rva),
+                        kind: ac.kind.clone(),
+                        target_rva: if ac.target_rva != 0 {
+                            format!("0x{:08X}", ac.target_rva)
+                        } else {
+                            String::new()
+                        },
+                        label: ac.label.clone(),
+                        dll: ac.dll.clone(),
+                        is_import: ac.is_import,
+                        is_indirect: ac.is_indirect,
+                        indirect_method: ac.indirect_method.clone(),
+                        switch_cases: ac.switch_cases.clone(),
+                        syscall,
+                    }
                 })
                 .collect(),
+            api_call_tree,
+            current_syscall: current_syscall.map(|details| self::json::SyscallJson {
+                service_number: details.service_number.map(|n| format!("0x{:X}", n)),
+                kernel_module: details.kernel_module,
+                kernel_symbol: details.kernel_symbol,
+                kernel_rva: format!("0x{:08X}", details.kernel_rva),
+            }),
             explain: explain_result,
         };
         let json = serde_json::to_string_pretty(&result).unwrap_or_default();
@@ -1072,8 +1176,8 @@ pub(crate) fn resolve_function(
     func_arg: &str,
     exports: &[Export],
     pdb_symbols: &[crate::formats::pdb::PdbSymbol],
-    _pe: &crate::formats::pe::PeFile,
-    _raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    raw: &[u8],
     dll_path: &str,
     image_base: u64,
     cfg: &Config,
@@ -1164,6 +1268,22 @@ pub(crate) fn resolve_function(
         }
     }
 
+    let iat_slots = find_iat_slots_by_name(pe, raw, func_arg);
+    if let Some((slot_rva, dll_name, import_name)) = iat_slots.first() {
+        if !cfg.quiet {
+            writeln!(
+                w,
+                "{}",
+                c.ok(&format!(
+                    "{}!{} @ IAT RVA 0x{:08X}  (from current image imports)",
+                    dll_name, import_name, slot_rva
+                ))
+            )
+            .ok();
+        }
+        return Ok((*slot_rva, import_name.clone(), false));
+    }
+
     writeln!(
         w,
         "\n{} '{}' not found in EAT or PDB symbols",
@@ -1233,6 +1353,10 @@ fn suggest_cached_pdb_symbols(
 
 fn normalize_symbol_name(name: &str) -> String {
     let tail = name.rsplit('!').next().unwrap_or(name);
+    let tail = match tail.split_once("$thunk$") {
+        Some((base, _)) if !base.is_empty() => base,
+        _ => tail,
+    };
     let trimmed = tail.trim_start_matches('_');
     let core = match trimmed.rsplit_once('@') {
         Some((base, suffix)) if suffix.chars().all(|ch| ch.is_ascii_digit()) => base,

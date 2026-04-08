@@ -9,4 +9,5 @@ pub mod priority;
 pub mod show_eat;
 pub mod show_iat;
 pub mod show_syms;
+pub mod types;
 pub mod update;

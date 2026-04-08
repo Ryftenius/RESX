@@ -28,6 +28,8 @@ mod win {
     type FnSymFromName = unsafe extern "system" fn(*mut c_void, *const u8, *mut SymbolInfo) -> i32;
     type FnSymEnumSymbols =
         unsafe extern "system" fn(*mut c_void, u64, *const u8, SymEnumSymbolsProc, usize) -> i32;
+    type FnSymEnumTypes =
+        unsafe extern "system" fn(*mut c_void, u64, SymEnumSymbolsProc, usize) -> i32;
     type FnSymGetTypeInfo =
         unsafe extern "system" fn(*mut c_void, u64, u32, u32, *mut c_void) -> i32;
     type FnSymGetModuleInfo =
@@ -133,8 +135,28 @@ mod win {
         pub rva: u32,
         pub va: u64,
         pub kind: String,
+        pub type_id: u32,
         pub type_name: String,
         pub size: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct PdbTypeMember {
+        pub name: String,
+        pub offset: u64,
+        pub type_id: u32,
+        pub type_name: String,
+        pub kind: String,
+        pub size: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct PdbTypeInfo {
+        pub type_id: u32,
+        pub name: String,
+        pub kind: String,
+        pub size: u64,
+        pub members: Vec<PdbTypeMember>,
     }
 
     struct EnumContext {
@@ -144,12 +166,44 @@ mod win {
         out: *mut Vec<PdbSymbol>,
     }
 
+    struct TypeEnumContext {
+        out: *mut Vec<TypeSeed>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TypeSeed {
+        type_id: u32,
+        name: String,
+        tag: u32,
+    }
+
     const TI_GET_SYMNAME: u32 = 1;
     const TI_GET_LENGTH: u32 = 2;
+    const TI_GET_TYPE: u32 = 3;
     const TI_GET_TYPEID: u32 = 4;
+    const TI_GET_BASETYPE: u32 = 5;
+    const TI_FINDCHILDREN: u32 = 7;
+    const TI_GET_OFFSET: u32 = 10;
+    const TI_GET_CHILDRENCOUNT: u32 = 13;
+    const TI_GET_SYMTAG: u32 = 0;
+    const TI_GET_IS_REFERENCE: u32 = 31;
     const SYM_TAG_FUNCTION: u32 = 5;
     const SYM_TAG_DATA: u32 = 7;
     const SYM_TAG_PUBLIC: u32 = 10;
+    const SYM_TAG_UDT: u32 = 11;
+    const SYM_TAG_ENUM: u32 = 12;
+    const SYM_TAG_FUNCTION_TYPE: u32 = 13;
+    const SYM_TAG_POINTER_TYPE: u32 = 14;
+    const SYM_TAG_ARRAY_TYPE: u32 = 15;
+    const SYM_TAG_BASE_TYPE: u32 = 16;
+    const SYM_TAG_TYPEDEF: u32 = 17;
+    const SYM_TAG_BASE_CLASS: u32 = 18;
+
+    #[repr(C)]
+    struct TiFindChildrenHeader {
+        count: u32,
+        start: u32,
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub fn load_pdb_symbol(
@@ -406,8 +460,221 @@ mod win {
         result
     }
 
+    pub fn load_pdb_types(
+        dll_path: &str,
+        sym_path: &str,
+        sym_server: &str,
+        pdb_path: &str,
+        verbose: bool,
+        reload: bool,
+    ) -> Result<Vec<PdbTypeInfo>, String> {
+        let cache_key = format!(
+            "{}|types",
+            pdb_cache_key(dll_path, sym_path, sym_server, pdb_path)
+        );
+        if !reload {
+            if let Some(cached) = type_cache()
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&cache_key).cloned())
+            {
+                return Ok(cached);
+            }
+        }
+
+        let preferred_pdb_path = if !pdb_path.is_empty() {
+            pdb_path.to_owned()
+        } else {
+            resolve_pdb_path(dll_path, sym_server, pdb_path, verbose, reload)
+        };
+        if !preferred_pdb_path.is_empty() {
+            match load_pdb_types_via_llvm_dump(&preferred_pdb_path) {
+                Ok(types) if !types.is_empty() => {
+                    if verbose {
+                        eprintln!(
+                            "  llvm-pdbutil preferred path: {} type(s) from {}",
+                            types.len(),
+                            preferred_pdb_path
+                        );
+                    }
+                    if let Ok(mut cache) = type_cache().lock() {
+                        cache.insert(cache_key, types.clone());
+                    }
+                    return Ok(types);
+                }
+                Ok(_) => {
+                    if verbose {
+                        eprintln!(
+                            "  llvm-pdbutil preferred path returned 0 types from {}",
+                            preferred_pdb_path
+                        );
+                    }
+                }
+                Err(err) => {
+                    if verbose {
+                        eprintln!("  llvm-pdbutil preferred path failed: {}", err);
+                    }
+                }
+            }
+        }
+
+        let symbols = load_pdb_symbols(dll_path, sym_path, sym_server, pdb_path, verbose, reload)?;
+        let result = unsafe {
+            let lib = LoadLibraryA(c"dbghelp.dll".as_ptr() as *const u8);
+            if lib.is_null() {
+                return Err("dbghelp.dll unavailable".to_owned());
+            }
+
+            macro_rules! proc {
+                ($name:literal, $ty:ty) => {{
+                    let p = get_proc(lib, concat!($name, "\0").as_bytes());
+                    if p.is_null() {
+                        return Err(format!("missing dbghelp export {}", $name));
+                    }
+                    std::mem::transmute::<*const c_void, $ty>(p)
+                }};
+            }
+
+            let sym_initialize: FnSymInitialize = proc!("SymInitialize", FnSymInitialize);
+            let sym_cleanup: FnSymCleanup = proc!("SymCleanup", FnSymCleanup);
+            let sym_set_options: FnSymSetOptions = proc!("SymSetOptions", FnSymSetOptions);
+            let sym_load_module_ex: FnSymLoadModuleEx = proc!("SymLoadModuleEx", FnSymLoadModuleEx);
+            let sym_enum_types: FnSymEnumTypes = proc!("SymEnumTypes", FnSymEnumTypes);
+            let sym_get_type_info: FnSymGetTypeInfo = proc!("SymGetTypeInfo", FnSymGetTypeInfo);
+            let sym_get_module_info: FnSymGetModuleInfo =
+                proc!("SymGetModuleInfo64", FnSymGetModuleInfo);
+            let sym_set_search: FnSymSetSearchPath = proc!("SymSetSearchPath", FnSymSetSearchPath);
+
+            sym_set_options(0x00000002 | 0x00000004 | 0x00000010);
+
+            let resolved_pdb_path =
+                resolve_pdb_path(dll_path, sym_server, pdb_path, verbose, reload);
+            let sp = build_search_path(dll_path, sym_path, sym_server, &resolved_pdb_path);
+            let sp_c = CString::new(sp.clone()).map_err(|_| "invalid symbol path".to_owned())?;
+            let h_proc = GetCurrentProcess();
+            if sym_initialize(h_proc, sp_c.as_ptr() as *const u8, 0) == 0 {
+                return Err("SymInitialize failed".to_owned());
+            }
+            struct Cleanup(*mut c_void, FnSymCleanup);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    unsafe {
+                        (self.1)(self.0);
+                    }
+                }
+            }
+            let _cleanup = Cleanup(h_proc, sym_cleanup);
+            sym_set_search(h_proc, sp_c.as_ptr() as *const u8);
+
+            let img_c = CString::new(dll_path).map_err(|_| "invalid module path".to_owned())?;
+            let module_base = sym_load_module_ex(
+                h_proc,
+                std::ptr::null_mut(),
+                img_c.as_ptr() as *const u8,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                0,
+            );
+            if module_base == 0 {
+                return Err(format!("SymLoadModuleEx failed for {}", dll_path));
+            }
+            if verbose {
+                log_loaded_module(h_proc, module_base, sym_get_module_info);
+            }
+
+            let mut pending: Vec<u32> = symbols
+                .iter()
+                .filter_map(|sym| (sym.type_id != 0).then_some(sym.type_id))
+                .collect();
+            let mut enum_seeds: Vec<TypeSeed> = Vec::new();
+            let mut type_ctx = TypeEnumContext {
+                out: &mut enum_seeds as *mut Vec<TypeSeed>,
+            };
+            let type_ctx_ptr = &mut type_ctx as *mut TypeEnumContext as usize;
+            let _ = sym_enum_types(h_proc, module_base, enum_type_cb, type_ctx_ptr);
+            pending.extend(enum_seeds.iter().map(|seed| seed.type_id));
+            pending.sort_unstable();
+            pending.dedup();
+            let seed_map: HashMap<u32, TypeSeed> = enum_seeds
+                .into_iter()
+                .filter(|seed| seed.type_id != 0)
+                .map(|seed| (seed.type_id, seed))
+                .collect();
+
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            while let Some(type_id) = pending.pop() {
+                if !seen.insert(type_id) {
+                    continue;
+                }
+                let (info, nested) =
+                    build_type_info(h_proc, module_base, type_id, sym_get_type_info);
+                pending.extend(nested.into_iter().filter(|id| *id != 0));
+                if let Some(info) = info {
+                    out.push(info);
+                } else if let Some(seed) = seed_map.get(&type_id) {
+                    let name = seed.name.trim();
+                    if !name.is_empty() {
+                        out.push(PdbTypeInfo {
+                            type_id,
+                            name: name.to_owned(),
+                            kind: type_tag_name(seed.tag).to_owned(),
+                            size: get_type_size(h_proc, module_base, type_id, sym_get_type_info)
+                                .unwrap_or(0),
+                            members: Vec::new(),
+                        });
+                    }
+                }
+            }
+            if out.is_empty() {
+                let fallback_pdb = if !resolved_pdb_path.is_empty() {
+                    resolved_pdb_path.clone()
+                } else {
+                    pdb_path.to_owned()
+                };
+                if !fallback_pdb.is_empty() {
+                    match load_pdb_types_via_llvm_dump(&fallback_pdb) {
+                        Ok(fallback) => {
+                            if verbose {
+                                eprintln!(
+                                    "  llvm-pdbutil fallback: {} type(s) from {}",
+                                    fallback.len(),
+                                    fallback_pdb
+                                );
+                            }
+                            if !fallback.is_empty() {
+                                out = fallback;
+                            }
+                        }
+                        Err(err) => {
+                            if verbose {
+                                eprintln!("  llvm-pdbutil fallback failed: {}", err);
+                            }
+                        }
+                    }
+                }
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.type_id.cmp(&b.type_id)));
+            Ok(out)
+        };
+
+        if let Ok(types) = &result {
+            if let Ok(mut cache) = type_cache().lock() {
+                cache.insert(cache_key, types.clone());
+            }
+        }
+        result
+    }
+
     fn symbol_cache() -> &'static Mutex<HashMap<String, Vec<PdbSymbol>>> {
         static CACHE: OnceLock<Mutex<HashMap<String, Vec<PdbSymbol>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn type_cache() -> &'static Mutex<HashMap<String, Vec<PdbTypeInfo>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Vec<PdbTypeInfo>>>> = OnceLock::new();
         CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
@@ -487,8 +754,45 @@ mod win {
                 rva,
                 va: info.address,
                 kind: tag_name(info.tag).to_owned(),
+                type_id: type_id.unwrap_or(0),
                 type_name,
                 size,
+            });
+        }
+        1
+    }
+
+    unsafe extern "system" fn enum_type_cb(
+        sym_info: *mut SymbolInfo,
+        _size: u32,
+        user_ctx: usize,
+    ) -> i32 {
+        if sym_info.is_null() || user_ctx == 0 {
+            return 1;
+        }
+        let info = &*sym_info;
+        let ctx = &mut *(user_ctx as *mut TypeEnumContext);
+        let vec = &mut *ctx.out;
+        let name_len = info.name_len as usize;
+        let name =
+            String::from_utf8_lossy(&info.name[..name_len.min(info.name.len())]).into_owned();
+        let primary_id = if info.index != 0 {
+            info.index
+        } else {
+            info.type_index
+        };
+        if primary_id != 0 {
+            vec.push(TypeSeed {
+                type_id: primary_id,
+                name: name.clone(),
+                tag: info.tag,
+            });
+        }
+        if info.type_index != 0 && info.type_index != primary_id {
+            vec.push(TypeSeed {
+                type_id: info.type_index,
+                name,
+                tag: info.tag,
             });
         }
         1
@@ -538,6 +842,50 @@ mod win {
         }
     }
 
+    unsafe fn get_type_u32(
+        h_proc: *mut c_void,
+        module_base: u64,
+        type_id: u32,
+        request: u32,
+        sym_get_type_info: FnSymGetTypeInfo,
+    ) -> Option<u32> {
+        let mut out = 0u32;
+        if sym_get_type_info(
+            h_proc,
+            module_base,
+            type_id,
+            request,
+            &mut out as *mut _ as *mut c_void,
+        ) == 0
+        {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    unsafe fn get_type_u64(
+        h_proc: *mut c_void,
+        module_base: u64,
+        type_id: u32,
+        request: u32,
+        sym_get_type_info: FnSymGetTypeInfo,
+    ) -> Option<u64> {
+        let mut out = 0u64;
+        if sym_get_type_info(
+            h_proc,
+            module_base,
+            type_id,
+            request,
+            &mut out as *mut _ as *mut c_void,
+        ) == 0
+        {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     unsafe fn get_type_name(
         h_proc: *mut c_void,
         module_base: u64,
@@ -563,6 +911,586 @@ mod win {
         let s = String::from_utf16_lossy(slice::from_raw_parts(ptr, len));
         LocalFree(ptr as *mut c_void);
         Some(s)
+    }
+
+    unsafe fn get_children_ids(
+        h_proc: *mut c_void,
+        module_base: u64,
+        type_id: u32,
+        sym_get_type_info: FnSymGetTypeInfo,
+    ) -> Vec<u32> {
+        let Some(count) = get_type_u32(
+            h_proc,
+            module_base,
+            type_id,
+            TI_GET_CHILDRENCOUNT,
+            sym_get_type_info,
+        ) else {
+            return Vec::new();
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+        let bytes = std::mem::size_of::<TiFindChildrenHeader>() + count as usize * 4;
+        let mut buf = vec![0u8; bytes];
+        let hdr = buf.as_mut_ptr() as *mut TiFindChildrenHeader;
+        (*hdr).count = count;
+        (*hdr).start = 0;
+        if sym_get_type_info(
+            h_proc,
+            module_base,
+            type_id,
+            TI_FINDCHILDREN,
+            hdr as *mut c_void,
+        ) == 0
+        {
+            return Vec::new();
+        }
+        let ids_ptr = buf
+            .as_ptr()
+            .add(std::mem::size_of::<TiFindChildrenHeader>()) as *const u32;
+        slice::from_raw_parts(ids_ptr, count as usize).to_vec()
+    }
+
+    unsafe fn build_type_info(
+        h_proc: *mut c_void,
+        module_base: u64,
+        type_id: u32,
+        sym_get_type_info: FnSymGetTypeInfo,
+    ) -> (Option<PdbTypeInfo>, Vec<u32>) {
+        let Some(tag) = get_type_u32(
+            h_proc,
+            module_base,
+            type_id,
+            TI_GET_SYMTAG,
+            sym_get_type_info,
+        ) else {
+            return (None, Vec::new());
+        };
+        let mut nested = Vec::new();
+        match tag {
+            SYM_TAG_POINTER_TYPE | SYM_TAG_ARRAY_TYPE | SYM_TAG_TYPEDEF | SYM_TAG_FUNCTION_TYPE => {
+                if let Some(inner_id) =
+                    get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
+                {
+                    nested.push(inner_id);
+                }
+            }
+            _ => {}
+        }
+        if !matches!(tag, SYM_TAG_UDT | SYM_TAG_ENUM | SYM_TAG_TYPEDEF) {
+            return (None, nested);
+        }
+
+        let name = describe_type(
+            h_proc,
+            module_base,
+            type_id,
+            sym_get_type_info,
+            &mut Vec::new(),
+        );
+        let size = get_type_size(h_proc, module_base, type_id, sym_get_type_info).unwrap_or(0);
+        let mut members = Vec::new();
+
+        if tag == SYM_TAG_UDT {
+            for child_id in get_children_ids(h_proc, module_base, type_id, sym_get_type_info) {
+                let child_tag = get_type_u32(
+                    h_proc,
+                    module_base,
+                    child_id,
+                    TI_GET_SYMTAG,
+                    sym_get_type_info,
+                )
+                .unwrap_or(0);
+                if !matches!(child_tag, SYM_TAG_DATA | SYM_TAG_BASE_CLASS) {
+                    continue;
+                }
+
+                let member_name = if child_tag == SYM_TAG_BASE_CLASS {
+                    "<base>".to_owned()
+                } else {
+                    get_type_name(h_proc, module_base, child_id, sym_get_type_info)
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| format!("member_{:X}", child_id))
+                };
+                let member_type_id = get_type_u32(
+                    h_proc,
+                    module_base,
+                    child_id,
+                    TI_GET_TYPE,
+                    sym_get_type_info,
+                )
+                .unwrap_or(0);
+                let member_offset = get_type_u64(
+                    h_proc,
+                    module_base,
+                    child_id,
+                    TI_GET_OFFSET,
+                    sym_get_type_info,
+                )
+                .unwrap_or(0);
+                let member_type_name = if member_type_id != 0 {
+                    describe_type(
+                        h_proc,
+                        module_base,
+                        member_type_id,
+                        sym_get_type_info,
+                        &mut Vec::new(),
+                    )
+                } else {
+                    String::new()
+                };
+                let member_size = if member_type_id != 0 {
+                    get_type_size(h_proc, module_base, member_type_id, sym_get_type_info)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                if member_type_id != 0 {
+                    nested.push(member_type_id);
+                }
+                members.push(PdbTypeMember {
+                    name: member_name,
+                    offset: member_offset,
+                    type_id: member_type_id,
+                    type_name: member_type_name,
+                    kind: type_tag_name(child_tag).to_owned(),
+                    size: member_size,
+                });
+            }
+            members.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.name.cmp(&b.name)));
+        } else if tag == SYM_TAG_TYPEDEF {
+            if let Some(target_id) =
+                get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
+            {
+                nested.push(target_id);
+            }
+        }
+
+        (
+            Some(PdbTypeInfo {
+                type_id,
+                name,
+                kind: type_tag_name(tag).to_owned(),
+                size,
+                members,
+            }),
+            nested,
+        )
+    }
+
+    unsafe fn describe_type(
+        h_proc: *mut c_void,
+        module_base: u64,
+        type_id: u32,
+        sym_get_type_info: FnSymGetTypeInfo,
+        seen: &mut Vec<u32>,
+    ) -> String {
+        if type_id == 0 {
+            return "void".to_owned();
+        }
+        if seen.contains(&type_id) {
+            return get_type_name(h_proc, module_base, type_id, sym_get_type_info)
+                .unwrap_or_else(|| format!("type_{:X}", type_id));
+        }
+        seen.push(type_id);
+        let tag = get_type_u32(
+            h_proc,
+            module_base,
+            type_id,
+            TI_GET_SYMTAG,
+            sym_get_type_info,
+        )
+        .unwrap_or(0);
+        let name = match tag {
+            SYM_TAG_UDT | SYM_TAG_ENUM | SYM_TAG_TYPEDEF => {
+                get_type_name(h_proc, module_base, type_id, sym_get_type_info)
+                    .unwrap_or_else(|| format!("type_{:X}", type_id))
+            }
+            SYM_TAG_POINTER_TYPE => {
+                let inner =
+                    get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
+                        .map(|id| describe_type(h_proc, module_base, id, sym_get_type_info, seen))
+                        .unwrap_or_else(|| "void".to_owned());
+                let suffix = if get_type_u32(
+                    h_proc,
+                    module_base,
+                    type_id,
+                    TI_GET_IS_REFERENCE,
+                    sym_get_type_info,
+                )
+                .unwrap_or(0)
+                    != 0
+                {
+                    "&"
+                } else {
+                    "*"
+                };
+                format!("{}{}", inner, suffix)
+            }
+            SYM_TAG_ARRAY_TYPE => {
+                let inner_id =
+                    get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
+                        .unwrap_or(0);
+                let inner = describe_type(h_proc, module_base, inner_id, sym_get_type_info, seen);
+                let total =
+                    get_type_size(h_proc, module_base, type_id, sym_get_type_info).unwrap_or(0);
+                let elem =
+                    get_type_size(h_proc, module_base, inner_id, sym_get_type_info).unwrap_or(0);
+                if elem > 0 && total >= elem {
+                    format!("{}[{}]", inner, total / elem)
+                } else {
+                    format!("{}[]", inner)
+                }
+            }
+            SYM_TAG_BASE_TYPE => {
+                let base = get_type_u32(
+                    h_proc,
+                    module_base,
+                    type_id,
+                    TI_GET_BASETYPE,
+                    sym_get_type_info,
+                )
+                .unwrap_or(0);
+                let len =
+                    get_type_size(h_proc, module_base, type_id, sym_get_type_info).unwrap_or(0);
+                base_type_name(base, len).to_owned()
+            }
+            SYM_TAG_FUNCTION_TYPE => "function".to_owned(),
+            _ => get_type_name(h_proc, module_base, type_id, sym_get_type_info)
+                .unwrap_or_else(|| format!("{}#{:X}", type_tag_name(tag), type_id)),
+        };
+        seen.pop();
+        name
+    }
+
+    fn base_type_name(base: u32, len: u64) -> &'static str {
+        match (base, len) {
+            (1, _) => "void",
+            (2, 1) => "char",
+            (3, 2) => "wchar_t",
+            (6, 1) => "int8_t",
+            (6, 2) => "int16_t",
+            (6, 4) => "int32_t",
+            (6, 8) => "int64_t",
+            (7, 1) => "uint8_t",
+            (7, 2) => "uint16_t",
+            (7, 4) => "uint32_t",
+            (7, 8) => "uint64_t",
+            (8, 4) => "float",
+            (8, 8) => "double",
+            (10, 1) => "bool",
+            (13, _) => "long",
+            (14, _) => "unsigned long",
+            (31, _) => "HRESULT",
+            _ => "scalar",
+        }
+    }
+
+    fn type_tag_name(tag: u32) -> &'static str {
+        match tag {
+            SYM_TAG_UDT => "struct",
+            SYM_TAG_ENUM => "enum",
+            SYM_TAG_TYPEDEF => "typedef",
+            SYM_TAG_POINTER_TYPE => "pointer",
+            SYM_TAG_ARRAY_TYPE => "array",
+            SYM_TAG_BASE_TYPE => "base",
+            SYM_TAG_FUNCTION_TYPE => "function",
+            SYM_TAG_BASE_CLASS => "base-class",
+            SYM_TAG_DATA => "member",
+            _ => "type",
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct LlvmDumpMember {
+        name: String,
+        offset: u64,
+        type_id: u32,
+        type_name: String,
+        kind: String,
+        size: u64,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct LlvmDumpRecord {
+        type_id: u32,
+        leaf: String,
+        name: String,
+        size: u64,
+        field_list_id: u32,
+        forward_to: u32,
+        members: Vec<LlvmDumpMember>,
+    }
+
+    fn load_pdb_types_via_llvm_dump(pdb_path: &str) -> Result<Vec<PdbTypeInfo>, String> {
+        let tool = find_llvm_pdbutil()
+            .ok_or_else(|| "llvm-pdbutil.exe not found for fallback type parsing".to_owned())?;
+        let output = std::process::Command::new(tool)
+            .args(["dump", "-types", pdb_path])
+            .output()
+            .map_err(|e| format!("spawn llvm-pdbutil: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            return Err(if !stderr.is_empty() { stderr } else { stdout });
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut records: HashMap<u32, LlvmDumpRecord> = HashMap::new();
+        let mut current_id = 0u32;
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some((type_id, leaf, name)) = parse_llvm_dump_header(trimmed) {
+                current_id = type_id;
+                let rec = records.entry(type_id).or_default();
+                rec.type_id = type_id;
+                rec.leaf = leaf;
+                if rec.name.is_empty() {
+                    rec.name = name;
+                }
+                continue;
+            }
+            if current_id == 0 || trimmed.is_empty() {
+                continue;
+            }
+            let rec = match records.get_mut(&current_id) {
+                Some(rec) => rec,
+                None => continue,
+            };
+            if rec.leaf == "LF_FIELDLIST" {
+                if let Some(member) = parse_llvm_dump_member(trimmed) {
+                    rec.members.push(member);
+                }
+                continue;
+            }
+            if let Some(field_list_id) = parse_llvm_dump_ref(trimmed, "field list:") {
+                rec.field_list_id = field_list_id;
+            }
+            if let Some(size) = parse_llvm_dump_size(trimmed) {
+                rec.size = size;
+            }
+            if let Some(target) = parse_llvm_dump_forward_ref(trimmed) {
+                rec.forward_to = target;
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let ids = records.keys().copied().collect::<Vec<_>>();
+        for type_id in ids {
+            let Some(rec) = records.get(&type_id) else {
+                continue;
+            };
+            let kind = llvm_leaf_kind(&rec.leaf);
+            if kind.is_empty() {
+                continue;
+            }
+            let canonical_id = canonical_dump_type_id(type_id, &records);
+            let canonical = records.get(&canonical_id).unwrap_or(rec);
+            let name = canonical.name.trim();
+            if name.is_empty()
+                || name.contains("(__cdecl")
+                || name.starts_with('<')
+                || !seen.insert(format!("{}|{}", type_id, name.to_ascii_lowercase()))
+            {
+                continue;
+            }
+            let members = if canonical.field_list_id != 0 {
+                records
+                    .get(&canonical.field_list_id)
+                    .map(|field_list| {
+                        field_list
+                            .members
+                            .iter()
+                            .map(|member| PdbTypeMember {
+                                name: member.name.clone(),
+                                offset: member.offset,
+                                type_id: member.type_id,
+                                type_name: resolve_dump_type_name(
+                                    member.type_id,
+                                    &member.type_name,
+                                    &records,
+                                ),
+                                kind: member.kind.clone(),
+                                size: member.size,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            out.push(PdbTypeInfo {
+                type_id,
+                name: name.to_owned(),
+                kind: kind.to_owned(),
+                size: canonical.size,
+                members,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.type_id.cmp(&b.type_id)));
+        Ok(out)
+    }
+
+    fn parse_llvm_dump_header(line: &str) -> Option<(u32, String, String)> {
+        let (id_part, rest) = line.split_once('|')?;
+        let type_id = u32::from_str_radix(id_part.trim().trim_start_matches("0x"), 16).ok()?;
+        let leaf_start = rest.find("LF_")?;
+        let rest = &rest[leaf_start..];
+        let leaf_end = rest.find(' ')?;
+        let leaf = rest[..leaf_end].trim().to_owned();
+        let name = rest
+            .split('`')
+            .nth(1)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+        Some((type_id, leaf, name))
+    }
+
+    fn parse_llvm_dump_ref(line: &str, key: &str) -> Option<u32> {
+        let idx = line.find(key)?;
+        let tail = &line[idx + key.len()..];
+        let hex = tail
+            .trim_start()
+            .strip_prefix("0x")
+            .unwrap_or(tail.trim_start())
+            .chars()
+            .take_while(|ch| ch.is_ascii_hexdigit())
+            .collect::<String>();
+        u32::from_str_radix(&hex, 16).ok()
+    }
+
+    fn parse_llvm_dump_size(line: &str) -> Option<u64> {
+        let idx = line.find("sizeof ")?;
+        let tail = &line[idx + 7..];
+        let digits = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        digits.parse::<u64>().ok()
+    }
+
+    fn parse_llvm_dump_forward_ref(line: &str) -> Option<u32> {
+        let idx = line.find("forward ref (-> 0x")?;
+        let tail = &line[idx + "forward ref (-> 0x".len()..];
+        let hex = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_hexdigit())
+            .collect::<String>();
+        u32::from_str_radix(&hex, 16).ok()
+    }
+
+    fn parse_llvm_dump_member(line: &str) -> Option<LlvmDumpMember> {
+        if !line.starts_with("- LF_MEMBER [") {
+            return None;
+        }
+        let name = extract_between(line, "name = `", "`")?.to_owned();
+        let type_field = line
+            .split_once("Type = ")
+            .map(|(_, tail)| tail.split(", offset =").next().unwrap_or(tail).trim())
+            .unwrap_or_default();
+        let type_id = type_field
+            .strip_prefix("0x")
+            .and_then(|tail| {
+                let hex = tail
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_hexdigit())
+                    .collect::<String>();
+                u32::from_str_radix(&hex, 16).ok()
+            })
+            .unwrap_or(0);
+        let type_name = type_field
+            .split_once('(')
+            .map(|(_, name)| name.trim_end_matches(')').trim())
+            .unwrap_or(type_field)
+            .to_owned();
+        let offset = extract_after_decimal(line, "offset = ").unwrap_or(0);
+        Some(LlvmDumpMember {
+            name,
+            offset,
+            type_id,
+            type_name,
+            kind: "member".to_owned(),
+            size: 0,
+        })
+    }
+
+    fn extract_between<'a>(line: &'a str, start: &str, end: &str) -> Option<&'a str> {
+        let tail = line.split_once(start)?.1;
+        Some(tail.split_once(end)?.0)
+    }
+
+    fn extract_after_decimal(line: &str, key: &str) -> Option<u64> {
+        let tail = line.split_once(key)?.1;
+        let digits = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        digits.parse::<u64>().ok()
+    }
+
+    fn llvm_leaf_kind(leaf: &str) -> &'static str {
+        match leaf {
+            "LF_STRUCTURE" => "struct",
+            "LF_CLASS" => "class",
+            "LF_UNION" => "union",
+            "LF_ENUM" => "enum",
+            "LF_TYPEDEF" => "typedef",
+            _ => "",
+        }
+    }
+
+    fn canonical_dump_type_id(type_id: u32, records: &HashMap<u32, LlvmDumpRecord>) -> u32 {
+        let mut current = type_id;
+        let mut seen = HashSet::new();
+        while seen.insert(current) {
+            let Some(rec) = records.get(&current) else {
+                break;
+            };
+            if rec.forward_to == 0 {
+                break;
+            }
+            current = rec.forward_to;
+        }
+        current
+    }
+
+    fn resolve_dump_type_name(
+        type_id: u32,
+        fallback_name: &str,
+        records: &HashMap<u32, LlvmDumpRecord>,
+    ) -> String {
+        if !fallback_name.trim().is_empty() {
+            return fallback_name.trim().to_owned();
+        }
+        let canonical_id = canonical_dump_type_id(type_id, records);
+        records
+            .get(&canonical_id)
+            .or_else(|| records.get(&type_id))
+            .map(|rec| rec.name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| {
+                if type_id == 0 {
+                    "unknown".to_owned()
+                } else {
+                    format!("type_0x{:X}", type_id)
+                }
+            })
+    }
+
+    fn find_llvm_pdbutil() -> Option<String> {
+        let candidates = [
+            r"C:\Program Files\LLVM\bin\llvm-pdbutil.exe",
+            r"C:\Program Files (x86)\LLVM\bin\llvm-pdbutil.exe",
+        ];
+        for candidate in candidates {
+            if Path::new(candidate).is_file() {
+                return Some(candidate.to_owned());
+            }
+        }
+        Some("llvm-pdbutil.exe".to_owned())
     }
 
     fn tag_name(tag: u32) -> &'static str {
@@ -1020,7 +1948,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{load_pdb_symbol, load_pdb_symbols, PdbSymbol};
+pub use win::{load_pdb_symbol, load_pdb_symbols, load_pdb_types, PdbSymbol, PdbTypeInfo};
 
 #[cfg(not(windows))]
 pub fn load_pdb_symbol(
@@ -1043,8 +1971,30 @@ pub struct PdbSymbol {
     pub rva: u32,
     pub va: u64,
     pub kind: String,
+    pub type_id: u32,
     pub type_name: String,
     pub size: u64,
+}
+
+#[cfg(not(windows))]
+#[derive(Debug, Clone)]
+pub struct PdbTypeMember {
+    pub name: String,
+    pub offset: u64,
+    pub type_id: u32,
+    pub type_name: String,
+    pub kind: String,
+    pub size: u64,
+}
+
+#[cfg(not(windows))]
+#[derive(Debug, Clone)]
+pub struct PdbTypeInfo {
+    pub type_id: u32,
+    pub name: String,
+    pub kind: String,
+    pub size: u64,
+    pub members: Vec<PdbTypeMember>,
 }
 
 #[cfg(not(windows))]
@@ -1057,4 +2007,16 @@ pub fn load_pdb_symbols(
     _reload: bool,
 ) -> Result<Vec<PdbSymbol>, String> {
     Err("PDB symbol enumeration is only supported on Windows".to_owned())
+}
+
+#[cfg(not(windows))]
+pub fn load_pdb_types(
+    _dll_path: &str,
+    _sym_path: &str,
+    _sym_server: &str,
+    _pdb_path: &str,
+    _verbose: bool,
+    _reload: bool,
+) -> Result<Vec<PdbTypeInfo>, String> {
+    Err("PDB type enumeration is only supported on Windows".to_owned())
 }

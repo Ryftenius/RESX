@@ -9,7 +9,7 @@ use crate::core::search::find_dll_path;
 use crate::formats::metadata::{query_file_metadata, FileMetadata};
 use crate::formats::pe::{
     parse_pe, read_clr_info, read_debug_info, read_exports, read_imports, read_load_config,
-    PeDebugInfo, PeLoadConfigInfo, IMAGE_DLLCHARACTERISTICS_APPCONTAINER,
+    ImportDll, PeDebugInfo, PeLoadConfigInfo, IMAGE_DLLCHARACTERISTICS_APPCONTAINER,
     IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE, IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY,
     IMAGE_DLLCHARACTERISTICS_GUARD_CF, IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA,
     IMAGE_DLLCHARACTERISTICS_NO_SEH, IMAGE_DLLCHARACTERISTICS_NX_COMPAT,
@@ -78,6 +78,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
     let known_names = collect_known_names(&file_name, &metadata);
     let image_kind = detect_image_kind(&pe, &file_name);
     let assessment = assess_build(&raw, &imports, &debug, clr.as_ref(), load_config.as_ref());
+    let veh_imports = detect_veh_imports(&imports);
 
     if cfg.json {
         let out = PeInfoJson {
@@ -116,7 +117,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
                     .unwrap_or_default(),
             },
             debug: to_debug_json(&pe, &debug),
-            mitigations: to_mitigations_json(&pe, load_config.as_ref()),
+            mitigations: to_mitigations_json(&pe, load_config.as_ref(), &veh_imports),
             names: NameJson {
                 product_name: metadata.product_name.clone(),
                 file_description: metadata.file_description.clone(),
@@ -163,6 +164,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
             debug: &debug,
             clr: clr.as_ref(),
             load_config: load_config.as_ref(),
+            veh_imports: &veh_imports,
             metadata: &metadata,
             known_names: &known_names,
         },
@@ -214,6 +216,7 @@ fn to_debug_json(pe: &crate::formats::pe::PeFile, debug: &PeDebugInfo) -> DebugJ
 fn to_mitigations_json(
     pe: &crate::formats::pe::PeFile,
     load_config: Option<&PeLoadConfigInfo>,
+    veh_imports: &[String],
 ) -> MitigationsJson {
     let guard_flags = load_config
         .map(|value| value.guard_flags)
@@ -224,6 +227,7 @@ fn to_mitigations_json(
         high_entropy_va: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA != 0,
         nx_compat: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT != 0,
         no_seh: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_NO_SEH != 0,
+        seh_available: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_NO_SEH == 0,
         force_integrity: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY != 0,
         appcontainer: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_APPCONTAINER != 0,
         wdm_driver: pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_WDM_DRIVER != 0,
@@ -242,5 +246,37 @@ fn to_mitigations_json(
         delay_load_iat_protected: guard_flags & IMAGE_GUARD_PROTECT_DELAYLOAD_IAT != 0,
         security_cookie: load_config.is_some_and(|value| value.security_cookie != 0),
         safe_seh: safe_seh(pe.arch, pe.dll_characteristics, load_config),
+        se_handler_count: load_config
+            .map(|value| value.se_handler_count)
+            .unwrap_or_default(),
+        veh_imports: veh_imports.to_vec(),
     }
+}
+
+fn detect_veh_imports(imports: &[ImportDll]) -> Vec<String> {
+    let veh_names = [
+        "AddVectoredExceptionHandler",
+        "AddVectoredContinueHandler",
+        "RemoveVectoredExceptionHandler",
+        "RemoveVectoredContinueHandler",
+        "RtlAddVectoredExceptionHandler",
+        "RtlAddVectoredContinueHandler",
+        "RtlRemoveVectoredExceptionHandler",
+        "RtlRemoveVectoredContinueHandler",
+    ];
+
+    let mut out = Vec::new();
+    for dll in imports {
+        for entry in &dll.entries {
+            if veh_names
+                .iter()
+                .any(|name| entry.name.eq_ignore_ascii_case(name))
+            {
+                out.push(format!("{}!{}", dll.dll, entry.name));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }

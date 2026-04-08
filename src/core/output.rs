@@ -655,7 +655,27 @@ fn highlight_c_line(line: &str, c: &Colors) -> String {
                 i += 1;
             }
             let token: String = chars[start..i].iter().collect();
-            out.push_str(&highlight_c_token(&token, c));
+            let prev = previous_non_ws_char(&chars, start);
+            let next = next_non_ws_char(&chars, i);
+            out.push_str(&highlight_c_token(&token, prev, next, c));
+            continue;
+        }
+        if ch == '\'' {
+            let start = i;
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '\'' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            let token: String = chars[start..i.min(chars.len())].iter().collect();
+            out.push_str(&c.green(&token));
             continue;
         }
         if ch == '"' {
@@ -687,18 +707,65 @@ fn highlight_c_line(line: &str, c: &Colors) -> String {
     out
 }
 
-fn highlight_c_token(token: &str, c: &Colors) -> String {
+fn previous_non_ws_char(chars: &[char], start: usize) -> Option<char> {
+    chars[..start]
+        .iter()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .copied()
+}
+
+fn next_non_ws_char(chars: &[char], start: usize) -> Option<char> {
+    chars[start..]
+        .iter()
+        .find(|ch| !ch.is_whitespace())
+        .copied()
+}
+
+fn highlight_c_token(token: &str, prev: Option<char>, next: Option<char>, c: &Colors) -> String {
     if matches!(
         token,
-        "if" | "else" | "return" | "goto" | "void" | "unsigned" | "struct"
+        "if" | "else"
+            | "return"
+            | "goto"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "for"
+            | "while"
+            | "do"
+            | "sizeof"
+            | "typedef"
+            | "enum"
+            | "struct"
+            | "union"
     ) {
         return c.b_mag(token);
     }
     if matches!(
         token,
-        "NTSTATUS"
+        "void"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "const"
+            | "volatile"
+            | "bool"
+            | "BOOLEAN"
+            | "BOOL"
+            | "NTSTATUS"
             | "__fastcall"
             | "__stdcall"
+            | "__cdecl"
+            | "__thiscall"
+            | "__vectorcall"
             | "PUSH"
             | "POP"
             | "__syscall"
@@ -707,11 +774,57 @@ fn highlight_c_token(token: &str, c: &Colors) -> String {
     ) {
         return c.b_cyan(token);
     }
+    if token == "NULL" || token == "nullptr" || token == "true" || token == "false" {
+        return c.yellow(token);
+    }
     if token.starts_with("label_") {
         return c.b_yellow(token);
     }
     if token.starts_with("0x") || token.chars().all(|ch| ch.is_ascii_digit()) {
         return c.yellow(token);
     }
+    if looks_c_type_name(token) {
+        return c.b_cyan(token);
+    }
+    if token.starts_with("param_")
+        || token == "result"
+        || token.starts_with("local_")
+        || token.starts_with("arg_")
+    {
+        return c.cyan(token);
+    }
+    if token.starts_with("KUSER_")
+        || token.starts_with("IMAGE_")
+        || token.starts_with("UNW_")
+        || token.starts_with("UWOP_")
+    {
+        return c.b_yellow(token);
+    }
+    if matches!(next, Some('(')) {
+        return c.b_white(token);
+    }
+    if matches!(prev, Some('.' | '>' | ':')) {
+        return c.green(token);
+    }
+    if token.contains('_')
+        || token.chars().any(|ch| ch.is_ascii_uppercase())
+        || looks_named_symbol(token)
+    {
+        return highlight_symbol_token(token, c);
+    }
     token.to_owned()
+}
+
+fn looks_c_type_name(token: &str) -> bool {
+    token.starts_with('P')
+        || token.ends_with("_t")
+        || token.ends_with("STATUS")
+        || token.ends_with("HANDLE")
+        || token.ends_with("PTR")
+        || token.ends_with("ULONG")
+        || token.ends_with("DWORD")
+        || token.ends_with("WORD")
+        || token.ends_with("BYTE")
+        || token.ends_with("CHAR")
+        || token.ends_with("VOID")
 }

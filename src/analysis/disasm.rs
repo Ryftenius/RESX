@@ -5,7 +5,7 @@ use iced_x86::{
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::config::Config;
 use crate::core::known::describe_known_address;
-use crate::formats::pe::{Export, PeFile};
+use crate::formats::pe::{attribute_to_func, Export, PeFile};
 
 #[derive(Debug, Clone)]
 pub struct Instruction {
@@ -110,6 +110,7 @@ fn resolve_call_target(instr: &iced_x86::Instruction) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub fn disassemble_at(
     raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
     file_off: usize,
     start_rva: u32,
     arch: u32,
@@ -211,11 +212,14 @@ pub fn disassemble_at(
         };
 
         for addr in collect_data_refs(&iced) {
-            if let Some(desc) = describe_known_address(addr).or_else(|| {
-                (addr >= image_base)
-                    .then(|| symbol_index.describe(addr))
-                    .flatten()
-            }) {
+            if let Some(desc) = describe_known_address(addr)
+                .or_else(|| describe_string_address(raw, pe, image_base, addr))
+                .or_else(|| {
+                    (addr >= image_base)
+                        .then(|| symbol_index.describe(addr))
+                        .flatten()
+                })
+            {
                 if !comment_parts.iter().any(|p| p == &desc) {
                     comment_parts.push(desc);
                 }
@@ -305,15 +309,28 @@ pub fn find_string_refs(
             }
             let rva = (va - pe.image_base) as u32;
             if let Some(off) = pe.rva_to_offset(rva) {
-                let s = crate::formats::pe::read_cstr(raw, off);
-                if s.len() >= 4 && is_printable_ascii(&s) {
+                let ascii = crate::formats::pe::read_cstr(raw, off);
+                if ascii.len() >= 4 && is_printable_ascii(&ascii) {
                     seen.insert(va);
-                    let display = if s.len() > 128 {
-                        format!("{}…", &s[..128])
+                    let display = if ascii.len() > 128 {
+                        format!("{}…", &ascii[..128])
                     } else {
-                        s
+                        ascii
                     };
                     results.push(format!("0x{:08X} → \"{}\"", rva, display));
+                    continue;
+                }
+
+                if let Some(wide) = read_utf16_cstr(raw, off) {
+                    if wide.len() >= 4 && is_printable_text(&wide) {
+                        seen.insert(va);
+                        let display = if wide.len() > 128 {
+                            format!("{}…", wide.chars().take(128).collect::<String>())
+                        } else {
+                            wide
+                        };
+                        results.push(format!("0x{:08X} → L\"{}\"", rva, display));
+                    }
                 }
             }
         }
@@ -325,28 +342,245 @@ fn is_printable_ascii(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| (0x20..=0x7E).contains(&b))
 }
 
-pub fn find_xrefs(insns: &[Instruction], exports: &[Export], image_base: u64) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut results = Vec::new();
-    for insn in insns {
-        if !insn.is_call && !insn.is_jmp {
-            continue;
-        }
-        if insn.call_target == 0 || seen.contains(&insn.call_target) {
-            continue;
-        }
-        seen.insert(insn.call_target);
-        let rva = insn.call_target.wrapping_sub(image_base) as u32;
-        if let Some(name) = exports
-            .iter()
-            .find(|e| !e.name.is_empty() && image_base + e.rva as u64 == insn.call_target)
-            .map(|e| e.name.as_str())
+fn is_printable_text(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\r' | '\n' | '\t'))
+}
+
+fn is_plausible_literal_text(s: &str) -> bool {
+    if !is_printable_text(s) || s.len() < 4 || !s.is_ascii() {
+        return false;
+    }
+
+    let mut sensible = 0usize;
+    let mut alpha = 0usize;
+    let mut total = 0usize;
+    for ch in s.chars() {
+        total += 1;
+        if ch.is_ascii_alphanumeric()
+            || ch.is_ascii_punctuation()
+            || ch == ' '
+            || ch == '\t'
+            || ch == '\r'
+            || ch == '\n'
         {
-            results.push(format!("RVA 0x{:08X} → {}", rva, name));
-        } else {
-            results.push(format!("RVA 0x{:08X}", rva));
+            sensible += 1;
+        }
+        if ch.is_ascii_alphabetic() {
+            alpha += 1;
         }
     }
+
+    sensible * 100 / total >= 85 && alpha >= 3
+}
+
+fn describe_string_address(
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    image_base: u64,
+    addr: u64,
+) -> Option<String> {
+    if addr < image_base {
+        return None;
+    }
+    let rva = (addr - image_base) as u32;
+    let off = pe.rva_to_offset(rva)?;
+
+    let ascii = crate::formats::pe::read_cstr(raw, off);
+    if ascii.len() >= 4 && is_printable_ascii(&ascii) {
+        let display = if ascii.len() > 96 {
+            format!("{}…", &ascii[..96])
+        } else {
+            ascii
+        };
+        return Some(format!("\"{}\"", display));
+    }
+
+    let wide = read_utf16_cstr(raw, off)?;
+    if wide.len() >= 4 && is_plausible_literal_text(&wide) {
+        let display = if wide.len() > 96 {
+            format!("{}…", wide.chars().take(96).collect::<String>())
+        } else {
+            wide
+        };
+        return Some(format!("L\"{}\"", display));
+    }
+
+    None
+}
+
+fn read_utf16_cstr(raw: &[u8], off: usize) -> Option<String> {
+    if off + 2 > raw.len() {
+        return None;
+    }
+
+    let mut units = Vec::new();
+    let mut pos = off;
+    while pos + 1 < raw.len() {
+        let unit = u16::from_le_bytes([raw[pos], raw[pos + 1]]);
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+        pos += 2;
+        if units.len() >= 256 {
+            break;
+        }
+    }
+
+    if units.len() < 2 {
+        return None;
+    }
+    String::from_utf16(&units).ok()
+}
+
+pub fn find_xrefs(
+    raw: &[u8],
+    pe: &PeFile,
+    exports: &[Export],
+    target_rva: u32,
+    target_name: &str,
+) -> Vec<String> {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let image_base = pe.image_base;
+
+    for section in &pe.sections {
+        if section.characteristics & 0x2000_0000 == 0 {
+            continue;
+        }
+        if section.raw_offset == 0 || section.raw_size == 0 {
+            continue;
+        }
+
+        let start = section.raw_offset as usize;
+        let end = (start + section.raw_size as usize).min(raw.len());
+        let bytes = &raw[start..end];
+        let mut decoder = Decoder::with_ip(
+            pe.arch,
+            bytes,
+            image_base + section.virtual_address as u64,
+            DecoderOptions::NONE,
+        );
+        let mut iced = iced_x86::Instruction::default();
+        let mut insns: Vec<Instruction> = Vec::new();
+        let mut pos = 0usize;
+
+        while pos < bytes.len() {
+            decoder.set_position(pos).ok();
+            decoder.set_ip(image_base + section.virtual_address as u64 + pos as u64);
+            if !decoder.can_decode() {
+                break;
+            }
+            decoder.decode_out(&mut iced);
+            let len = iced.len();
+            if len == 0 || pos + len > bytes.len() {
+                break;
+            }
+            let site_rva = section.virtual_address + pos as u32;
+            let pc = image_base + site_rva as u64;
+            insns.push(Instruction {
+                rva: site_rva,
+                va: pc,
+                file_off: (start + pos) as u64,
+                bytes: bytes[pos..pos + len].to_vec(),
+                text: String::new(),
+                mnemonic: String::new(),
+                operands: String::new(),
+                iced,
+                comment: String::new(),
+                is_call: iced.mnemonic() == Mnemonic::Call,
+                is_jmp: is_jmp(iced.mnemonic()),
+                is_jcc: is_jcc(iced.mnemonic()),
+                call_target: if iced.mnemonic() == Mnemonic::Call
+                    || is_jmp(iced.mnemonic())
+                    || is_jcc(iced.mnemonic())
+                {
+                    resolve_call_target(&iced)
+                } else {
+                    0
+                },
+            });
+            pos += len;
+        }
+
+        for (idx, insn) in insns.iter().enumerate() {
+            let site_rva = insn.rva;
+            let owner = attribute_to_func(site_rva, exports)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| format!("sub_{:08X}", site_rva));
+
+            if insn.call_target != 0 {
+                let dest_rva = insn.call_target.wrapping_sub(image_base) as u32;
+                if dest_rva == target_rva {
+                    let kind = if insn.is_call { "CALL" } else { "JMP" };
+                    let line = format!(
+                        "{} {} [site 0x{:08X}] -> {} [target 0x{:08X}]",
+                        kind, owner, site_rva, target_name, target_rva
+                    );
+                    if seen.insert(line.clone()) {
+                        results.push(line);
+                    }
+                }
+                continue;
+            }
+
+            if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
+                let slot_va = if insn.iced.memory_base() == Register::RIP
+                    || insn.iced.memory_base() == Register::EIP
+                {
+                    insn.iced.ip_rel_memory_address()
+                } else if insn.iced.memory_base() == Register::None
+                    && insn.iced.memory_index() == Register::None
+                {
+                    insn.iced.memory_displacement64()
+                } else {
+                    0
+                };
+                if slot_va >= image_base {
+                    let slot_rva = (slot_va - image_base) as u32;
+                    if slot_rva == target_rva {
+                        let kind = if insn.is_call { "CALL" } else { "JMP" };
+                        let line = if let Some((dll_name, func_name)) =
+                            crate::formats::pe::resolve_iat_slot(pe, raw, slot_rva)
+                        {
+                            format!(
+                                "{} {} [site 0x{:08X}] -> {}!{} [IAT 0x{:08X}]",
+                                kind, owner, site_rva, dll_name, func_name, slot_rva
+                            )
+                        } else {
+                            format!(
+                                "{} {} [site 0x{:08X}] -> {} [IAT 0x{:08X}]",
+                                kind, owner, site_rva, target_name, slot_rva
+                            )
+                        };
+                        if seen.insert(line.clone()) {
+                            results.push(line);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Register {
+                let reg = insn.iced.op0_register();
+                if let Some(src) = track_indirect_register(&insns, idx, reg, image_base, pe, raw) {
+                    if src.iat_slot_rva == target_rva {
+                        let kind = if insn.is_call { "CALL" } else { "JMP" };
+                        let line = format!(
+                            "{} {} [site 0x{:08X}] -> {}!{} [IAT 0x{:08X}] via {}",
+                            kind, owner, site_rva, src.dll, src.label, src.iat_slot_rva, src.method
+                        );
+                        if seen.insert(line.clone()) {
+                            results.push(line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results.sort();
     results
 }
 
@@ -381,6 +615,7 @@ struct RegSource {
     /// Human-readable description of how the register was loaded, e.g. "rax ← IAT [rip+0x1234]".
     method: String,
     target_rva: u32,
+    iat_slot_rva: u32,
 }
 
 /// Scan backwards from `call_idx` looking for the most recent def of `target_reg`.
@@ -443,6 +678,7 @@ fn track_indirect_register(
                             is_import: true,
                             method: format!("{reg_name} ← {load_desc} (IAT)"),
                             target_rva: 0,
+                            iat_slot_rva: slot_rva,
                         });
                     }
                 }
@@ -453,6 +689,7 @@ fn track_indirect_register(
                     is_import: false,
                     method: format!("{reg_name} ← {load_desc} (ptr)"),
                     target_rva: 0,
+                    iat_slot_rva: 0,
                 })
             }
             // ADD modifying the target register is the tail of a table-dispatch sequence

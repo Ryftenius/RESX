@@ -1,4 +1,5 @@
 use iced_x86::{Mnemonic, OpKind, Register};
+use std::fmt::Write as _;
 use std::io::Write;
 
 use crate::analysis::disasm::{collect_api_calls, disassemble_at, ApiCall, Instruction};
@@ -86,6 +87,70 @@ pub(super) fn print_api_calls(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_api_call_tree(
+    calls: &[ApiCall],
+    insns: &[Instruction],
+    func_name: &str,
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    symbol_index: &crate::analysis::symbols::SymbolIndex,
+    exports: &[Export],
+    arch: u32,
+    image_base: u64,
+    cfg: &Config,
+    root_rva: u32,
+) -> String {
+    let synthetic_syscall = synthetic_syscall_call(insns, func_name);
+    let display_calls: Vec<ApiCall> = if let Some(call) = synthetic_syscall {
+        let mut merged = calls.to_vec();
+        if !merged.iter().any(|existing| {
+            existing.rva == call.rva && existing.label.eq_ignore_ascii_case(&call.label)
+        }) {
+            merged.push(call);
+        }
+        merged.sort_by_key(|call| call.rva);
+        merged
+    } else {
+        calls.to_vec()
+    };
+
+    if display_calls.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(root_rva);
+    let root_image = TraceImageView {
+        raw,
+        pe,
+        symbol_index,
+        exports,
+        arch,
+        image_base,
+    };
+    write_calls_recursive_text(
+        &mut out,
+        &display_calls,
+        insns,
+        &root_image,
+        cfg,
+        0,
+        &mut visited,
+        "  ",
+    );
+    out
+}
+
+#[derive(Clone)]
+pub(super) struct SyscallCallDetails {
+    pub kernel_module: String,
+    pub kernel_symbol: String,
+    pub kernel_rva: u32,
+    pub service_number: Option<u32>,
+}
+
 fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiCall> {
     if !is_nt_api(func_name) {
         return None;
@@ -106,6 +171,60 @@ fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiC
         is_indirect: false,
         indirect_method: None,
         switch_cases: Vec::new(),
+    })
+}
+
+pub(super) fn synthetic_syscall_api_call(
+    insns: &[Instruction],
+    func_name: &str,
+) -> Option<ApiCall> {
+    synthetic_syscall_call(insns, func_name)
+}
+
+fn detect_syscall_number_from_insns(insns: &[Instruction]) -> Option<u32> {
+    for insn in insns.iter().take(12) {
+        match insn.iced.mnemonic() {
+            Mnemonic::Mov
+                if insn.iced.op_count() >= 2 && insn.iced.op0_kind() == OpKind::Register =>
+            {
+                let dst = insn.iced.op0_register();
+                if matches!(
+                    dst,
+                    Register::EAX | Register::RAX | Register::AX | Register::AL
+                ) {
+                    return match insn.iced.op1_kind() {
+                        OpKind::Immediate8 => Some(insn.iced.immediate8to32() as u32),
+                        OpKind::Immediate16 => Some(insn.iced.immediate16() as u32),
+                        OpKind::Immediate32 => Some(insn.iced.immediate32()),
+                        OpKind::Immediate32to64 => Some(insn.iced.immediate32to64() as u32),
+                        OpKind::Immediate64 => Some(insn.iced.immediate64() as u32),
+                        _ => None,
+                    };
+                }
+            }
+            Mnemonic::Ret => break,
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(super) fn resolve_syscall_call_details(
+    call: &ApiCall,
+    insns: &[Instruction],
+    cfg: &Config,
+) -> Option<SyscallCallDetails> {
+    let target = resolve_syscall_trace_target(call, insns, cfg)?;
+    let service_number = if call.kind.eq_ignore_ascii_case("syscall") {
+        detect_syscall_number_from_insns(insns)
+    } else {
+        None
+    };
+    Some(SyscallCallDetails {
+        kernel_module: target.image.dll_name,
+        kernel_symbol: target.symbol_name,
+        kernel_rva: target.rva,
+        service_number,
     })
 }
 
@@ -272,6 +391,7 @@ fn print_calls_recursive(
                 sub_cfg.max_insns = sub_cfg.max_insns.min(300);
                 if let Ok(sub_insns) = disassemble_at(
                     image.raw,
+                    image.pe,
                     file_off,
                     call.target_rva,
                     image.arch,
@@ -312,6 +432,7 @@ fn print_calls_recursive(
                 sub_cfg.max_insns = sub_cfg.max_insns.min(300);
                 if let Ok(sub_insns) = disassemble_at(
                     &target.image.raw,
+                    &target.image.pe,
                     file_off,
                     target.rva,
                     target.image.arch,
@@ -341,6 +462,158 @@ fn print_calls_recursive(
                             depth + 1,
                             visited,
                             dll_map,
+                            &child_prefix,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_calls_recursive_text(
+    out: &mut String,
+    calls: &[ApiCall],
+    insns: &[Instruction],
+    image: &TraceImageView<'_>,
+    cfg: &Config,
+    depth: u32,
+    visited: &mut std::collections::HashSet<u32>,
+    line_prefix: &str,
+) {
+    let last = calls.len().saturating_sub(1);
+    for (i, call) in calls.iter().enumerate() {
+        let is_last = i == last;
+        let branch = if is_last { "└──" } else { "├──" };
+        let syscall_target = resolve_syscall_trace_target(call, insns, cfg);
+        let can_recurse = !call.is_import
+            && !call.is_indirect
+            && call.target_rva != 0
+            && depth + 1 < cfg.funcs_depth
+            && !visited.contains(&call.target_rva);
+        let can_recurse_syscall = depth + 1 < cfg.funcs_depth && syscall_target.is_some();
+
+        let tag = match (
+            call.is_import,
+            call.is_indirect,
+            call.kind.as_str(),
+            is_nt_api(&call.label),
+        ) {
+            (true, _, "jmp", true) => "[syscall] [tail call]",
+            (true, _, _, true) => "[syscall]",
+            (true, _, "jmp", false) => "[import · tail call]",
+            (true, _, _, false) => "[import]",
+            (_, true, _, _) => "[indirect]",
+            (_, _, "jmp", _) => "[tail call]",
+            _ => "[internal]",
+        };
+        let target = if call.dll.is_empty() {
+            call.label.clone()
+        } else {
+            format!("{}!{}", short_dll_name(&call.dll), call.label)
+        };
+        let _ = writeln!(
+            out,
+            "{}{} 0x{:X}  {}  {} {}",
+            line_prefix, branch, call.rva, call.kind, target, tag
+        );
+
+        if !call.switch_cases.is_empty() {
+            let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
+            let _ = writeln!(
+                out,
+                "{}when : {}",
+                detail_prefix,
+                format_case_values(&call.switch_cases)
+            );
+        }
+
+        if let Some(target) = syscall_target.as_ref() {
+            let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
+            let _ = writeln!(
+                out,
+                "{}kernel: {}!{}",
+                detail_prefix,
+                short_dll_name(&target.image.dll_name),
+                target.symbol_name
+            );
+        }
+
+        if can_recurse {
+            if let Some(file_off) = image.pe.rva_to_offset(call.target_rva) {
+                visited.insert(call.target_rva);
+                let mut sub_cfg = cfg.clone();
+                sub_cfg.max_insns = sub_cfg.max_insns.min(300);
+                if let Ok(sub_insns) = disassemble_at(
+                    image.raw,
+                    image.pe,
+                    file_off,
+                    call.target_rva,
+                    image.arch,
+                    image.image_base,
+                    image.exports,
+                    Some(image.symbol_index),
+                    &sub_cfg,
+                ) {
+                    let sub_calls = collect_api_calls(
+                        &sub_insns,
+                        image.pe,
+                        image.raw,
+                        image.symbol_index,
+                        image.image_base,
+                    );
+                    if !sub_calls.is_empty() {
+                        let child_prefix =
+                            format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
+                        write_calls_recursive_text(
+                            out,
+                            &sub_calls,
+                            &sub_insns,
+                            image,
+                            cfg,
+                            depth + 1,
+                            visited,
+                            &child_prefix,
+                        );
+                    }
+                }
+            }
+        } else if can_recurse_syscall {
+            let target = syscall_target.unwrap();
+            if let Some(file_off) = target.image.pe.rva_to_offset(target.rva) {
+                let mut sub_cfg = cfg.clone();
+                sub_cfg.max_insns = sub_cfg.max_insns.min(300);
+                if let Ok(sub_insns) = disassemble_at(
+                    &target.image.raw,
+                    &target.image.pe,
+                    file_off,
+                    target.rva,
+                    target.image.arch,
+                    target.image.image_base,
+                    &target.image.exports,
+                    Some(&target.image.symbol_index),
+                    &sub_cfg,
+                ) {
+                    let sub_calls = collect_api_calls(
+                        &sub_insns,
+                        &target.image.pe,
+                        &target.image.raw,
+                        &target.image.symbol_index,
+                        target.image.image_base,
+                    );
+                    if !sub_calls.is_empty() {
+                        let child_prefix =
+                            format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
+                        let kernel_view = target.image.as_view();
+                        write_calls_recursive_text(
+                            out,
+                            &sub_calls,
+                            &sub_insns,
+                            &kernel_view,
+                            cfg,
+                            depth + 1,
+                            visited,
                             &child_prefix,
                         );
                     }
@@ -505,6 +778,7 @@ fn resolve_syscall_dispatch_target(
     sub_cfg.max_insns = 96;
     let syscall_insns = disassemble_at(
         &kernel_image.raw,
+        &kernel_image.pe,
         file_off,
         syscall_rva,
         kernel_image.arch,

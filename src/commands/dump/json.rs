@@ -54,6 +54,12 @@ pub(crate) struct FuncResult {
     pub(crate) pdb_loaded: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) followed_jmp: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) is_import_slot: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) import_target_dll: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) import_target_name: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) instructions: Vec<InsnJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +78,10 @@ pub(crate) struct FuncResult {
     pub(crate) edrchk: Option<EdrJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) api_calls: Vec<ApiCallJson>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) api_call_tree: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_syscall: Option<SyscallJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) explain: Option<ExplainResult>,
 }
@@ -124,6 +134,17 @@ pub(crate) struct ApiCallJson {
     pub(crate) indirect_method: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) switch_cases: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) syscall: Option<SyscallJson>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SyscallJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) service_number: Option<String>,
+    pub(crate) kernel_module: String,
+    pub(crate) kernel_symbol: String,
+    pub(crate) kernel_rva: String,
 }
 
 #[derive(Serialize)]

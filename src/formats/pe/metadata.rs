@@ -1,10 +1,10 @@
 use super::constants::{
     IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR, IMAGE_DIRECTORY_ENTRY_DEBUG,
-    IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
+    IMAGE_DIRECTORY_ENTRY_EXCEPTION, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG,
 };
 use super::types::{
     read_cstr, read_u16, read_u32, read_u64, PeClrInfo, PeCodeViewInfo, PeDebugEntry, PeDebugInfo,
-    PeFile, PeLoadConfigInfo,
+    PeFile, PeLoadConfigInfo, PeRuntimeFunctionInfo,
 };
 
 pub fn read_debug_info(pe: &PeFile, raw: &[u8]) -> PeDebugInfo {
@@ -82,16 +82,18 @@ pub fn read_load_config(pe: &PeFile, raw: &[u8]) -> Option<PeLoadConfigInfo> {
         return None;
     }
 
-    let (security_cookie_off, se_handler_count_off, guard_cf_count_off, guard_flags_off) =
-        if pe.arch == 64 {
-            (88usize, 104usize, 136usize, 144usize)
-        } else {
-            (60usize, 68usize, 84usize, 88usize)
-        };
-    let (guard_eh_count_off, guard_xfg_check_off) = if pe.arch == 64 {
-        (264usize, 272usize)
+    // Offsets are taken from IMAGE_LOAD_CONFIG_DIRECTORY32/64 in the local Windows SDK.
+    let (
+        security_cookie_off,
+        se_handler_count_off,
+        guard_cf_count_off,
+        guard_flags_off,
+        guard_eh_count_off,
+        guard_xfg_check_off,
+    ) = if pe.arch == 64 {
+        (88usize, 104usize, 136usize, 144usize, 272usize, 280usize)
     } else {
-        (168usize, 172usize)
+        (60usize, 68usize, 84usize, 88usize, 168usize, 172usize)
     };
 
     Some(PeLoadConfigInfo {
@@ -120,6 +122,80 @@ pub fn read_load_config(pe: &PeFile, raw: &[u8]) -> Option<PeLoadConfigInfo> {
             guard_xfg_check_off,
             pe.arch,
         ),
+    })
+}
+
+pub fn read_runtime_function(
+    pe: &PeFile,
+    raw: &[u8],
+    target_rva: u32,
+) -> Option<PeRuntimeFunctionInfo> {
+    if pe.arch != 64 {
+        return None;
+    }
+
+    let (dir_rva, dir_size) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_EXCEPTION);
+    if dir_rva == 0 || dir_size < 12 {
+        return None;
+    }
+    let mut off = pe.rva_to_offset(dir_rva)?;
+    let end = off.checked_add(dir_size as usize)?.min(raw.len());
+
+    while off + 12 <= end {
+        let begin_rva = read_u32(raw, off);
+        let end_rva = read_u32(raw, off + 4);
+        let unwind_info_rva = read_u32(raw, off + 8);
+        if begin_rva <= target_rva && target_rva < end_rva {
+            return parse_unwind_info(pe, raw, begin_rva, end_rva, unwind_info_rva);
+        }
+        off += 12;
+    }
+
+    None
+}
+
+fn parse_unwind_info(
+    pe: &PeFile,
+    raw: &[u8],
+    begin_rva: u32,
+    end_rva: u32,
+    unwind_info_rva: u32,
+) -> Option<PeRuntimeFunctionInfo> {
+    let off = pe.rva_to_offset(unwind_info_rva)?;
+    if off + 4 > raw.len() {
+        return None;
+    }
+
+    let b0 = raw[off];
+    let unwind_version = b0 & 0x7;
+    let unwind_flags = b0 >> 3;
+    let prolog_size = raw[off + 1];
+    let unwind_code_count = raw[off + 2];
+    let frame = raw[off + 3];
+    let frame_register = frame & 0x0F;
+    let frame_offset = frame >> 4;
+
+    let codes_size = (unwind_code_count as usize) * 2;
+    let aligned_codes_size = (codes_size + 3) & !3;
+    let handler_field_off = off + 4 + aligned_codes_size;
+
+    let exception_handler_rva = if unwind_flags & 0x3 != 0 && handler_field_off + 4 <= raw.len() {
+        read_u32(raw, handler_field_off)
+    } else {
+        0
+    };
+
+    Some(PeRuntimeFunctionInfo {
+        begin_rva,
+        end_rva,
+        unwind_info_rva,
+        unwind_version,
+        unwind_flags,
+        prolog_size,
+        unwind_code_count,
+        frame_register,
+        frame_offset,
+        exception_handler_rva,
     })
 }
 

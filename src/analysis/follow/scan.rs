@@ -26,6 +26,7 @@ pub struct FollowScanConfig {
     pub no_system: bool,
     pub scan_exe: bool,
     pub include: String,
+    pub scope_file: String,
     pub exclude: String,
     pub max_dll_bytes: u64,
     pub workers: usize,
@@ -55,6 +56,7 @@ impl FollowScanConfig {
             no_system: cfg.no_system,
             scan_exe: cfg.scan_exe,
             include: cfg.include.clone(),
+            scope_file: cfg.scope_file.clone(),
             exclude: cfg.exclude.clone(),
             max_dll_bytes: cfg.max_dll_mb * 1024 * 1024,
             workers: cfg.workers,
@@ -433,9 +435,9 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
     }
 
     let exts: Vec<&str> = if cfg.scan_exe {
-        vec!["dll", "exe"]
+        vec!["dll", "sys", "exe"]
     } else {
-        vec!["dll"]
+        vec!["dll", "sys"]
     };
     let mut seen = std::collections::HashSet::new();
     let mut paths = Vec::new();
@@ -450,7 +452,8 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
                    seen: &mut std::collections::HashSet<String>,
                    exts: &[&str],
                    cfg: &FollowScanConfig,
-                   enforce_priority: bool| {
+                   enforce_priority: bool,
+                   apply_scope_file: bool| {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -482,6 +485,10 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
             if !cfg.include.is_empty() && !glob_match(&cfg.include, &base) {
                 continue;
             }
+            if apply_scope_file && !cfg.scope_file.is_empty() && !glob_match(&cfg.scope_file, &base)
+            {
+                continue;
+            }
             if !cfg.exclude.is_empty() && glob_match(&cfg.exclude, &base) {
                 continue;
             }
@@ -495,10 +502,10 @@ pub fn build_scan_list(cfg: &FollowScanConfig, target_dll: &Path) -> Vec<PathBuf
     };
 
     for dir in system_dirs(cfg) {
-        add_dir(&dir, &mut paths, &mut seen, &exts, cfg, true);
+        add_dir(&dir, &mut paths, &mut seen, &exts, cfg, true, false);
     }
     for dir in cfg.scan_dirs.iter().map(PathBuf::from) {
-        add_dir(&dir, &mut paths, &mut seen, &exts, cfg, false);
+        add_dir(&dir, &mut paths, &mut seen, &exts, cfg, false, true);
     }
     for dll_arg in &cfg.scan_dlls {
         if let Ok(p) = find_target_dll(dll_arg, cfg) {

@@ -34,6 +34,7 @@ pub struct TextReport<'a> {
     pub debug: &'a PeDebugInfo,
     pub clr: Option<&'a PeClrInfo>,
     pub load_config: Option<&'a PeLoadConfigInfo>,
+    pub veh_imports: &'a [String],
     pub metadata: &'a FileMetadata,
     pub known_names: &'a [String],
 }
@@ -250,6 +251,15 @@ pub fn render_text(w: &mut dyn Write, c: &Colors, report: &TextReport<'_>) {
             yes_no(report.pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_GUARD_CF != 0),
         ),
     );
+    print_dual_kv(
+        w,
+        c,
+        (
+            "SEH",
+            yes_no(report.pe.dll_characteristics & IMAGE_DLLCHARACTERISTICS_NO_SEH == 0),
+        ),
+        ("VEH", yes_no(!report.veh_imports.is_empty())),
+    );
     if let Some(load) = report.load_config {
         print_dual_kv(
             w,
@@ -354,8 +364,12 @@ pub fn render_text(w: &mut dyn Write, c: &Colors, report: &TextReport<'_>) {
                 report.load_config,
             )),
         );
+        print_kv(w, c, "SEHHandlers", &load.se_handler_count.to_string());
     } else {
         print_kv(w, c, "LoadConfig", "Not present");
+    }
+    if !report.veh_imports.is_empty() {
+        print_kv(w, c, "VEHImports", &report.veh_imports.join(", "));
     }
     print_dual_kv(
         w,

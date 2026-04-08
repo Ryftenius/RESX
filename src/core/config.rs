@@ -186,6 +186,9 @@ pub struct Cli {
     #[arg(long = "include", default_value = "")]
     pub include: String,
 
+    #[arg(long = "scope-file", alias = "include-file", default_value = "")]
+    pub scope_file: String,
+
     #[arg(long = "exclude", default_value = "")]
     pub exclude: String,
 
@@ -299,6 +302,7 @@ pub struct Config {
     pub scan_dlls: Vec<String>,
     pub scan_exe: bool,
     pub include: String,
+    pub scope_file: String,
     pub exclude: String,
     pub max_dll_mb: u64,
     pub workers: usize,
@@ -378,6 +382,7 @@ impl Config {
             scan_dlls: cli.scan_dlls.clone(),
             scan_exe: cli.scan_exe,
             include: cli.include.clone(),
+            scope_file: cli.scope_file.clone(),
             exclude: cli.exclude.clone(),
             max_dll_mb: cli.max_dll_mb,
             workers: cli.workers,

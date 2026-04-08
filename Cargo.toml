@@ -1,9 +1,12 @@
 [package]
 name = "resx"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 authors = ["TITAN Softwork Solutions"]
 description = "Windows binary recon CLI for exports, PDB-backed symbols, CFG recovery, and triage"
+repository = "https://github.com/TITAN-Softwork-Solutions/RESX"
+homepage = "https://github.com/TITAN-Softwork-Solutions/RESX"
+build = "build.rs"
 
 [dependencies]
 iced-x86 = "1"
@@ -14,8 +17,11 @@ rayon        = "1"
 regex        = "1"
 
 [profile.release]
-opt-level     = 3
-lto           = true
-codegen-units = 1
-strip         = true
-panic         = "abort"
+opt-level = 2
+lto = false
+codegen-units = 16
+panic = "abort"
+debug = 1
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

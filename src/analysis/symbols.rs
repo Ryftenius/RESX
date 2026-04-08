@@ -4,6 +4,21 @@ use std::sync::Arc;
 use crate::formats::pdb::PdbSymbol;
 use crate::formats::pe::Export;
 
+pub fn display_symbol_name(name: &str) -> String {
+    let (scope, tail) = match name.rsplit_once('!') {
+        Some((scope, tail)) => (Some(scope), tail),
+        None => (None, name),
+    };
+    let cleaned_tail = match tail.split_once("$thunk$") {
+        Some((base, _)) if !base.is_empty() => base,
+        _ => tail,
+    };
+    match scope {
+        Some(scope) => format!("{}!{}", scope, cleaned_tail),
+        None => cleaned_tail.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedSymbol {
     pub name: String,
@@ -43,7 +58,7 @@ impl SymbolIndex {
                 continue;
             }
             let sym = ResolvedSymbol {
-                name: e.name.clone(),
+                name: display_symbol_name(&e.name),
                 kind: "function".to_owned(),
                 type_name: String::new(),
                 va: image_base + e.rva as u64,
@@ -54,7 +69,7 @@ impl SymbolIndex {
 
         for s in pdb_symbols {
             let sym = ResolvedSymbol {
-                name: s.name.clone(),
+                name: display_symbol_name(&s.name),
                 kind: s.kind.clone(),
                 type_name: s.type_name.clone(),
                 va: s.va,
@@ -70,6 +85,10 @@ impl SymbolIndex {
 
     pub fn exact_name(&self, address: u64) -> Option<&str> {
         self.inner.exact.get(&address).map(|s| s.name.as_str())
+    }
+
+    pub fn exact(&self, address: u64) -> Option<ResolvedSymbol> {
+        self.inner.exact.get(&address).cloned()
     }
 
     pub fn describe(&self, address: u64) -> Option<String> {
