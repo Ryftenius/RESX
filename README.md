@@ -14,6 +14,37 @@
 
 RESX is built for fast terminal-first reversing: exports, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, switch-table analysis, caller tracing, PE inspection, YARA, and triage.
 
+## VS Code Extension
+
+The repository also includes `resx-vscode`, the Visual Studio Code extension for browsing PE binaries with the same RESX engine.
+
+- Open `.exe`, `.dll`, and `.sys` files directly in a custom editor
+- Run `RESX: Locate`, `RESX: Locate Symbol`, or `RESX: Dump` from the command palette
+- `RESX: Dump` loads exports and PDB-backed symbols for the selected module with progress feedback before opening the function
+- Jump straight into resolved system binaries such as `C:\Windows\System32\ntdll.dll`
+
+Extension metadata and Marketplace packaging live in `resx-vscode/package.json`.
+
+## Screenshots
+
+### VS Code Binary Viewer
+
+![RESX VS Code overview](media/Dump_Ntoskrnl_Overview.png)
+
+![RESX dump disassembly view](media/Dump_Disassembly_KiDispatchCallout.png)
+
+![RESX dump API refs view](media/Dump_ApiRefs_KiDispatchCallout.png)
+
+![RESX syscall stub view](media/Dump_ntdll_NtAllocateVirtualMemoryEx_Stub.png)
+
+### Command Palette Workflows
+
+![RESX dump file search](media/Dump_File_Search.png)
+
+![RESX dump symbol search](media/Dump_Search_KiDispatchCallout.png)
+
+![RESX locate result](media/Locate_OpenPro.png)
+
 ## BUILD
 
 ```powershell
@@ -214,6 +245,7 @@ resx pechk suspicious.dll
 resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
 resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx callers .\blackbird.sys BLACKBIRDNtAllocateVirtualMemoryHookStub --depth 2
+resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
 resx locate NtOpenProcess
 resx locate NtOpenProcess --include-dir C:\Work\Drivers
 resx locate-sym RtlpHeapHandleError
@@ -229,5 +261,7 @@ resx update
 - `intelli` is a first-class shorthand for dump-driven heuristic triage.
 - `peinfo` reports image kind, subsystem, signer state, debug/PDB presence, compiler/runtime hints, and hardening flags such as `ASLR`, `NXCOMPAT`, `CFG`, `XFG`, and related load-config metadata.
 - `sections`, `eat`, `iat`, `syms`, and `pechk` are direct shorthand commands, not separate binaries.
+- `callers --include-dir` scans `.dll` and `.sys` images by default, and adds `.exe` when `--scan-exe` is present.
+- `--include` filters the full callers scan list; `--scope-file` filters only files discovered via `--include-dir`.
 - `update` pulls the latest code from the current git remote/branch in a source checkout.
 - `resx help` shows full CLI usage and `resx <command> --example` prints focused examples for that command.

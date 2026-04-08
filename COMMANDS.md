@@ -85,6 +85,7 @@
 - `--include-image <dll>`
 - `--scan-exe`
 - `--include <glob>`
+- `--scope-file <glob>` / `--include-file <glob>`
 - `--exclude <glob>`
 - `--max-dll-size <mb>`
 - `--workers <n>`
@@ -116,11 +117,15 @@
 - `cfg` supports function names, `--at <rva>`, and `--ordinal <n>` just like `dump`.
 - `cfg` and `dump` use the same instruction and API/symbol highlighting path for call targets and comments.
 - `dump --recomp` emits corrected bit-test branches and better local-call placeholders.
+- `dump --funcs-depth <n>` expands nested API call depth and accepts levels `1` through `5`.
 - `syms --verbose` can show exact PDB identity/load diagnostics, including RSDS-derived kernel PDB names.
 - `dump` can resolve internal names from enumerated PDB symbols when exports do not contain the target.
+- `dump` can surface syscall service numbers and kernel targets for `Nt*` and `Zw*` stubs.
 - `locate` and `locate-sym` search only the priority set by default.
 - `callers` uses the priority set by default.
 - `--include-dir` and `--include-image` widen the scan beyond the priority set for `locate` and `callers`.
+- `callers --include-dir` will scan `.dll` and `.sys` images by default, and `.exe` as well when `--scan-exe` is set.
+- `--include` filters the entire callers scan list; `--scope-file` only filters files discovered through `--include-dir`.
 - `priority` opens the generated priority config JSON where you can edit directories, exact names, prefixes, and regexes.
 
 ## Examples
@@ -135,6 +140,7 @@ resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
 resx syms ntoskrnl.exe --verbose
 resx callers blackbird.sys BLACKBIRDNtAllocateVirtualMemoryHookStub --depth 2
 resx callers ntoskrnl.exe NtOpenProcess --include-dir C:\Work\Drivers --depth 2
+resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
 resx priority
 resx locate NtOpenProcess
 resx locate NtOpenProcess --include-dir C:\Work\Drivers

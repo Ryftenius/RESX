@@ -3,3 +3,14 @@
 /*.exe
 /*.pdb
 /Cargo.lock
+/*.pfx
+/publish/
+/build-artifacts/
+/test/
+/build.ps1
+/package-lock.json
+/resx-vscode/bin/
+/resx-vscode/out/
+/resx-vscode/*.vsix
+*.dll
+*.sys
