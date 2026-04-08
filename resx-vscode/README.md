@@ -9,19 +9,14 @@ It opens `.exe`, `.dll`, and `.sys` files in a custom editor and gives you a foc
 - PE overview, sections, exports, imports, symbols, types, and triage views
 - function dumps with CFG text, strings, xrefs, recompilation output, syscall stub annotations, and nested API call trees
 - PDB loading controls and symbol search path configuration
+- live `Dev` trace tab that logs every `resx` spawn, arguments, duration, and stderr/error output
 - command palette lookup flow for `locate` and `locate-sym`
 - direct open-and-jump navigation into resolved system binaries such as `ntdll.dll`
 
 ## Command Palette
 
-Use the command palette with these commands:
-
-- `RESX: Locate`
-  Enter an API or export name such as `NtOpenProcess`.
-- `RESX: Locate Symbol`
-  Enter a symbol-oriented lookup such as `RtlpHeapHandleError`.
-- `RESX: Dump`
-  Pick a module from an autocomplete list, let the extension load exports plus PDB-backed symbols with progress, then jump straight into the dump view.
+Use the command palette with `RESX: Locate`, `RESX: Locate Symbol`, and `RESX: Dump`.
+`RESX: Locate` resolves an API or export such as `NtOpenProcess`, `RESX: Locate Symbol` resolves symbol-oriented lookups such as `RtlpHeapHandleError`, and `RESX: Dump` picks a module, loads exports plus PDB-backed symbols with progress, then opens the dump view.
 
 `Locate` and `Locate Symbol` resolve the target with the CLI, open the matching image, and jump directly into the resolved function or RVA.
 

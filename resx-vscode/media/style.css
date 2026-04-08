@@ -870,6 +870,72 @@ body.asm-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dev-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.dev-toolbar-meta {
+  font-size: 11px;
+  color: var(--dim);
+}
+.dev-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dev-log-item {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--vscode-sideBar-background, var(--tab-bg));
+}
+.dev-log-running { border-left: 3px solid var(--code-blue); }
+.dev-log-ok { border-left: 3px solid var(--ok); }
+.dev-log-error { border-left: 3px solid var(--err); }
+.dev-log-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+.dev-log-status {
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+.dev-log-status-running { color: var(--code-blue); }
+.dev-log-status-ok { color: var(--ok); }
+.dev-log-status-error { color: var(--err); }
+.dev-log-time,
+.dev-log-duration {
+  color: var(--dim);
+  font-family: var(--mono);
+}
+.dev-log-duration {
+  margin-left: auto;
+}
+.dev-log-cmd,
+.dev-log-detail {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.dev-log-cmd {
+  color: var(--fg);
+}
+.dev-log-detail {
+  margin-top: 6px;
+  color: var(--dim);
+}
+.dev-log-error {
+  color: var(--err);
+}
 #tooltip {
   position: fixed;
   z-index: 1000;

@@ -15,6 +15,18 @@ export interface RunOptions {
     funcsDepth?: number;
 }
 
+export interface RunTraceEntry {
+    id: number;
+    exe?: string;
+    args: string[];
+    startedAt: string;
+    endedAt?: string;
+    durationMs?: number;
+    status: 'running' | 'ok' | 'error';
+    error?: string;
+    stderr?: string;
+}
+
 interface SignatureInfo {
     status?: string;
     statusMessage?: string;
@@ -34,6 +46,35 @@ const RESX_EXEC_TIMEOUT_MS = 120000;
 
 const verificationCache = new Map<string, Promise<string>>();
 const trustManifestCache = new Map<string, TrustManifest>();
+const runTraceHistory: RunTraceEntry[] = [];
+const runTraceListeners = new Set<(entry: RunTraceEntry) => void>();
+let nextRunTraceId = 1;
+const MAX_RUN_TRACE_HISTORY = 300;
+
+function emitRunTrace(entry: RunTraceEntry): void {
+    runTraceHistory.push(entry);
+    if (runTraceHistory.length > MAX_RUN_TRACE_HISTORY) {
+        runTraceHistory.splice(0, runTraceHistory.length - MAX_RUN_TRACE_HISTORY);
+    }
+    for (const listener of runTraceListeners) {
+        try {
+            listener(entry);
+        } catch {
+            // Ignore observer failures so command execution is unaffected.
+        }
+    }
+}
+
+export function getRunTraceHistory(): RunTraceEntry[] {
+    return runTraceHistory.map(entry => ({ ...entry }));
+}
+
+export function subscribeRunTrace(listener: (entry: RunTraceEntry) => void): vscode.Disposable {
+    runTraceListeners.add(listener);
+    return new vscode.Disposable(() => {
+        runTraceListeners.delete(listener);
+    });
+}
 
 function bundledExecutableCandidates(context: vscode.ExtensionContext): string[] {
     const suffix = process.platform === 'win32' ? 'resx.exe' : 'resx';
@@ -262,28 +303,65 @@ export function runJson(
         }
 
         const allArgs = [...args, ...extra, '--json', '--no-color', '--quiet'];
+        const started = Date.now();
+        const traceId = nextRunTraceId++;
+        const traceBase: RunTraceEntry = {
+            id: traceId,
+            exe,
+            args: [...allArgs],
+            startedAt: new Date(started).toISOString(),
+            status: 'running',
+        };
+        emitRunTrace(traceBase);
 
         execFile(exe, allArgs, {
             maxBuffer: 64 * 1024 * 1024,
             timeout: RESX_EXEC_TIMEOUT_MS,
             windowsHide: true,
         }, (err, stdout, stderr) => {
+            const finished = Date.now();
+            const traceDone: RunTraceEntry = {
+                ...traceBase,
+                endedAt: new Date(finished).toISOString(),
+                durationMs: finished - started,
+                status: err ? 'error' : 'ok',
+                stderr: stderr || undefined,
+            };
             if (!stdout && err) {
                 const timeoutMsg = (err as NodeJS.ErrnoException)?.code === 'ETIMEDOUT'
                     ? `resx timed out after ${Math.round(RESX_EXEC_TIMEOUT_MS / 1000)}s`
                     : '';
-                resolve({ data: null, error: stderr || timeoutMsg || err.message });
+                const errorText = stderr || timeoutMsg || err.message;
+                emitRunTrace({
+                    ...traceDone,
+                    status: 'error',
+                    error: errorText,
+                });
+                resolve({ data: null, error: errorText });
                 return;
             }
             const raw = stdout.trim();
             if (!raw) {
-                resolve({ data: null, error: stderr || 'no output from resx' });
+                const errorText = stderr || 'no output from resx';
+                emitRunTrace({
+                    ...traceDone,
+                    status: 'error',
+                    error: errorText,
+                });
+                resolve({ data: null, error: errorText });
                 return;
             }
             try {
+                emitRunTrace(traceDone);
                 resolve({ data: JSON.parse(raw) });
             } catch {
-                resolve({ data: null, error: `JSON parse failed: ${raw.slice(0, 300)}` });
+                const errorText = `JSON parse failed: ${raw.slice(0, 300)}`;
+                emitRunTrace({
+                    ...traceDone,
+                    status: 'error',
+                    error: errorText,
+                });
+                resolve({ data: null, error: errorText });
             }
         });
     });

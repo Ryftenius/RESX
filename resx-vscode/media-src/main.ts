@@ -76,6 +76,7 @@ vscode.postMessage({ command: 'ready' });
         currentDumpDll: '',
         currentDumpPath: '',
         apiDepth: 1,
+        devLogs: [],
         _lastHovered: null,
     };
     const $ = id => document.getElementById(id);
@@ -106,6 +107,12 @@ function formatBytes(n) {
         i++;
     }
     return `${v.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+}
+function fmtDevTime(iso) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || Number.isNaN(d.getTime()))
+        return '—';
+    return d.toLocaleTimeString([], { hour12: false });
 }
 function normalizeRva(rva) {
     if (rva == null)
@@ -953,6 +960,18 @@ window.addEventListener('message', e => {
         case 'intelli':
             renderTriage(msg);
             break;
+        case 'dev_log_history':
+            st.devLogs = Array.isArray(msg.entries) ? msg.entries.slice() : [];
+            renderDevLogs();
+            break;
+        case 'dev_log_append':
+            if (msg.entry) {
+                st.devLogs.push(msg.entry);
+                if (st.devLogs.length > 300)
+                    st.devLogs.splice(0, st.devLogs.length - 300);
+                renderDevLogs();
+            }
+            break;
         case 'dump_result':
             renderDump(msg);
             break;
@@ -1687,6 +1706,83 @@ function renderTriage(msg) {
         container.querySelectorAll('.finding-group').forEach(g => g.style.display = vis.has(g) ? '' : 'none');
         lbl.textContent = re ? `${visible} / ${findings.length} findings` : `${findings.length} findings`;
     });
+}
+function renderDevLogs() {
+    const panel = $('panel-dev');
+    if (!panel)
+        return;
+    panel.innerHTML = '';
+    const logs = Array.isArray(st.devLogs) ? st.devLogs.slice().sort((a, b) => (b.id || 0) - (a.id || 0)) : [];
+    const toolbar = document.createElement('div');
+    toolbar.className = 'dev-toolbar';
+    const meta = document.createElement('div');
+    meta.className = 'dev-toolbar-meta';
+    meta.textContent = logs.length ? `${logs.length} RESX invocation${logs.length === 1 ? '' : 's'}` : 'No RESX invocations yet';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn-sm';
+    copyBtn.textContent = 'Copy Log';
+    copyBtn.disabled = !logs.length;
+    copyBtn.addEventListener('click', () => {
+        const text = logs.map(entry => {
+            const parts = [
+                `[${fmtDevTime(entry.startedAt)}]`,
+                String(entry.status || 'running').toUpperCase(),
+                entry.exe || 'resx',
+                ...(entry.args || []),
+            ];
+            if (entry.durationMs != null)
+                parts.push(`(${entry.durationMs} ms)`);
+            if (entry.error)
+                parts.push(`ERROR: ${entry.error}`);
+            if (entry.stderr)
+                parts.push(`STDERR: ${entry.stderr}`);
+            return parts.join(' ');
+        }).join('\n');
+        copyText(text);
+    });
+    toolbar.append(meta, copyBtn);
+    panel.appendChild(toolbar);
+    if (!logs.length) {
+        panel.appendChild(document.createRange().createContextualFragment('<p class="no-data">No RESX processes have been spawned in this viewer yet.</p>'));
+        return;
+    }
+    const list = document.createElement('div');
+    list.className = 'dev-log-list';
+    logs.forEach(entry => {
+        const item = document.createElement('div');
+        item.className = `dev-log-item dev-log-${esc(String(entry.status || 'running'))}`;
+        const header = document.createElement('div');
+        header.className = 'dev-log-header';
+        const status = document.createElement('span');
+        status.className = `dev-log-status dev-log-status-${esc(String(entry.status || 'running'))}`;
+        status.textContent = String(entry.status || 'running').toUpperCase();
+        const started = document.createElement('span');
+        started.className = 'dev-log-time';
+        started.textContent = fmtDevTime(entry.startedAt);
+        const dur = document.createElement('span');
+        dur.className = 'dev-log-duration';
+        dur.textContent = entry.durationMs != null ? `${entry.durationMs} ms` : 'running';
+        header.append(status, started, dur);
+        const cmd = document.createElement('pre');
+        cmd.className = 'dev-log-cmd';
+        cmd.textContent = [entry.exe || 'resx', ...(entry.args || [])].join(' ');
+        item.appendChild(header);
+        item.appendChild(cmd);
+        if (entry.error) {
+            const err = document.createElement('pre');
+            err.className = 'dev-log-detail dev-log-error';
+            err.textContent = entry.error;
+            item.appendChild(err);
+        }
+        if (entry.stderr) {
+            const stderr = document.createElement('pre');
+            stderr.className = 'dev-log-detail';
+            stderr.textContent = entry.stderr;
+            item.appendChild(stderr);
+        }
+        list.appendChild(item);
+    });
+    panel.appendChild(list);
 }
 function renderDump(msg) {
     hideTooltip();

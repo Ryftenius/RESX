@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { runJson, RunOptions } from './runner';
+import { getRunTraceHistory, runJson, RunOptions, subscribeRunTrace } from './runner';
 
 interface PendingNavigation {
     func?: string;
@@ -183,8 +183,12 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         webview.html = this.buildHtml(webview, fileName, nonce);
         ResxEditorProvider.panelByPath.set(docKey, webviewPanel);
+        const traceSubscription = subscribeRunTrace((entry) => {
+            void webview.postMessage({ type: 'dev_log_append', entry });
+        });
         webviewPanel.onDidDispose(() => {
             ResxEditorProvider.panelByPath.delete(docKey);
+            traceSubscription.dispose();
         });
 
         const send = (msg: object): void => { webview.postMessage(msg); };
@@ -294,6 +298,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
                 case 'ready': {
                     const pending = ResxEditorProvider.pendingNavigation.get(docKey);
+                    send({ type: 'dev_log_history', entries: getRunTraceHistory() });
                     if (pending) {
                         ResxEditorProvider.pendingNavigation.delete(docKey);
                         send({ type: 'external_navigate', ...pending });
@@ -363,6 +368,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
       <button class="tab" data-tab="imports">Imports</button>
       <button class="tab" data-tab="symbols">Symbols</button>
       <button class="tab" data-tab="types">Types</button>
+      <button class="tab" data-tab="dev">Dev</button>
       <button class="tab" id="tab-dump" data-tab="dump" style="display:none">Dump</button>
     </nav>
     <button id="pdb-btn" title="Symbol &amp; PDB settings">&#9881; Symbols</button>
@@ -375,6 +381,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     <div id="panel-imports"   class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-symbols"   class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-types"     class="panel"><p class="loading">Analyzing&hellip;</p></div>
+    <div id="panel-dev"       class="panel"><p class="loading">Waiting for RESX commands&hellip;</p></div>
     <div id="panel-dump"      class="panel"></div>
   </div>
   <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
