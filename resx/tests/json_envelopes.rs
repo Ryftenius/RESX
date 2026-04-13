@@ -4,10 +4,12 @@ use std::process::Command;
 use serde_json::Value;
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("test")
-        .join(name)
+    let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate should live under workspace root");
+    let path = workspace_dir.join("test").join(name);
+    path.canonicalize()
+        .unwrap_or_else(|e| panic!("missing fixture {}: {}", path.display(), e))
 }
 
 fn run_json(args: &[&str]) -> Value {
