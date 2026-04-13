@@ -9,6 +9,7 @@ use crate::analysis::follow::scan::{
 use crate::analysis::follow::trace::{build_call_tree, FuncRef, GlobalCallGraph, TraceCtx};
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_object;
 use crate::formats::pdb::load_pdb_symbol;
 use crate::formats::pe::{parse_pe, read_exports};
 
@@ -120,7 +121,7 @@ pub fn run(
         writeln!(
             w,
             "{}",
-            serde_json::to_string_pretty(&node_to_json(&root)).unwrap_or_default()
+            serde_json::to_string_pretty(&versioned_object("callers", node_to_json(&root))).unwrap_or_default()
         )
         .ok();
     } else {

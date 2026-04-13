@@ -12,8 +12,8 @@ use self::callmap::{
     QsiDispatcher,
 };
 use self::json::{
-    hex_bytes, to_anomaly_json, to_edr_json, to_section_json, to_yara_json, ApiCallJson,
-    FuncResult, InsnJson,
+    hex_bytes, to_anomaly_json, to_edr_json, to_section_json, to_startup_json, to_yara_json,
+    ApiCallJson, FuncResult, InsnJson,
 };
 use self::switchfmt::{format_case_summary, format_target_symbol_spaced};
 use crate::analysis::cfgview::{
@@ -33,6 +33,7 @@ use crate::analysis::yara::scan_file;
 use crate::commands::explain::{config_mode as explain_mode, print_explain_text};
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_object;
 use crate::core::output::{
     print_c_recomp, print_eat, print_iat, print_insns, print_pe_anomalies, print_sections,
     print_yara_matches, StageProgress,
@@ -40,8 +41,8 @@ use crate::core::output::{
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
 use crate::formats::pe::{
-    find_iat_slots_by_name, parse_pe, read_exports, read_imports, read_runtime_function,
-    resolve_iat_slot, Export,
+    find_iat_slots_by_name, find_startup_routines, parse_pe, read_exports, read_imports,
+    read_runtime_function, resolve_iat_slot, Export,
 };
 
 #[derive(Debug, Clone)]
@@ -49,6 +50,24 @@ struct RecoveredSwitchTarget {
     target_rva: u32,
     symbol_name: String,
     classes: Vec<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_u32_literal;
+
+    #[test]
+    fn parse_u32_literal_accepts_hex_and_decimal_forms() {
+        assert_eq!(parse_u32_literal("0x2A"), Some(0x2A));
+        assert_eq!(parse_u32_literal("2Ah"), Some(0x2A));
+        assert_eq!(parse_u32_literal("42"), Some(42));
+        assert_eq!(parse_u32_literal("0x1_000"), Some(0x1000));
+    }
+
+    #[test]
+    fn parse_u32_literal_rejects_negative_values() {
+        assert_eq!(parse_u32_literal("-1"), None);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +198,7 @@ pub fn run(
     let imports = read_imports(&pe, &raw);
     progress.tick("reading import table");
     let import_count: usize = imports.iter().map(|dll| dll.entries.len()).sum();
+    let startup_routines = find_startup_routines(&pe, &raw);
     let yara_matches = if cfg.yara.is_empty() {
         Vec::new()
     } else {
@@ -241,6 +261,7 @@ pub fn run(
                 dll_characteristics: format!("0x{:04X}", pe.dll_characteristics),
                 header_corrupt: pe.header_corruption_detected(),
                 pe_anomalies: pe.anomalies.iter().map(to_anomaly_json).collect(),
+                startup_routines: startup_routines.iter().map(to_startup_json).collect(),
                 sections: pe.sections.iter().map(to_section_json).collect(),
                 yara_matches: yara_matches.iter().map(to_yara_json).collect(),
                 size_bytes: 0,
@@ -263,7 +284,7 @@ pub fn run(
                 current_syscall: None,
                 explain: None,
             };
-            let json = serde_json::to_string_pretty(&result).unwrap_or_default();
+            let json = serde_json::to_string_pretty(&versioned_object("dump", &result)).unwrap_or_default();
             writeln!(w, "{}", json).ok();
         }
         return Ok(());
@@ -446,7 +467,7 @@ pub fn run(
         }
     }
     let xrefs = if cfg.show_xrefs {
-        let x = find_xrefs(&raw, &pe, &exports, target_rva, &resolved_name);
+        let x = find_xrefs(&raw, &pe, &exports, Some(&symbol_index), target_rva, &resolved_name);
         progress.tick("collecting cross references");
         x
     } else {
@@ -744,6 +765,7 @@ pub fn run(
             dll_characteristics: format!("0x{:04X}", pe.dll_characteristics),
             header_corrupt: pe.header_corruption_detected(),
             pe_anomalies: pe.anomalies.iter().map(to_anomaly_json).collect(),
+            startup_routines: startup_routines.iter().map(to_startup_json).collect(),
             sections: pe.sections.iter().map(to_section_json).collect(),
             yara_matches: yara_matches.iter().map(to_yara_json).collect(),
             size_bytes: func_size_bytes,
@@ -826,7 +848,7 @@ pub fn run(
             }),
             explain: explain_result,
         };
-        let json = serde_json::to_string_pretty(&result).unwrap_or_default();
+        let json = serde_json::to_string_pretty(&versioned_object("dump", &result)).unwrap_or_default();
         writeln!(w, "{}", json).ok();
     }
 
@@ -1147,8 +1169,26 @@ fn parse_enum_member(line: &str) -> Option<(String, u32)> {
     let cleaned = line.trim_end_matches(',').trim();
     let (name, value_str) = cleaned.split_once('=')?;
     let name = name.trim().to_owned();
-    let value = value_str.trim().parse::<u32>().ok()?;
+    let value = parse_u32_literal(value_str)?;
     Some((name, value))
+}
+
+fn parse_u32_literal(raw: &str) -> Option<u32> {
+    let value = raw.trim().trim_end_matches(',');
+    if value.is_empty() || value.starts_with('-') {
+        return None;
+    }
+    let value = value.trim_start_matches('+').replace('_', "");
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .or_else(|| value.strip_suffix('h'))
+        .or_else(|| value.strip_suffix('H'));
+    if let Some(hex) = hex {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u32>().ok()
+    }
 }
 
 fn print_intelli_findings(w: &mut dyn Write, findings: &[IntelliFinding], c: &Colors) {
@@ -1185,9 +1225,8 @@ pub(crate) fn resolve_function(
     c: &Colors,
 ) -> Result<(u32, String, bool), String> {
     if !cfg.at_rva.is_empty() {
-        let rva_str = cfg.at_rva.trim_start_matches("0x");
-        let rva = u32::from_str_radix(rva_str, 16)
-            .map_err(|_| format!("invalid --at value: {}", cfg.at_rva))?;
+        let rva = parse_u32_literal(&cfg.at_rva)
+            .ok_or_else(|| format!("invalid --at value: {}", cfg.at_rva))?;
         let name = if func_arg.is_empty() {
             format!("fn_0x{:08X}", rva)
         } else {

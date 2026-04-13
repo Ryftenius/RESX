@@ -2,6 +2,7 @@ use std::io::Write;
 
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_items;
 use crate::core::output::print_iat;
 use crate::core::search::find_dll_path;
 use crate::formats::pe::{parse_pe, read_imports};
@@ -35,7 +36,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
                 })
             })
             .collect();
-        let out = serde_json::to_string_pretty(&j).unwrap_or_default();
+        let out = serde_json::to_string_pretty(&versioned_items("imports", j)).unwrap_or_default();
         writeln!(w, "{}", out).ok();
     } else {
         print_iat(w, &imps, &dll_name, c);

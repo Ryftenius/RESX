@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_items;
 use crate::core::output::StageProgress;
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbols, load_pdb_types, PdbSymbol, PdbTypeInfo};
@@ -100,7 +101,7 @@ pub fn run(
         writeln!(
             w,
             "{}",
-            serde_json::to_string_pretty(&types).unwrap_or_default()
+            serde_json::to_string_pretty(&versioned_items("types", &types)).unwrap_or_default()
         )
         .ok();
         return Ok(());

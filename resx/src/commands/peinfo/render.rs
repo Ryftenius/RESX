@@ -144,6 +144,17 @@ pub fn render_text(w: &mut dyn Write, c: &Colors, report: &TextReport<'_>) {
             &report.assessment.likely_toolchains.join(", "),
         );
     }
+    if !report.assessment.likely_components.is_empty() {
+        print_kv(
+            w,
+            c,
+            "LikelyComponents",
+            &report.assessment.likely_components.join(", "),
+        );
+    }
+    if !report.assessment.packers.is_empty() {
+        print_kv(w, c, "Packers", &report.assessment.packers.join(", "));
+    }
     for note in &report.assessment.evidence {
         writeln!(w, "  {:<18} {}", c.bold("Evidence"), note).ok();
     }

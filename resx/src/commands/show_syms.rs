@@ -2,6 +2,7 @@ use std::io::Write;
 
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_items;
 use crate::core::output::StageProgress;
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::load_pdb_symbols;
@@ -46,7 +47,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         writeln!(
             w,
             "{}",
-            serde_json::to_string_pretty(&out).unwrap_or_default()
+            serde_json::to_string_pretty(&versioned_items("symbols", out)).unwrap_or_default()
         )
         .ok();
     } else {

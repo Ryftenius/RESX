@@ -4,28 +4,29 @@ use std::thread;
 
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_object;
 use crate::core::output::StageProgress;
 use crate::core::search::find_dll_path;
 use crate::formats::metadata::{query_file_metadata, FileMetadata};
 use crate::formats::pe::{
-    parse_pe, read_clr_info, read_debug_info, read_exports, read_imports, read_load_config,
-    ImportDll, PeDebugInfo, PeLoadConfigInfo, IMAGE_DLLCHARACTERISTICS_APPCONTAINER,
-    IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE, IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY,
-    IMAGE_DLLCHARACTERISTICS_GUARD_CF, IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA,
-    IMAGE_DLLCHARACTERISTICS_NO_SEH, IMAGE_DLLCHARACTERISTICS_NX_COMPAT,
-    IMAGE_DLLCHARACTERISTICS_WDM_DRIVER, IMAGE_FILE_DEBUG_STRIPPED, IMAGE_FILE_LINE_NUMS_STRIPPED,
-    IMAGE_FILE_LOCAL_SYMS_STRIPPED, IMAGE_FILE_RELOCS_STRIPPED, IMAGE_GUARD_CASTGUARD_PRESENT,
-    IMAGE_GUARD_CFW_INSTRUMENTED, IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT,
-    IMAGE_GUARD_CF_INSTRUMENTED, IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT,
-    IMAGE_GUARD_MEMCPY_PRESENT, IMAGE_GUARD_PROTECT_DELAYLOAD_IAT, IMAGE_GUARD_RETPOLINE_PRESENT,
-    IMAGE_GUARD_RF_ENABLE, IMAGE_GUARD_RF_INSTRUMENTED, IMAGE_GUARD_RF_STRICT,
-    IMAGE_GUARD_XFG_ENABLED,
+    find_startup_routines, parse_pe, read_clr_info, read_debug_info, read_exports, read_imports,
+    read_load_config, ImportDll, PeDebugInfo, PeLoadConfigInfo,
+    IMAGE_DLLCHARACTERISTICS_APPCONTAINER, IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE,
+    IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY, IMAGE_DLLCHARACTERISTICS_GUARD_CF,
+    IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA, IMAGE_DLLCHARACTERISTICS_NO_SEH,
+    IMAGE_DLLCHARACTERISTICS_NX_COMPAT, IMAGE_DLLCHARACTERISTICS_WDM_DRIVER,
+    IMAGE_FILE_DEBUG_STRIPPED, IMAGE_FILE_LINE_NUMS_STRIPPED, IMAGE_FILE_LOCAL_SYMS_STRIPPED,
+    IMAGE_FILE_RELOCS_STRIPPED, IMAGE_GUARD_CASTGUARD_PRESENT, IMAGE_GUARD_CFW_INSTRUMENTED,
+    IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT, IMAGE_GUARD_CF_INSTRUMENTED,
+    IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT, IMAGE_GUARD_MEMCPY_PRESENT,
+    IMAGE_GUARD_PROTECT_DELAYLOAD_IAT, IMAGE_GUARD_RETPOLINE_PRESENT, IMAGE_GUARD_RF_ENABLE,
+    IMAGE_GUARD_RF_INSTRUMENTED, IMAGE_GUARD_RF_STRICT, IMAGE_GUARD_XFG_ENABLED,
 };
 
 use self::detect::{assess_build, detect_image_kind, machine_name, subsystem_name};
 use self::model::{
-    debug_types, safe_seh, to_anomaly_json, to_section_json, AnalysisJson, DebugJson,
-    MitigationsJson, NameJson, PeInfoJson, SignerJson,
+    debug_types, safe_seh, to_anomaly_json, to_section_json, to_startup_json, AnalysisJson,
+    DebugJson, MitigationsJson, NameJson, PeInfoJson, SignerJson,
 };
 use self::render::{blank_as_unknown, render_text, TextReport};
 
@@ -77,8 +78,9 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
 
     let known_names = collect_known_names(&file_name, &metadata);
     let image_kind = detect_image_kind(&pe, &file_name);
-    let assessment = assess_build(&raw, &imports, &debug, clr.as_ref(), load_config.as_ref());
+    let assessment = assess_build(&pe, &raw, &imports, &debug, clr.as_ref(), load_config.as_ref());
     let veh_imports = detect_veh_imports(&imports);
+    let startup_routines = find_startup_routines(&pe, &raw);
 
     if cfg.json {
         let out = PeInfoJson {
@@ -110,6 +112,8 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
                 runtime: assessment.runtime.clone(),
                 likely_languages: assessment.likely_languages.clone(),
                 likely_toolchains: assessment.likely_toolchains.clone(),
+                likely_components: assessment.likely_components.clone(),
+                packers: assessment.packers.clone(),
                 evidence: assessment.evidence.clone(),
                 clr_metadata_version: clr
                     .as_ref()
@@ -136,13 +140,14 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
                 issuer: metadata.signer_issuer.clone(),
                 thumbprint: metadata.signer_thumbprint.clone(),
             },
+            startup_routines: startup_routines.iter().map(to_startup_json).collect(),
             sections: pe.sections.iter().map(to_section_json).collect(),
             anomalies: pe.anomalies.iter().map(to_anomaly_json).collect(),
         };
         writeln!(
             w,
             "{}",
-            serde_json::to_string_pretty(&out).unwrap_or_default()
+            serde_json::to_string_pretty(&versioned_object("peinfo", &out)).unwrap_or_default()
         )
         .ok();
         return Ok(());

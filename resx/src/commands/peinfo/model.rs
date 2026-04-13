@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::formats::pe::{PeAnomaly, PeDebugInfo, PeLoadConfigInfo, PeSection};
+use crate::formats::pe::{PeAnomaly, PeDebugInfo, PeLoadConfigInfo, PeSection, PeStartupRoutine};
 
 #[derive(Serialize)]
 pub struct PeInfoJson {
@@ -32,6 +32,8 @@ pub struct PeInfoJson {
     pub mitigations: MitigationsJson,
     pub names: NameJson,
     pub signer: SignerJson,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub startup_routines: Vec<StartupRoutineJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<SectionJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -74,6 +76,17 @@ pub struct SignerJson {
 }
 
 #[derive(Serialize)]
+pub struct StartupRoutineJson {
+    pub kind: String,
+    pub source: String,
+    pub rva: String,
+    pub va: String,
+    pub section: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+#[derive(Serialize)]
 pub struct SectionJson {
     pub name: String,
     pub rva: String,
@@ -102,6 +115,10 @@ pub struct AnalysisJson {
     pub likely_languages: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub likely_toolchains: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub likely_components: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub packers: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -161,6 +178,8 @@ pub struct BuildAssessment {
     pub runtime: String,
     pub likely_languages: Vec<String>,
     pub likely_toolchains: Vec<String>,
+    pub likely_components: Vec<String>,
+    pub packers: Vec<String>,
     pub evidence: Vec<String>,
 }
 
@@ -189,6 +208,17 @@ pub fn to_anomaly_json(anomaly: &PeAnomaly) -> AnomalyJson {
         severity: anomaly.severity.clone(),
         kind: anomaly.kind.clone(),
         detail: anomaly.detail.clone(),
+    }
+}
+
+pub fn to_startup_json(entry: &PeStartupRoutine) -> StartupRoutineJson {
+    StartupRoutineJson {
+        kind: entry.kind.clone(),
+        source: entry.source.clone(),
+        rva: format!("0x{:08X}", entry.rva),
+        va: format!("0x{:016X}", entry.va),
+        section: entry.section_name.clone(),
+        note: entry.note.clone(),
     }
 }
 

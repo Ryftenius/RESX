@@ -40,6 +40,10 @@ impl PeSection {
         protection_name_from_flags(self.characteristics)
     }
 
+    pub fn is_executable(&self) -> bool {
+        self.characteristics & IMAGE_SCN_MEM_EXECUTE != 0
+    }
+
     pub fn normal_expectation(&self) -> &'static str {
         match self.name.to_ascii_lowercase().as_str() {
             ".text" | "text" => "RX",
@@ -125,6 +129,12 @@ impl PeFile {
 
     pub fn rva_to_section(&self, rva: u32) -> Option<&PeSection> {
         self.sections.iter().find(|s| s.contains_rva(rva))
+    }
+
+    pub fn va_to_rva(&self, va: u64) -> Option<u32> {
+        let delta = va.checked_sub(self.image_base)?;
+        let rva = u32::try_from(delta).ok()?;
+        self.rva_to_section(rva).map(|_| rva)
     }
 
     pub fn data_dir(&self, idx: usize) -> (u32, u32) {
@@ -224,6 +234,27 @@ pub struct PeLoadConfigInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct PeTlsCallback {
+    pub va: u64,
+    pub rva: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeTlsInfo {
+    pub callbacks: Vec<PeTlsCallback>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeStartupRoutine {
+    pub kind: String,
+    pub source: String,
+    pub rva: u32,
+    pub va: u64,
+    pub section_name: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct PeRuntimeFunctionInfo {
     pub begin_rva: u32,
     pub end_rva: u32,
@@ -247,6 +278,55 @@ impl fmt::Display for PeError {
 }
 
 impl std::error::Error for PeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{PeFile, PeSection};
+    use crate::formats::pe::IMAGE_SCN_MEM_EXECUTE;
+
+    fn sample_pe() -> PeFile {
+        PeFile {
+            arch: 64,
+            machine: 0x8664,
+            timestamp: 0,
+            coff_characteristics: 0,
+            major_linker_version: 0,
+            minor_linker_version: 0,
+            image_base: 0x1800_0000_0000,
+            entry_point: 0,
+            size_of_image: 0,
+            size_of_headers: 0,
+            section_alignment: 0,
+            file_alignment: 0,
+            checksum: 0,
+            subsystem: 0,
+            dll_characteristics: 0,
+            sections: vec![PeSection {
+                name: ".text".to_owned(),
+                virtual_address: 0x1000,
+                virtual_size: 0x2000,
+                raw_offset: 0x400,
+                raw_size: 0x2000,
+                characteristics: IMAGE_SCN_MEM_EXECUTE,
+                entropy: 0.0,
+            }],
+            data_dirs: vec![(0, 0); 16],
+            anomalies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn va_to_rva_rejects_out_of_range_values() {
+        let pe = sample_pe();
+        assert_eq!(pe.va_to_rva(pe.image_base + u64::from(u32::MAX) + 1), None);
+    }
+
+    #[test]
+    fn va_to_rva_maps_valid_section_addresses() {
+        let pe = sample_pe();
+        assert_eq!(pe.va_to_rva(pe.image_base + 0x1100), Some(0x1100));
+    }
+}
 
 pub fn read_u16(raw: &[u8], off: usize) -> u16 {
     if off + 2 > raw.len() {

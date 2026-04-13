@@ -63,7 +63,10 @@ fn main() {
         match File::create(&cfg.out_file) {
             Ok(f) => {
                 file_handle = Some(BufWriter::new(f));
-                file_handle.as_mut().unwrap()
+                match file_handle.as_mut() {
+                    Some(handle) => handle,
+                    None => unreachable!("file handle was just initialized"),
+                }
             }
             Err(e) => {
                 eprintln!(

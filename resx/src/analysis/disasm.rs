@@ -226,6 +226,17 @@ pub fn disassemble_at(
             }
         }
 
+        if let Some(seg_desc) = describe_segment_access(&iced) {
+            if !comment_parts.iter().any(|p| p == &seg_desc) {
+                comment_parts.push(seg_desc);
+            }
+        }
+        for literal_desc in describe_immediate_literals(&iced) {
+            if !comment_parts.iter().any(|p| p == &literal_desc) {
+                comment_parts.push(literal_desc);
+            }
+        }
+
         let comment = comment_parts.join(" | ");
         let is_int3 = i_bytes.len() == 1 && i_bytes[0] == 0xCC;
         let is_all_pad = i_bytes.iter().all(|&b| b == 0xCC || b == 0x90 || b == 0x00);
@@ -439,6 +450,7 @@ pub fn find_xrefs(
     raw: &[u8],
     pe: &PeFile,
     exports: &[Export],
+    symbols: Option<&SymbolIndex>,
     target_rva: u32,
     target_name: &str,
 ) -> Vec<String> {
@@ -509,6 +521,17 @@ pub fn find_xrefs(
             let site_rva = insn.rva;
             let owner = attribute_to_func(site_rva, exports)
                 .map(|e| e.name.clone())
+                .or_else(|| {
+                    symbols.and_then(|si| {
+                        si.lookup(pe.image_base + site_rva as u64).map(|m| {
+                            if m.displacement == 0 {
+                                m.symbol.name.clone()
+                            } else {
+                                format!("{}+0x{:X}", m.symbol.name, m.displacement)
+                            }
+                        })
+                    })
+                })
                 .unwrap_or_else(|| format!("sub_{:08X}", site_rva));
 
             if insn.call_target != 0 {
@@ -873,4 +896,88 @@ fn collect_data_refs(instr: &iced_x86::Instruction) -> Vec<u64> {
     refs.sort_unstable();
     refs.dedup();
     refs
+}
+
+fn describe_segment_access(instr: &iced_x86::Instruction) -> Option<String> {
+    if instr.memory_index() != Register::None {
+        return None;
+    }
+    let seg = instr.memory_segment();
+    let disp = instr.memory_displacement64();
+    match seg {
+        Register::FS => describe_fs_access(disp),
+        Register::GS => describe_gs_access(disp),
+        _ => None,
+    }
+}
+
+fn describe_fs_access(disp: u64) -> Option<String> {
+    let name = match disp {
+        0x18 => "TEB.Self",
+        0x2C => "TEB.ThreadLocalStoragePointer",
+        0x30 => "TEB.ProcessEnvironmentBlock",
+        _ => return None,
+    };
+    Some(format!("fs:[0x{:X}] => {}", disp, name))
+}
+
+fn describe_gs_access(disp: u64) -> Option<String> {
+    let name = match disp {
+        0x30 => "TEB.Self",
+        0x58 => "TEB.ThreadLocalStoragePointer",
+        0x60 => "TEB.ProcessEnvironmentBlock",
+        _ => return None,
+    };
+    Some(format!("gs:[0x{:X}] => {}", disp, name))
+}
+
+fn describe_immediate_literals(instr: &iced_x86::Instruction) -> Vec<String> {
+    let mut out = Vec::new();
+    for op_idx in 0..instr.op_count() {
+        let value = match instr.op_kind(op_idx) {
+            OpKind::Immediate8 => Some(instr.immediate8() as u64),
+            OpKind::Immediate16 => Some(instr.immediate16() as u64),
+            OpKind::Immediate32 => Some(instr.immediate32() as u64),
+            OpKind::Immediate32to64 => Some(instr.immediate32to64() as u64),
+            OpKind::Immediate64 => Some(instr.immediate64()),
+            _ => None,
+        };
+        if let Some(value) = value.and_then(describe_status_literal) {
+            out.push(value.to_owned());
+        }
+    }
+    out
+}
+
+fn describe_status_literal(value: u64) -> Option<&'static str> {
+    match value as u32 {
+        0x00000000 => Some("STATUS_SUCCESS"),
+        0x00000001 => Some("STATUS_WAIT_1"),
+        0x00000103 => Some("STATUS_PENDING"),
+        0x00000104 => Some("STATUS_REPARSE"),
+        0x40000005 => Some("STATUS_SEGMENT_NOTIFICATION"),
+        0x80000005 => Some("STATUS_BUFFER_OVERFLOW"),
+        0x80000006 => Some("STATUS_NO_MORE_FILES"),
+        0x8000000D => Some("STATUS_PARTIAL_COPY"),
+        0xC0000005 => Some("STATUS_ACCESS_VIOLATION"),
+        0xC0000008 => Some("STATUS_INVALID_HANDLE"),
+        0xC000000D => Some("STATUS_INVALID_PARAMETER"),
+        0xC0000017 => Some("STATUS_NO_MEMORY"),
+        0xC0000018 => Some("STATUS_CONFLICTING_ADDRESSES"),
+        0xC0000022 => Some("STATUS_ACCESS_DENIED"),
+        0xC0000023 => Some("STATUS_BUFFER_TOO_SMALL"),
+        0xC0000034 => Some("STATUS_OBJECT_NAME_NOT_FOUND"),
+        0xC0000035 => Some("STATUS_OBJECT_NAME_COLLISION"),
+        0xC000003A => Some("STATUS_OBJECT_PATH_NOT_FOUND"),
+        0xC0000043 => Some("STATUS_SHARING_VIOLATION"),
+        0xC0000054 => Some("STATUS_FILE_LOCK_CONFLICT"),
+        0xC000007A => Some("STATUS_PROCEDURE_NOT_FOUND"),
+        0xC000009A => Some("STATUS_INSUFFICIENT_RESOURCES"),
+        0xC00000BB => Some("STATUS_NOT_SUPPORTED"),
+        0xC0000135 => Some("STATUS_DLL_NOT_FOUND"),
+        0xC0000139 => Some("STATUS_ENTRYPOINT_NOT_FOUND"),
+        0xC0000142 => Some("STATUS_DLL_INIT_FAILED"),
+        0xC0000225 => Some("STATUS_NOT_FOUND"),
+        _ => None,
+    }
 }

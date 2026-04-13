@@ -4,7 +4,7 @@ use crate::analysis::edr::EdrCheckResult;
 use crate::analysis::explain::ExplainResult;
 use crate::analysis::intelli::IntelliFinding;
 use crate::analysis::yara::YaraMatch;
-use crate::formats::pe::{PeAnomaly, PeSection};
+use crate::formats::pe::{PeAnomaly, PeSection, PeStartupRoutine};
 
 #[derive(Serialize)]
 pub(crate) struct InsnJson {
@@ -43,6 +43,8 @@ pub(crate) struct FuncResult {
     pub(crate) header_corrupt: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) pe_anomalies: Vec<PeAnomalyJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) startup_routines: Vec<StartupRoutineJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) sections: Vec<PeSectionJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -157,6 +159,17 @@ pub(crate) struct YaraJson {
     pub(crate) file: String,
 }
 
+#[derive(Serialize)]
+pub(crate) struct StartupRoutineJson {
+    pub(crate) kind: String,
+    pub(crate) source: String,
+    pub(crate) rva: String,
+    pub(crate) va: String,
+    pub(crate) section: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) note: String,
+}
+
 pub(crate) fn to_edr_json(edr: &EdrCheckResult) -> EdrJson {
     EdrJson {
         in_memory_available: edr.in_memory_available,
@@ -189,6 +202,17 @@ pub(crate) fn to_anomaly_json(anomaly: &PeAnomaly) -> PeAnomalyJson {
         severity: anomaly.severity.clone(),
         kind: anomaly.kind.clone(),
         detail: anomaly.detail.clone(),
+    }
+}
+
+pub(crate) fn to_startup_json(entry: &PeStartupRoutine) -> StartupRoutineJson {
+    StartupRoutineJson {
+        kind: entry.kind.clone(),
+        source: entry.source.clone(),
+        rva: format!("0x{:08X}", entry.rva),
+        va: format!("0x{:016X}", entry.va),
+        section: entry.section_name.clone(),
+        note: entry.note.clone(),
     }
 }
 

@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use crate::analysis::thunk::follow_jmp_thunk;
 use crate::core::color::Colors;
 use crate::core::config::Config;
+use crate::core::json::versioned_items;
 use crate::core::output::ProgressBar;
 use crate::core::priority::{matcher, merged_priority_dirs, PriorityMatcher};
 use crate::formats::pdb::load_pdb_symbol;
@@ -152,7 +153,7 @@ fn print_locate_results(
                 })
             })
             .collect();
-        let out = serde_json::to_string_pretty(&j).unwrap_or_default();
+        let out = serde_json::to_string_pretty(&versioned_items("matches", j)).unwrap_or_default();
         writeln!(w, "{}", out).ok();
     } else {
         writeln!(w).ok();
@@ -207,7 +208,9 @@ fn collect_search_tiers(
             tiers.push(Vec::new());
             current_key = Some(key);
         }
-        tiers.last_mut().unwrap().push(path);
+        if let Some(tier) = tiers.last_mut() {
+            tier.push(path);
+        }
     }
     tiers
 }
