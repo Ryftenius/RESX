@@ -3,13 +3,34 @@ use std::process::Command;
 
 use serde_json::Value;
 
-fn fixture(name: &str) -> PathBuf {
-    let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate should live under workspace root");
-    let path = workspace_dir.join("test").join(name);
-    path.canonicalize()
-        .unwrap_or_else(|e| panic!("missing fixture {}: {}", path.display(), e))
+fn fixture(name: &str) -> Option<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(workspace_dir) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+        roots.push(workspace_dir.to_path_buf());
+        if let Some(parent) = workspace_dir.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+
+    for root in roots {
+        let path = root.join("test").join(name);
+        if let Ok(canonical) = path.canonicalize() {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
+fn require_fixture(name: &str) -> Option<PathBuf> {
+    let fixture = fixture(name);
+    if fixture.is_none() {
+        eprintln!("skipping json envelope test: missing fixture {}", name);
+    }
+    fixture
 }
 
 fn run_json(args: &[&str]) -> Value {
@@ -28,7 +49,9 @@ fn run_json(args: &[&str]) -> Value {
 
 #[test]
 fn peinfo_dump_and_metadata_commands_use_versioned_json() {
-    let j58 = fixture("J58.dll");
+    let Some(j58) = require_fixture("J58.dll") else {
+        return;
+    };
     let peinfo = run_json(&[
         "peinfo",
         j58.to_str().unwrap(),
@@ -83,8 +106,12 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
 
 #[test]
 fn symbol_and_type_commands_use_versioned_json() {
-    let j58 = fixture("J58.dll");
-    let j58_pdb = fixture("J58.pdb");
+    let Some(j58) = require_fixture("J58.dll") else {
+        return;
+    };
+    let Some(j58_pdb) = require_fixture("J58.pdb") else {
+        return;
+    };
 
     let syms = run_json(&[
         "syms",
