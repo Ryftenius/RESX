@@ -284,7 +284,8 @@ pub fn run(
                 current_syscall: None,
                 explain: None,
             };
-            let json = serde_json::to_string_pretty(&versioned_object("dump", &result)).unwrap_or_default();
+            let json = serde_json::to_string_pretty(&versioned_object("dump", &result))
+                .unwrap_or_default();
             writeln!(w, "{}", json).ok();
         }
         return Ok(());
@@ -467,7 +468,14 @@ pub fn run(
         }
     }
     let xrefs = if cfg.show_xrefs {
-        let x = find_xrefs(&raw, &pe, &exports, Some(&symbol_index), target_rva, &resolved_name);
+        let x = find_xrefs(
+            &raw,
+            &pe,
+            &exports,
+            Some(&symbol_index),
+            target_rva,
+            &resolved_name,
+        );
         progress.tick("collecting cross references");
         x
     } else {
@@ -848,7 +856,8 @@ pub fn run(
             }),
             explain: explain_result,
         };
-        let json = serde_json::to_string_pretty(&versioned_object("dump", &result)).unwrap_or_default();
+        let json =
+            serde_json::to_string_pretty(&versioned_object("dump", &result)).unwrap_or_default();
         writeln!(w, "{}", json).ok();
     }
 

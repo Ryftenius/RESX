@@ -154,7 +154,11 @@ fn read_import_slots(
     let ptr_size = if pe.arch == 64 { 8u32 } else { 4u32 };
     let ord_flag_64 = 1u64 << 63;
     let ord_flag_32 = 1u64 << 31;
-    let name_mask = if pe.arch == 64 { ord_flag_64 - 1 } else { ord_flag_32 - 1 };
+    let name_mask = if pe.arch == 64 {
+        ord_flag_64 - 1
+    } else {
+        ord_flag_32 - 1
+    };
 
     loop {
         if off + 20 > raw.len() {

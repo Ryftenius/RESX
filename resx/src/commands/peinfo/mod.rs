@@ -78,7 +78,14 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
 
     let known_names = collect_known_names(&file_name, &metadata);
     let image_kind = detect_image_kind(&pe, &file_name);
-    let assessment = assess_build(&pe, &raw, &imports, &debug, clr.as_ref(), load_config.as_ref());
+    let assessment = assess_build(
+        &pe,
+        &raw,
+        &imports,
+        &debug,
+        clr.as_ref(),
+        load_config.as_ref(),
+    );
     let veh_imports = detect_veh_imports(&imports);
     let startup_routines = find_startup_routines(&pe, &raw);
 
