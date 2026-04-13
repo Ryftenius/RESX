@@ -42,7 +42,7 @@ use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
 use crate::formats::pe::{
     find_iat_slots_by_name, find_startup_routines, parse_pe, read_exports, read_imports,
-    read_runtime_function, resolve_iat_slot, Export,
+    read_runtime_function, resolve_iat_slot, Export, PeStartupRoutine,
 };
 
 #[derive(Debug, Clone)]
@@ -468,7 +468,7 @@ pub fn run(
         }
     }
     let xrefs = if cfg.show_xrefs {
-        let x = find_xrefs(
+        let mut x = find_xrefs(
             &raw,
             &pe,
             &exports,
@@ -476,6 +476,13 @@ pub fn run(
             target_rva,
             &resolved_name,
         );
+        x.extend(startup_xrefs_for_target(
+            &startup_routines,
+            target_rva,
+            &resolved_name,
+        ));
+        x.sort();
+        x.dedup();
         progress.tick("collecting cross references");
         x
     } else {
@@ -897,6 +904,59 @@ fn count_dump_steps(cfg: &Config, only_metadata: bool, want_recomp: bool) -> usi
         total += 1;
     }
     total
+}
+
+fn startup_xrefs_for_target(
+    startup_routines: &[PeStartupRoutine],
+    target_rva: u32,
+    target_name: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let target_kind = startup_routines
+        .iter()
+        .find(|entry| entry.rva == target_rva)
+        .map(|entry| entry.kind.to_lowercase())
+        .unwrap_or_default();
+
+    let include_context = target_kind.contains("real main")
+        || target_kind.contains("startup")
+        || target_kind.contains("entry");
+
+    if !include_context {
+        return out;
+    }
+
+    for entry in startup_routines
+        .iter()
+        .filter(|entry| entry.rva != target_rva)
+    {
+        let kind = if entry.kind.contains("TLS") {
+            "STARTUP-TLS"
+        } else {
+            "STARTUP"
+        };
+        let owner = entry.kind.replace(' ', "_");
+        let mut line = format!(
+            "{} {} [site 0x{:08X}] -> {} [target 0x{:08X}]",
+            kind, owner, entry.rva, target_name, target_rva
+        );
+        let mut detail = Vec::new();
+        if !entry.source.is_empty() {
+            detail.push(format!("via {}", entry.source));
+        }
+        if !entry.note.is_empty() {
+            detail.push(entry.note.clone());
+        }
+        if !detail.is_empty() {
+            line.push_str(&format!(" ; {}", detail.join(" | ")));
+        }
+        if seen.insert(line.clone()) {
+            out.push(line);
+        }
+    }
+
+    out
 }
 
 fn to_cfg_edges(
