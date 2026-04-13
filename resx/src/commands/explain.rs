@@ -13,7 +13,8 @@ pub fn run(term: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<()
 
     let result = explain_symbol(query, config_mode(cfg));
     if cfg.json {
-        let out = serde_json::to_string_pretty(&versioned_object("explain", &result)).unwrap_or_default();
+        let out =
+            serde_json::to_string_pretty(&versioned_object("explain", &result)).unwrap_or_default();
         writeln!(w, "{}", out).ok();
     } else {
         print_explain_text(w, &result, c, false);

@@ -121,7 +121,8 @@ pub fn run(
         writeln!(
             w,
             "{}",
-            serde_json::to_string_pretty(&versioned_object("callers", node_to_json(&root))).unwrap_or_default()
+            serde_json::to_string_pretty(&versioned_object("callers", node_to_json(&root)))
+                .unwrap_or_default()
         )
         .ok();
     } else {

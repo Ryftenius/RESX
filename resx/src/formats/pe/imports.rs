@@ -39,7 +39,11 @@ pub fn read_imports(pe: &PeFile, raw: &[u8]) -> Vec<ImportDll> {
 
         let ord_flag_64 = 1u64 << 63;
         let ord_flag_32 = 1u64 << 31;
-        let name_mask = if pe.arch == 64 { ord_flag_64 - 1 } else { ord_flag_32 - 1 };
+        let name_mask = if pe.arch == 64 {
+            ord_flag_64 - 1
+        } else {
+            ord_flag_32 - 1
+        };
         let mut entries = Vec::new();
         let mut slot_idx = 0u32;
 
@@ -107,7 +111,11 @@ pub fn resolve_iat_slot(pe: &PeFile, raw: &[u8], slot_rva: u32) -> Option<(Strin
     let ptr_size = if pe.arch == 64 { 8u32 } else { 4u32 };
     let ord_flag_64 = 1u64 << 63;
     let ord_flag_32 = 1u64 << 31;
-    let name_mask = if pe.arch == 64 { ord_flag_64 - 1 } else { ord_flag_32 - 1 };
+    let name_mask = if pe.arch == 64 {
+        ord_flag_64 - 1
+    } else {
+        ord_flag_32 - 1
+    };
 
     loop {
         if off + 20 > raw.len() {
@@ -190,7 +198,11 @@ pub fn find_iat_slots_by_name(
     let ptr_size = if pe.arch == 64 { 8u32 } else { 4u32 };
     let ord_flag_64 = 1u64 << 63;
     let ord_flag_32 = 1u64 << 31;
-    let name_mask = if pe.arch == 64 { ord_flag_64 - 1 } else { ord_flag_32 - 1 };
+    let name_mask = if pe.arch == 64 {
+        ord_flag_64 - 1
+    } else {
+        ord_flag_32 - 1
+    };
     let want = target_name.trim().to_ascii_lowercase();
 
     loop {

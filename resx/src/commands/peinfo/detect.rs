@@ -166,7 +166,12 @@ pub fn assess_build(
         &["__rust_alloc", "__rust_dealloc", "__rust_panic_cleanup"],
     );
     if rust_markers {
-        push_candidate(&mut langs, "Rust", 100, "Rust runtime strings/symbols detected");
+        push_candidate(
+            &mut langs,
+            "Rust",
+            100,
+            "Rust runtime strings/symbols detected",
+        );
         push_candidate(
             &mut tools,
             "rustc / Cargo",
@@ -178,7 +183,13 @@ pub fn assess_build(
     if contains_prefix(&import_dlls, "python")
         || strings_contains_any(
             &strings,
-            &["pyi_rth_", "pyimod", "meipass", "pyinstaller", "python3.dll"],
+            &[
+                "pyi_rth_",
+                "pyimod",
+                "meipass",
+                "pyinstaller",
+                "python3.dll",
+            ],
         )
     {
         push_candidate(
@@ -196,7 +207,11 @@ pub fn assess_build(
     }
     if strings_contains_any(
         &strings,
-        &["nuitka", "__nuitka_binary_dir", "onefile_child_grace_time_int"],
+        &[
+            "nuitka",
+            "__nuitka_binary_dir",
+            "onefile_child_grace_time_int",
+        ],
     ) {
         push_candidate(&mut tools, "Nuitka", 95, "Nuitka loader markers detected");
         push_candidate(
@@ -210,13 +225,23 @@ pub fn assess_build(
         push_candidate(&mut tools, "py2exe", 90, "py2exe bundle markers detected");
     }
     if strings_contains_any(&strings, &["cx_freeze", "initscripts\\console"]) {
-        push_candidate(&mut tools, "cx_Freeze", 90, "cx_Freeze bundle markers detected");
+        push_candidate(
+            &mut tools,
+            "cx_Freeze",
+            90,
+            "cx_Freeze bundle markers detected",
+        );
     }
 
     if contains_any(&import_dlls, &["node.dll", "libnode.dll", "chrome_elf.dll"])
         || strings_contains_any(
             &strings,
-            &["electron.asar", "app.asar", "crashpad_handler", "resources.pak"],
+            &[
+                "electron.asar",
+                "app.asar",
+                "crashpad_handler",
+                "resources.pak",
+            ],
         )
     {
         push_candidate(
@@ -419,7 +444,10 @@ pub fn assess_build(
 
 fn apply_rust_crate_heuristics(list: &mut Vec<(&'static str, Candidate)>, strings: &[String]) {
     let crate_markers: [(&str, &[&str]); 13] = [
-        ("Tokio", &["tokio::", "tokio-runtime-worker", "tokio::runtime"]),
+        (
+            "Tokio",
+            &["tokio::", "tokio-runtime-worker", "tokio::runtime"],
+        ),
         ("Serde", &["serde::", "serde_json::", "serde_yaml::"]),
         ("Reqwest", &["reqwest::", "hyper::client"]),
         ("Hyper", &["hyper::", "h2::proto"]),
@@ -428,7 +456,10 @@ fn apply_rust_crate_heuristics(list: &mut Vec<(&'static str, Candidate)>, string
         ("Rusqlite", &["rusqlite::", "libsqlite3-sys"]),
         ("Clap", &["clap::", "clap_builder::"]),
         ("Anyhow", &["anyhow::", "thiserror::"]),
-        ("Tracing", &["tracing::", "tracing_subscriber::", "env_logger::"]),
+        (
+            "Tracing",
+            &["tracing::", "tracing_subscriber::", "env_logger::"],
+        ),
         ("Regex", &["regex::", "regex-automata::"]),
         ("Rayon", &["rayon::", "rayon-core::"]),
         ("Egui", &["egui::", "eframe::", "epaint::"]),
@@ -452,19 +483,47 @@ fn apply_component_heuristics(
     strings: &[String],
 ) {
     let dll_components: [(&str, &[&str], &str); 13] = [
-        ("OpenSSL", &["libssl", "libcrypto", "ssleay32", "libeay32"], "OpenSSL import DLL detected"),
-        ("libcurl", &["libcurl", "curl.dll"], "libcurl import DLL detected"),
+        (
+            "OpenSSL",
+            &["libssl", "libcrypto", "ssleay32", "libeay32"],
+            "OpenSSL import DLL detected",
+        ),
+        (
+            "libcurl",
+            &["libcurl", "curl.dll"],
+            "libcurl import DLL detected",
+        ),
         ("SQLite", &["sqlite3.dll"], "SQLite import DLL detected"),
-        ("zlib", &["zlib1.dll", "zlibwapi.dll"], "zlib import DLL detected"),
-        ("Qt", &["qt5core.dll", "qt6core.dll", "qt5gui.dll", "qt6gui.dll"], "Qt runtime import DLL detected"),
+        (
+            "zlib",
+            &["zlib1.dll", "zlibwapi.dll"],
+            "zlib import DLL detected",
+        ),
+        (
+            "Qt",
+            &["qt5core.dll", "qt6core.dll", "qt5gui.dll", "qt6gui.dll"],
+            "Qt runtime import DLL detected",
+        ),
         ("SDL2", &["sdl2.dll"], "SDL2 import DLL detected"),
         ("GLFW", &["glfw3.dll"], "GLFW import DLL detected"),
         ("Vulkan", &["vulkan-1.dll"], "Vulkan loader detected"),
         ("OpenGL", &["opengl32.dll"], "OpenGL import detected"),
-        ("Direct3D", &["d3d11.dll", "d3d12.dll", "dxgi.dll"], "Direct3D import detected"),
+        (
+            "Direct3D",
+            &["d3d11.dll", "d3d12.dll", "dxgi.dll"],
+            "Direct3D import detected",
+        ),
         ("libuv", &["libuv.dll"], "libuv import DLL detected"),
-        ("wxWidgets", &["wxmsw", "wxbase"], "wxWidgets import DLL detected"),
-        ("OpenCV", &["opencv_world", "opencv_core"], "OpenCV import DLL detected"),
+        (
+            "wxWidgets",
+            &["wxmsw", "wxbase"],
+            "wxWidgets import DLL detected",
+        ),
+        (
+            "OpenCV",
+            &["opencv_world", "opencv_core"],
+            "OpenCV import DLL detected",
+        ),
     ];
 
     for (label, needles, evidence) in dll_components {
@@ -476,7 +535,10 @@ fn apply_component_heuristics(
     if strings_contains_any(strings, &["webview2", "msedgewebview2", "icorewebview2"]) {
         push_candidate(list, "WebView2", 80, "WebView2 strings detected");
     }
-    if strings_contains_any(strings, &["openssl/", "libcurl/", "sqlite format 3", "zlib"]) {
+    if strings_contains_any(
+        strings,
+        &["openssl/", "libcurl/", "sqlite format 3", "zlib"],
+    ) {
         if strings_contains_any(strings, &["openssl/"]) {
             push_candidate(list, "OpenSSL", 55, "OpenSSL version string detected");
         }
@@ -520,16 +582,31 @@ fn apply_packer_heuristics(
         || has_section(sections, ".themida")
         || strings_contains_any(strings, &["vmprotect", "themida"])
     {
-        push_candidate(list, "VMProtect / Themida", 95, "VMProtect/Themida markers detected");
+        push_candidate(
+            list,
+            "VMProtect / Themida",
+            95,
+            "VMProtect/Themida markers detected",
+        );
     }
     if has_section(sections, ".enigma1")
         || has_section(sections, ".enigma2")
         || strings_contains_any(strings, &["the enigma protector"])
     {
-        push_candidate(list, "Enigma Protector", 95, "Enigma Protector markers detected");
+        push_candidate(
+            list,
+            "Enigma Protector",
+            95,
+            "Enigma Protector markers detected",
+        );
     }
     if strings_contains_any(strings, &["pyinstaller"]) {
-        push_candidate(list, "PyInstaller", 85, "PyInstaller one-file markers detected");
+        push_candidate(
+            list,
+            "PyInstaller",
+            85,
+            "PyInstaller one-file markers detected",
+        );
     }
 
     let high_entropy_exec = pe
