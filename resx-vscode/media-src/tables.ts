@@ -68,6 +68,16 @@ export function sortTable(th: HTMLTableCellElement, tbl: HTMLTableElement): void
 }
 
 function compareTableValues(a: string, b: string): number {
+    const bigintPattern = /^[-+]?(?:0x[0-9a-f]+|\d+)$/i;
+    if (bigintPattern.test(a) && bigintPattern.test(b)) {
+        try {
+            const na = BigInt(a);
+            const nb = BigInt(b);
+            if (na < nb) return -1;
+            if (na > nb) return 1;
+            return 0;
+        } catch {}
+    }
     const na = a.startsWith('0x') ? parseInt(a, 16) : parseFloat(a);
     const nb = b.startsWith('0x') ? parseInt(b, 16) : parseFloat(b);
     if (!isNaN(na) && !isNaN(nb)) return na - nb;

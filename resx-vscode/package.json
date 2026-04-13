@@ -105,6 +105,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "npm run compile:webview && tsc -p ./",
     "compile:webview": "tsc -p ./tsconfig.webview.json",
+    "test:webview": "npm run compile:webview && node --experimental-default-type=module ./test/run-tests.mjs",
     "watch": "tsc -watch -p ./",
     "package": "npx --yes @vscode/vsce package",
     "publish:vsce": "npx --yes @vscode/vsce publish"

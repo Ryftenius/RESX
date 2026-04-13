@@ -1,5 +1,7 @@
 import { renderCfgVisual } from './cfg.js';
 import { createSearchBar as _searchBar, wireSearch as _wireSearch, sortTable } from './tables.js';
+import { unwrapListPayload, unwrapObjectPayload } from './payloads.js';
+import { buildPersistedUiState, coercePersistedUiState } from './view-state.js';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: unknown): void;
@@ -9,6 +11,7 @@ declare function acquireVsCodeApi(): {
 
 'use strict';
 const vscode = acquireVsCodeApi();
+const persistedUiState = coercePersistedUiState(vscode.getState());
 vscode.postMessage({ command: 'ready' });
     const PREFIX_MAP = [
         ['FsRtl', 'io'], ['Psp', 'process'], ['Exp', 'exec'], ['Cmp', 'config'],
@@ -56,13 +59,39 @@ vscode.postMessage({ command: 'ready' });
         'USHORT', 'VOID', 'WCHAR', 'WORD', 'NTSTATUS', 'HRESULT', 'FARPROC', 'SIZE_T', 'SSIZE_T',
         'TRUE', 'FALSE', 'NULL', 'WINAPI', 'NTAPI', 'CALLBACK', 'APIENTRY', 'STDMETHODCALLTYPE',
         'PHANDLE', 'PULONG', 'INT64', 'UINT64', 'INT32', 'UINT32', 'INT16', 'UINT16', 'INT8', 'UINT8']);
+    const STATUS_NAMES = new Map([
+        ['0x0', 'STATUS_SUCCESS'],
+        ['0x103', 'STATUS_PENDING'],
+        ['0x104', 'STATUS_REPARSE'],
+        ['0x80000005', 'STATUS_BUFFER_OVERFLOW'],
+        ['0x80000006', 'STATUS_NO_MORE_FILES'],
+        ['0xC0000005', 'STATUS_ACCESS_VIOLATION'],
+        ['0xC0000008', 'STATUS_INVALID_HANDLE'],
+        ['0xC000000D', 'STATUS_INVALID_PARAMETER'],
+        ['0xC0000017', 'STATUS_NO_MEMORY'],
+        ['0xC0000018', 'STATUS_CONFLICTING_ADDRESSES'],
+        ['0xC0000022', 'STATUS_ACCESS_DENIED'],
+        ['0xC0000023', 'STATUS_BUFFER_TOO_SMALL'],
+        ['0xC0000034', 'STATUS_OBJECT_NAME_NOT_FOUND'],
+        ['0xC0000035', 'STATUS_OBJECT_NAME_COLLISION'],
+        ['0xC000003A', 'STATUS_OBJECT_PATH_NOT_FOUND'],
+        ['0xC0000043', 'STATUS_SHARING_VIOLATION'],
+        ['0xC000007A', 'STATUS_PROCEDURE_NOT_FOUND'],
+        ['0xC000009A', 'STATUS_INSUFFICIENT_RESOURCES'],
+        ['0xC00000BB', 'STATUS_NOT_SUPPORTED'],
+        ['0xC0000135', 'STATUS_DLL_NOT_FOUND'],
+        ['0xC0000139', 'STATUS_ENTRYPOINT_NOT_FOUND'],
+        ['0xC0000142', 'STATUS_DLL_INIT_FAILED'],
+        ['0xC0000225', 'STATUS_NOT_FOUND'],
+    ]);
+    const DUMP_SUBTABS = ['disasm', 'calls', 'xrefs', 'strings', 'cfg', 'recomp', 'hex'];
     const st = {
         navHistory: [], // [{label, fn, dll, dllPath, rva}]
         navPos: -1,
         dumpCache: new Map(), // key -> dump result
         activeDumpRequestId: null,
-        activeTopTab: 'overview',
-        activeDumpSubTab: 'disasm',
+        activeTopTab: persistedUiState.topTab,
+        activeDumpSubTab: persistedUiState.dumpSubTab,
         explainCache: new Map(), // name → data|null
         explainPending: new Set(),
         iatIndex: new Map(), // funcName → dll
@@ -73,13 +102,27 @@ vscode.postMessage({ command: 'ready' });
         pdbPaths: [],
         pdbFile: '',
         symServer: '',
+        // root = the file originally opened in the editor, never changes on navigation
+        rootDll: '',
+        rootDllPath: '',
         currentDumpDll: '',
         currentDumpPath: '',
         apiDepth: 1,
         devLogs: [],
+        currentPeInfo: null,
+        typesByName: new Map() as Map<string, any>, // lowercased type name → TypeEntryJson
+        asmMetaWidth: persistedUiState.asmMetaWidth,
         _lastHovered: null,
+        _pendingTypeNav: null as string | null,
     };
     const $ = id => document.getElementById(id);
+function persistUiState() {
+    vscode.setState(buildPersistedUiState({
+        topTab: st.activeTopTab,
+        dumpSubTab: st.activeDumpSubTab,
+        asmMetaWidth: st.asmMetaWidth,
+    }));
+}
 function esc(s) {
     return String(s ?? '')
         .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -233,6 +276,251 @@ function dumpCacheKey(entry) {
     const dll = entry?.dll ? String(entry.dll).toLowerCase() : '';
     const fn = entry?.fn ? String(entry.fn).toLowerCase() : '';
     return `fn:${scope}:${dll}!${fn}:depth:${depth}`;
+}
+function startupBadgeLabel(entry) {
+    const kind = String(entry?.kind || '').toLowerCase();
+    if (kind.includes('real main'))
+        return 'Main';
+    if (kind.includes('entry point'))
+        return 'EP';
+    if (kind.includes('tls'))
+        return 'TLS';
+    if (kind.includes('handoff'))
+        return 'Handoff';
+    if (kind.includes('chain'))
+        return 'Chain';
+    if (kind.includes('xl'))
+        return 'XL';
+    return String(entry?.kind || 'Start').split(/\s+/)[0];
+}
+function startupDepth(entry) {
+    const source = String(entry?.source || '');
+    const match = source.match(/depth\s+(\d+)/i);
+    return match ? Number(match[1]) : 99;
+}
+function startupCategory(entry) {
+    const kind = String(entry?.kind || '').toLowerCase();
+    if (kind.includes('entry point'))
+        return 'pe-entry';
+    if (kind.includes('tls'))
+        return 'tls';
+    if (kind.includes('real main'))
+        return 'real-main';
+    if (kind.includes('handoff'))
+        return 'handoff';
+    if (kind.includes('chain'))
+        return 'chain';
+    if (kind.includes('xl'))
+        return 'xl';
+    return 'other';
+}
+function startupRvaValue(entry) {
+    return parseAddressValue(entry?.rva) ?? 0n;
+}
+function summarizeStartupRoutines(startupRoutines = []) {
+    const entries = Array.isArray(startupRoutines) ? startupRoutines.slice() : [];
+    const peEntry = entries.find(entry => startupCategory(entry) === 'pe-entry') || null;
+    const tlsCallbacks = entries.filter(entry => startupCategory(entry) === 'tls');
+    const handoffs = entries
+        .filter(entry => {
+        const category = startupCategory(entry);
+        return category === 'handoff' || category === 'chain';
+    })
+        .sort((a, b) => startupDepth(a) - startupDepth(b) || (startupRvaValue(a) < startupRvaValue(b) ? -1 : 1));
+    const mainCandidates = entries.filter(entry => startupCategory(entry) === 'real-main');
+    const bootstrap = handoffs[0] || null;
+    const handoffAnchors = handoffs.map(startupRvaValue);
+    const scoreMainCandidate = entry => {
+        let score = 0;
+        const source = String(entry?.source || '').toLowerCase();
+        const note = String(entry?.note || '').toLowerCase();
+        const section = String(entry?.section || '').toLowerCase();
+        const rva = startupRvaValue(entry);
+        // Source instruction type
+        if (source.includes('lea'))
+            score += 18;
+        if (source.includes('mov'))
+            score += 8;
+        if (source.includes('push'))
+            score += 4;
+        // Section hint
+        if (section === '.text' || section === 'text')
+            score += 14;
+        if (note.includes('callback or main routine'))
+            score += 12;
+        if (rva >= 0x1000n)
+            score += 8;
+        const isAligned = (rva & 0xFn) === 0n;
+        if (isAligned)
+            score += 6;
+        if ((rva & 1n) !== 0n)
+            score -= 18;
+        // Depth: prefer candidates closer to entry point (lower depth = more direct)
+        const depth = startupDepth(entry);
+        if (depth !== 99) {
+            if (depth <= 1)
+                score += 24;
+            else if (depth <= 2)
+                score += 12;
+            else if (depth >= 4)
+                score -= 12;
+        }
+        // Proximity to known startup handoff/chain anchors
+        let nearest = null;
+        for (const anchor of handoffAnchors) {
+            const delta = anchor > rva ? anchor - rva : rva - anchor;
+            if (nearest == null || delta < nearest)
+                nearest = delta;
+        }
+        if (nearest != null) {
+            if (nearest <= 0x40n)
+                score += 32;
+            else if (nearest <= 0x200n)
+                score += 20;
+            else if (nearest <= 0x2000n)
+                score += 10;
+            else if (nearest <= 0x10000n)
+                score += 4;
+        }
+        return score;
+    };
+    const rankedMains = mainCandidates
+        .map(entry => ({ entry, score: scoreMainCandidate(entry) }))
+        .sort((a, b) => b.score - a.score || (startupRvaValue(a.entry) < startupRvaValue(b.entry) ? -1 : 1));
+    return {
+        peEntry,
+        tlsCallbacks,
+        bootstrap,
+        expectedMain: rankedMains[0]?.entry || null,
+        alternateMains: rankedMains.slice(1, 4).map(item => item.entry),
+        rankedMains: rankedMains.map(item => item.entry),
+        rawEntries: entries,
+        chainCount: handoffs.length,
+    };
+}
+function appendStartupTarget(container, label, entry, extra = '') {
+    if (!entry)
+        return;
+    const row = document.createElement('div');
+    row.className = 'startup-row';
+    const key = document.createElement('div');
+    key.className = 'startup-key';
+    key.textContent = label;
+    const value = document.createElement('div');
+    value.className = 'startup-value';
+    const link = document.createElement('span');
+    link.className = 'fn-link';
+    link.textContent = `${entry.rva}`;
+    link.title = entry.note || `Disassemble ${entry.kind} at ${entry.rva}`;
+    link.addEventListener('click', () => navigateRva(entry.rva, `${entry.kind}@${entry.rva}`));
+    value.appendChild(link);
+    const meta = [];
+    if (entry.section)
+        meta.push(entry.section);
+    if (entry.source)
+        meta.push(entry.source);
+    if (extra)
+        meta.push(extra);
+    if (meta.length) {
+        const metaEl = document.createElement('div');
+        metaEl.className = 'startup-meta';
+        metaEl.textContent = meta.join(' · ');
+        value.appendChild(metaEl);
+    }
+    if (entry.note) {
+        const note = document.createElement('div');
+        note.className = 'startup-note';
+        note.textContent = entry.note;
+        value.appendChild(note);
+    }
+    row.append(key, value);
+    container.appendChild(row);
+    return { row, value };
+}
+function setTabVisible(id, visible) {
+    const btn = document.querySelector(`.tab[data-tab="${id}"]`);
+    if (!btn)
+        return;
+    btn.classList.toggle('hidden', !visible);
+    if (!visible && st.activeTopTab === id) {
+        activateTab('overview');
+    }
+}
+function renderEntryPanel(d) {
+    const panel = $('panel-entry');
+    panel.innerHTML = '';
+    const startupSummary = summarizeStartupRoutines(d.startup_routines || []);
+    setTabVisible('entry', startupSummary.rawEntries.length > 0);
+    if (!startupSummary.rawEntries.length) {
+        panel.innerHTML = '<p class="no-data">No startup or entry analysis.</p>';
+        return;
+    }
+    const startupCard = _card('Program Entry');
+    startupCard.card.style.gridColumn = '1 / -1';
+    appendStartupTarget(startupCard.body, 'PE Entry', startupSummary.peEntry);
+    if (startupSummary.bootstrap) {
+        const kind = startupCategory(startupSummary.bootstrap) === 'handoff' ? 'runtime bootstrap' : 'startup chain';
+        appendStartupTarget(startupCard.body, 'Runtime Bootstrap', startupSummary.bootstrap, kind);
+    }
+    const primaryMain = startupSummary.expectedMain;
+    if (primaryMain) {
+        const primary = appendStartupTarget(startupCard.body, 'Expected Real Main', primaryMain, 'best heuristic match');
+        if (startupSummary.alternateMains.length && primary) {
+            const altDetails = document.createElement('details');
+            altDetails.className = 'startup-alt';
+            const altSummary = document.createElement('summary');
+            altSummary.textContent = `Alternate main candidates (${startupSummary.alternateMains.length})`;
+            altDetails.appendChild(altSummary);
+            startupSummary.alternateMains.forEach((entry, idx) => {
+                appendStartupTarget(altDetails, `Alt Main ${idx + 1}`, entry, 'alternate candidate');
+            });
+            primary.value.appendChild(altDetails);
+        }
+    }
+    startupSummary.tlsCallbacks.forEach((cb, i) => {
+        const label = startupSummary.tlsCallbacks.length > 1 ? `TLS Callback ${i + 1}` : 'TLS Callback';
+        appendStartupTarget(startupCard.body, label, cb);
+    });
+    const a = d.analysis || {};
+    const stackSummary = [];
+    if (a.runtime)
+        stackSummary.push(`runtime: ${a.runtime}`);
+    if (a.likely_toolchains?.length)
+        stackSummary.push(`toolchain: ${a.likely_toolchains.join(', ')}`);
+    if (a.likely_components?.length)
+        stackSummary.push(`components: ${a.likely_components.join(', ')}`);
+    if (stackSummary.length) {
+        const stack = document.createElement('div');
+        stack.className = 'startup-stack';
+        stack.textContent = stackSummary.join(' | ');
+        startupCard.body.appendChild(stack);
+    }
+    const rawDetails = document.createElement('details');
+    rawDetails.className = 'startup-raw';
+    const summary = document.createElement('summary');
+    summary.textContent = `Raw startup evidence (${startupSummary.rawEntries.length} entries, ${startupSummary.chainCount} chain edges)`;
+    rawDetails.appendChild(summary);
+    startupSummary.rawEntries.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'startup-raw-row';
+        const label = document.createElement('span');
+        label.className = 'startup-raw-kind';
+        label.textContent = `${entry.kind}`;
+        const link = document.createElement('span');
+        link.className = 'fn-link';
+        link.textContent = `${entry.rva}`;
+        link.title = entry.note || `Disassemble ${entry.kind} at ${entry.rva}`;
+        link.addEventListener('click', () => navigateRva(entry.rva, `${entry.kind}@${entry.rva}`));
+        const meta = document.createElement('span');
+        meta.className = 'startup-raw-meta';
+        meta.textContent = [entry.section || '', entry.source || '', entry.note || '']
+            .filter(Boolean)
+            .join(' · ');
+        row.append(label, link, meta);
+        rawDetails.appendChild(row);
+    });
+    startupCard.body.appendChild(rawDetails);
+    panel.appendChild(startupCard.card);
 }
 function prefixClass(name) {
     for (const [pfx, cls] of PREFIX_MAP) {
@@ -399,6 +687,36 @@ function parseHexValue(value) {
         return NaN;
     return raw.startsWith('0x') || raw.startsWith('0X') ? parseInt(raw, 16) : parseInt(raw, 10);
 }
+function parseAddressValue(value) {
+    const raw = String(value || '').trim();
+    if (!raw)
+        return null;
+    const normalized = raw.replace(/h$/i, '');
+    try {
+        if (/^[-+]?0x[0-9A-Fa-f]+$/i.test(normalized))
+            return BigInt(normalized);
+        if (/^[-+]?[0-9A-Fa-f]+$/i.test(normalized) && /[A-Fa-f]/.test(normalized))
+            return BigInt(`0x${normalized}`);
+        if (/^[-+]?\d+$/.test(normalized))
+            return BigInt(normalized);
+    }
+    catch {
+        return null;
+    }
+    return null;
+}
+function formatAddressHex(value, minWidth = 1) {
+    const sign = value < 0n ? '-' : '';
+    const hex = (value < 0n ? -value : value).toString(16).toUpperCase().padStart(minWidth, '0');
+    return `${sign}0x${hex}`;
+}
+function decodeStatusLiteral(value) {
+    const parsed = parseAddressValue(value);
+    if (parsed == null)
+        return null;
+    const key = formatAddressHex(parsed).toUpperCase();
+    return STATUS_NAMES.get(key) || null;
+}
 function detectCurrentSyscallInfo(d, fallbackLabel) {
     const dll = String(d?.dll || '').toLowerCase();
     const fn = String(d?.function || fallbackLabel || '').trim();
@@ -428,18 +746,510 @@ function detectCurrentSyscallInfo(d, fallbackLabel) {
     };
 }
 function findSectionForRva(sections, rva) {
-    const target = parseHexValue(rva);
-    if (!Number.isFinite(target))
+    const target = parseAddressValue(rva);
+    if (target == null)
         return null;
     for (const sec of sections || []) {
-        const start = parseHexValue(sec.rva);
-        const size = Math.max(parseHexValue(sec.virtual_size), parseHexValue(sec.raw_size));
-        if (!Number.isFinite(start) || !Number.isFinite(size))
+        const start = parseAddressValue(sec.rva);
+        const virtualSize = parseAddressValue(sec.virtual_size);
+        const rawSize = parseAddressValue(sec.raw_size);
+        if (start == null || virtualSize == null || rawSize == null)
             continue;
+        const size = virtualSize > rawSize ? virtualSize : rawSize;
         if (target >= start && target < start + size)
             return sec;
     }
     return null;
+}
+function shortenAddressForImage(rawValue, sections, imageBase) {
+    const raw = String(rawValue || '').trim();
+    if (!/^(?:0x[0-9A-Fa-f]+|[0-9A-Fa-f]+h)$/i.test(raw))
+        return null;
+    const normalized = /^0x/i.test(raw) ? raw : `0x${raw.replace(/h$/i, '')}`;
+    const absolute = parseAddressValue(normalized);
+    if (absolute == null)
+        return null;
+    const base = parseAddressValue(imageBase);
+    let rva = absolute;
+    if (base != null && absolute >= base)
+        rva = absolute - base;
+    if (rva < 0n)
+        rva = absolute;
+    const section = findSectionForRva(sections, formatAddressHex(rva));
+    if (!section)
+        return null;
+    const secBase = parseAddressValue(section.rva);
+    if (secBase == null)
+        return null;
+    const offset = rva >= secBase ? rva - secBase : 0n;
+    return {
+        raw,
+        short: `${section.name}+${formatAddressHex(offset)}`,
+        section: section.name,
+        rva: formatAddressHex(rva),
+    };
+}
+function simplifyArgumentValue(raw, sections = [], imageBase = '') {
+    const text = String(raw || '').trim();
+    if (!text)
+        return '';
+    const status = decodeStatusLiteral(text);
+    if (status)
+        return status;
+    const shortened = shortenAddressForImage(text, sections, imageBase);
+    if (shortened)
+        return shortened.short;
+    return text
+        .replace(/\b(?:qword|dword|word|byte|xmmword|ymmword|zmmword)\s+ptr\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+function inferRegisterValueBefore(insns, idx, reg, sections = [], imageBase = '', semanticNotes = new Map()) {
+    const want = registerFamily(reg);
+    for (let i = idx - 1, seen = 0; i >= 0 && seen < 20; i--, seen++) {
+        const text = String(insns[i]?.text || '').trim();
+        if (!text)
+            continue;
+        const mov = text.match(/^(mov|lea)\s+([A-Za-z0-9]+)\s*,\s*(.+)$/i);
+        if (mov && registerFamily(mov[2]) === want) {
+            const semantic = semanticNotes.get(normalizeRva(insns[i]?.rva));
+            if (semantic)
+                return semantic;
+            if (insns[i]?.comment)
+                return simplifyArgumentValue(insns[i].comment, sections, imageBase);
+            return simplifyArgumentValue(mov[3], sections, imageBase);
+        }
+        const zero = text.match(/^xor\s+([A-Za-z0-9]+)\s*,\s*([A-Za-z0-9]+)$/i);
+        if (zero && registerFamily(zero[1]) === want && registerFamily(zero[2]) === want) {
+            return '0';
+        }
+        const pop = text.match(/^pop\s+([A-Za-z0-9]+)$/i);
+        if (pop && registerFamily(pop[1]) === want) {
+            return 'stack value';
+        }
+    }
+    return '';
+}
+function inferCallArguments(insns, callRva, arch, sections = [], imageBase = '', semanticNotes = new Map()) {
+    const targetRva = normalizeRva(callRva);
+    const idx = insns.findIndex(insn => normalizeRva(insn?.rva) === targetRva);
+    if (idx < 0)
+        return [];
+    if (String(arch || '').includes('64')) {
+        return ['rcx', 'rdx', 'r8', 'r9']
+            .map(reg => {
+            const value = inferRegisterValueBefore(insns, idx, reg, sections, imageBase, semanticNotes);
+            return value ? `${reg}=${value}` : '';
+        })
+            .filter(Boolean);
+    }
+    const args = [];
+    for (let i = idx - 1, seen = 0; i >= 0 && seen < 12 && args.length < 6; i--, seen++) {
+        const text = String(insns[i]?.text || '').trim();
+        if (!text)
+            continue;
+        if (/^(call|jmp|ret)\b/i.test(text))
+            break;
+        const push = text.match(/^push\s+(.+)$/i);
+        if (push) {
+            args.unshift(`arg${args.length}=${simplifyArgumentValue(push[1], sections, imageBase)}`);
+            continue;
+        }
+        if (!/^(mov|lea|xor)\b/i.test(text))
+            break;
+    }
+    return args;
+}
+function buildCallArgumentNotes(insns, apiCalls, arch, sections = [], imageBase = '') {
+    const notes = new Map();
+    const semanticNotes = buildHeuristicInsnNotes(insns || []);
+    for (const call of apiCalls || []) {
+        const args = inferCallArguments(insns || [], call?.rva, arch, sections, imageBase, semanticNotes);
+        const semanticCall = summarizeCallSemantics(call, args);
+        const callNotes = semanticCall ? [semanticCall] : (args.length ? [args.join(', ')] : []);
+        if (callNotes.length)
+            notes.set(normalizeRva(call.rva), callNotes);
+    }
+    return notes;
+}
+function parseSemanticValue(raw) {
+    const text = String(raw || '').trim();
+    if (!text)
+        return null;
+    const typed = text.match(/^([A-Za-z0-9_.*]+)::(.+)$/);
+    if (typed) {
+        return { type: typed[1], expr: typed[2] };
+    }
+    return { type: '', expr: text };
+}
+function semanticValue(type, expr) {
+    return type ? `${type}::${expr}` : String(expr || '');
+}
+function semanticExpr(raw) {
+    return parseSemanticValue(raw)?.expr || String(raw || '').trim();
+}
+function semanticType(raw) {
+    return parseSemanticValue(raw)?.type || '';
+}
+function cleanCommentText(text) {
+    return String(text || '').replace(/^\s*;\s*/, '').trim();
+}
+function sanitizeSemanticNote(raw) {
+    let text = cleanCommentText(String(raw || ''));
+    if (!text)
+        return '';
+    text = text.replace(/^[^:;]+::/, '');
+    let prev = '';
+    while (text !== prev) {
+        prev = text;
+        text = text
+            .replace(/\+0x0(?=\+|$)/g, '')
+            .replace(/->Flink->Flink/g, '->Flink')
+            .replace(/->Blink->Blink/g, '->Blink')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+    }
+    return text;
+}
+function composeSemanticComment(baseComment, semantic) {
+    const base = cleanCommentText(baseComment);
+    const sem = sanitizeSemanticNote(semantic);
+    if (!sem)
+        return base;
+    if (!base)
+        return sem;
+    if (base === sem || base.includes(sem))
+        return base;
+    if (sem.includes(base))
+        return sem;
+    const target = base.includes('=>') ? base.split('=>').pop().trim() : base;
+    if (/^load\s+/i.test(sem) && target) {
+        return `${sem} from ${target}`;
+    }
+    if (/^[A-Z][A-Za-z0-9_.]+$/.test(sem) && target && /^([A-Z][A-Za-z0-9_.]+)$/.test(target)) {
+        return sem;
+    }
+    return `${sem} (${target})`;
+}
+function mapKnownField(baseType, offsetHex) {
+    const off = String(offsetHex || '').toUpperCase();
+    const map = {
+        'TEB*': {
+            '30': ['TEB.Self', 'TEB*'],
+            '58': ['TEB.ThreadLocalStoragePointer', 'PVOID*'],
+            '60': ['TEB.ProcessEnvironmentBlock', 'PEB*'],
+        },
+        'PEB*': {
+            '2': ['PEB.BeingDebugged', 'BOOLEAN'],
+            '10': ['PEB.ImageBaseAddress', 'PVOID'],
+            '18': ['PEB.Ldr', 'PEB_LDR_DATA*'],
+            '20': ['PEB.ProcessParameters', 'RTL_USER_PROCESS_PARAMETERS*'],
+            '68': ['PEB.ApiSetMap', 'API_SET_NAMESPACE*'],
+        },
+        'PEB_LDR_DATA*': {
+            '10': ['PEB_LDR_DATA.InLoadOrderModuleList', 'LIST_ENTRY* loader head'],
+            '20': ['PEB_LDR_DATA.InMemoryOrderModuleList', 'LIST_ENTRY* memory-order head'],
+            '30': ['PEB_LDR_DATA.InInitializationOrderModuleList', 'LIST_ENTRY* init-order head'],
+        },
+        'LDR_DATA_TABLE_ENTRY*': {
+            '0': ['LDR_DATA_TABLE_ENTRY.InLoadOrderLinks.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['LDR_DATA_TABLE_ENTRY.InLoadOrderLinks.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+            '10': ['LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '18': ['LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+            '20': ['LDR_DATA_TABLE_ENTRY.InInitializationOrderLinks.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '28': ['LDR_DATA_TABLE_ENTRY.InInitializationOrderLinks.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+            '30': ['LDR_DATA_TABLE_ENTRY.DllBase', 'PVOID'],
+            '38': ['LDR_DATA_TABLE_ENTRY.EntryPoint', 'PVOID'],
+            '40': ['LDR_DATA_TABLE_ENTRY.SizeOfImage', 'ULONG'],
+            '48': ['LDR_DATA_TABLE_ENTRY.FullDllName', 'UNICODE_STRING'],
+            '50': ['LDR_DATA_TABLE_ENTRY.BaseDllName', 'UNICODE_STRING'],
+            '60': ['LDR_DATA_TABLE_ENTRY.BaseDllName.Buffer', 'PCWSTR'],
+            '68': ['LDR_DATA_TABLE_ENTRY.Flags', 'ULONG'],
+        },
+        'LIST_ENTRY* loader head': {
+            '0': ['InLoadOrderModuleList.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['InLoadOrderModuleList.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+        },
+        'LIST_ENTRY* memory-order head': {
+            '0': ['InMemoryOrderModuleList.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['InMemoryOrderModuleList.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+        },
+        'LIST_ENTRY* init-order head': {
+            '0': ['InInitializationOrderModuleList.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['InInitializationOrderModuleList.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+        },
+        'LDR_DATA_TABLE_ENTRY.InLoadOrderLinks*': {
+            '0': ['LDR_DATA_TABLE_ENTRY.InLoadOrderLinks.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['LDR_DATA_TABLE_ENTRY.InLoadOrderLinks.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+        },
+        'LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks*': {
+            '0': ['LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+        },
+        'LDR_DATA_TABLE_ENTRY.InInitializationOrderLinks*': {
+            '0': ['LDR_DATA_TABLE_ENTRY.InInitializationOrderLinks.Flink', 'LDR_DATA_TABLE_ENTRY*'],
+            '8': ['LDR_DATA_TABLE_ENTRY.InInitializationOrderLinks.Blink', 'LDR_DATA_TABLE_ENTRY*'],
+        },
+        'UNICODE_STRING': {
+            '0': ['UNICODE_STRING.Length', 'USHORT'],
+            '2': ['UNICODE_STRING.MaximumLength', 'USHORT'],
+            '8': ['UNICODE_STRING.Buffer', 'PCWSTR'],
+        },
+        'RTL_USER_PROCESS_PARAMETERS*': {
+            '60': ['RTL_USER_PROCESS_PARAMETERS.ImagePathName', 'UNICODE_STRING'],
+            '70': ['RTL_USER_PROCESS_PARAMETERS.CommandLine', 'UNICODE_STRING'],
+        },
+    };
+    return map[baseType]?.[off] || null;
+}
+function summarizeCallSemantics(call, args) {
+    const label = normalizeImportName(stripScopedName(call?.label || '')).toLowerCase();
+    const argValues = args.map(arg => String(arg).split('=').slice(1).join('=').trim()).filter(Boolean);
+    if (!label || !argValues.length)
+        return '';
+    const printable = value => {
+        if (/BaseDllName\.Buffer/.test(value))
+            return 'current_module_name';
+        if (/FullDllName\.Buffer/.test(value))
+            return 'current_module_path';
+        return value;
+    };
+    if (['wcsicmp', '_wcsicmp', 'wcscmp', '_wcscmp', 'strcmp', '_strcmp', 'stricmp', '_stricmp'].includes(label) && argValues.length >= 2) {
+        const a = printable(argValues[0]);
+        const b = printable(argValues[1]);
+        return `${stripScopedName(call.label || label)}(${a}, ${b})`;
+    }
+    if (['lstrcmpiw', 'lstrcmpi', 'rtlcompareunicodestring'].includes(label) && argValues.length >= 2) {
+        return `${stripScopedName(call.label || label)}(${argValues[0]}, ${argValues[1]})`;
+    }
+    return '';
+}
+function buildCallCommentMap(callArgumentNotes) {
+    const map = new Map();
+    for (const [rva, notes] of callArgumentNotes || new Map()) {
+        const primary = Array.isArray(notes) ? notes[0] : '';
+        if (primary)
+            map.set(normalizeRva(rva), primary);
+    }
+    return map;
+}
+function annotateRecompText(text, apiCalls, callCommentMap) {
+    let out = String(text || '');
+    for (const call of apiCalls || []) {
+        const summary = callCommentMap.get(normalizeRva(call?.rva));
+        const label = stripScopedName(call?.label || '');
+        if (!summary || !label)
+            continue;
+        const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const patterns = [
+            new RegExp(`(result\\s*=\\s*${escaped}\\s*\\(\\)\\s*;)(\\s*//.*)?$`, 'm'),
+            new RegExp(`(return\\s+${escaped}\\s*\\(\\)\\s*;)(\\s*//.*)?$`, 'm'),
+        ];
+        for (const re of patterns) {
+            if (re.test(out)) {
+                out = out.replace(re, (_, stmt, existing) => `${stmt}${existing || ''}  // ${summary}`);
+                break;
+            }
+        }
+    }
+    return out;
+}
+function buildHeuristicInsnNotes(insns) {
+    const regState = new Map();
+    const notes = new Map();
+    const setState = (reg, value) => {
+        if (!reg)
+            return;
+        regState.set(registerFamily(reg), value);
+    };
+    const getState = (reg) => reg ? regState.get(registerFamily(reg)) || '' : '';
+    const setNote = (rva, note) => {
+        if (rva && note)
+            notes.set(rva, sanitizeSemanticNote(note));
+    };
+    const classifyUnlinkStore = (destState, destOff, srcState, srcFallback) => {
+        const destType = semanticType(destState);
+        const srcType = semanticType(srcState);
+        const srcExpr = semanticExpr(srcState || srcFallback);
+        const off = String(destOff || '0').toUpperCase();
+        if (srcExpr === '0') {
+            if (destType === 'LDR_DATA_TABLE_ENTRY*' && (off === '0' || off === '8'))
+                return 'clear InLoadOrderLinks';
+            if (destType === 'LDR_DATA_TABLE_ENTRY*' && (off === '10' || off === '18'))
+                return 'clear InMemoryOrderLinks';
+            if (destType === 'LDR_DATA_TABLE_ENTRY*' && (off === '20' || off === '28'))
+                return 'clear InInitializationOrderLinks';
+        }
+        if (destType === 'LDR_DATA_TABLE_ENTRY*' && off === '0' && srcType === 'LDR_DATA_TABLE_ENTRY*')
+            return 'unlink InLoadOrderLinks: previous->Flink = next';
+        if (destType === 'LDR_DATA_TABLE_ENTRY*' && off === '8' && srcType === 'LDR_DATA_TABLE_ENTRY*')
+            return 'unlink InLoadOrderLinks: next->Blink = previous';
+        if (destType === 'LDR_DATA_TABLE_ENTRY*' && off === '10' && srcType === 'LDR_DATA_TABLE_ENTRY*')
+            return 'unlink InMemoryOrderLinks: previous->Flink = next';
+        if (destType === 'LDR_DATA_TABLE_ENTRY*' && off === '18' && srcType === 'LDR_DATA_TABLE_ENTRY*')
+            return 'unlink InMemoryOrderLinks: next->Blink = previous';
+        if (destType === 'LDR_DATA_TABLE_ENTRY*' && off === '20' && srcType === 'LDR_DATA_TABLE_ENTRY*')
+            return 'unlink InInitializationOrderLinks: previous->Flink = next';
+        if (destType === 'LDR_DATA_TABLE_ENTRY*' && off === '28' && srcType === 'LDR_DATA_TABLE_ENTRY*')
+            return 'unlink InInitializationOrderLinks: next->Blink = previous';
+        return '';
+    };
+    for (const insn of insns || []) {
+        const text = String(insn?.text || '').trim();
+        const lower = text.toLowerCase();
+        const rvaKey = normalizeRva(insn?.rva);
+        let note = '';
+        if (/^mov\s+\w+,\s*gs:\[60h\]$/i.test(text) || /^mov\s+\w+,\s*fs:\[30h\]$/i.test(text)) {
+            const assignedReg = text.match(/^mov\s+([A-Za-z0-9]+),/i)?.[1] || '';
+            setState(assignedReg, semanticValue('PEB*', 'process environment block'));
+            note = 'load PEB';
+        }
+        else if (/^mov\s+\w+,\s*gs:\[30h\]$/i.test(text) || /^mov\s+\w+,\s*fs:\[18h\]$/i.test(text)) {
+            const assignedReg = text.match(/^mov\s+([A-Za-z0-9]+),/i)?.[1] || '';
+            setState(assignedReg, semanticValue('TEB*', 'thread environment block'));
+            note = 'load TEB';
+        }
+        else if (/^mov\s+\w+,\s*\[(?:[A-Za-z0-9_.$]+)\]$/i.test(text) && /\.rdata/i.test(String(insn?.comment || ''))) {
+            const assignedReg = text.match(/^mov\s+([A-Za-z0-9]+),/i)?.[1] || '';
+            const literal = String(insn.comment || '').trim();
+            setState(assignedReg, semanticValue('PCSTR', literal));
+            note = `load string ${literal}`;
+        }
+        else if (/^lea\s+\w+,\s*\[(?:[A-Za-z0-9_.]+\+)?0x?[0-9A-Fa-f]+h?\]$/i.test(text) && /L"/.test(String(insn?.comment || ''))) {
+            const assignedReg = text.match(/^lea\s+([A-Za-z0-9]+),/i)?.[1] || '';
+            const stringValue = String(insn.comment || '').replace(/^.*?(L".*")$/, '$1');
+            setState(assignedReg, semanticValue('PCWSTR', stringValue));
+            note = `load string ${stringValue}`;
+        }
+        else {
+            const movReg = text.match(/^mov\s+([A-Za-z0-9]+)\s*,\s*([A-Za-z0-9]+)$/i);
+            if (movReg) {
+                const srcState = getState(movReg[2]);
+                if (srcState) {
+                    setState(movReg[1], srcState);
+                    note = semanticExpr(srcState);
+                }
+            }
+            const movField = text.match(/^(mov|lea)\s+([A-Za-z0-9]+)\s*,\s*\[([A-Za-z0-9]+)([+-]([0-9A-Fa-f]+)h?)?\]$/i);
+            if (movField && !note) {
+                const assignedReg = movField[2];
+                const baseReg = movField[3];
+                const off = (movField[5] || '0').toUpperCase();
+                const baseState = getState(baseReg);
+                const baseType = semanticType(baseState);
+                const field = mapKnownField(baseType, off);
+                if (field) {
+                    const [expr, nextType] = field;
+                    setState(assignedReg, semanticValue(nextType, expr));
+                    note = expr;
+                } else if (/LIST_ENTRY/.test(baseType) && off === '0') {
+                    setState(assignedReg, semanticValue(baseType, `${semanticExpr(baseState)}->Flink`));
+                    note = `${semanticExpr(baseState)}->Flink`;
+                } else if (/LIST_ENTRY/.test(baseType) && off === '8') {
+                    setState(assignedReg, semanticValue(baseType, `${semanticExpr(baseState)}->Blink`));
+                    note = `${semanticExpr(baseState)}->Blink`;
+                } else if (baseState) {
+                    setState(assignedReg, semanticValue('', `${semanticExpr(baseState)}+0x${off}`));
+                    note = `${semanticExpr(baseState)}+0x${off}`;
+                }
+            }
+            const addList = text.match(/^add\s+([A-Za-z0-9]+),\s*10h$/i);
+            if (addList && !note) {
+                const baseState = getState(addList[1]);
+                if (semanticType(baseState) === 'PEB_LDR_DATA*') {
+                    setState(addList[1], semanticValue('LIST_ENTRY* loader head', 'PEB_LDR_DATA.InLoadOrderModuleList'));
+                    note = 'PEB_LDR_DATA.InLoadOrderModuleList';
+                } else if (baseState) {
+                    setState(addList[1], semanticValue(semanticType(baseState), `${semanticExpr(baseState)}+0x10`));
+                    note = `${semanticExpr(baseState)}+0x10`;
+                }
+            }
+            const addField = text.match(/^add\s+([A-Za-z0-9]+),\s*([0-9A-Fa-f]+)h$/i);
+            if (addField && !note) {
+                const baseState = getState(addField[1]);
+                if (baseState) {
+                    const off = addField[2].toUpperCase();
+                    const field = mapKnownField(semanticType(baseState), off);
+                    if (field) {
+                        const [expr, nextType] = field;
+                        setState(addField[1], semanticValue(nextType, expr));
+                        note = expr;
+                    } else {
+                        setState(addField[1], semanticValue(semanticType(baseState), `${semanticExpr(baseState)}+0x${off}`));
+                        note = `${semanticExpr(baseState)}+0x${off}`;
+                    }
+                }
+            }
+            const movList = text.match(/^mov\s+([A-Za-z0-9]+)\s*,\s*\[([A-Za-z0-9]+)\]$/i);
+            if (movList && !note) {
+                const baseState = getState(movList[2]);
+                const baseType = semanticType(baseState);
+                if (baseType === 'LIST_ENTRY* loader head') {
+                    setState(movList[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'current module entry'));
+                    note = 'load current module entry from InLoadOrderModuleList';
+                } else if (baseType === 'LIST_ENTRY* memory-order head') {
+                    setState(movList[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'current module entry'));
+                    note = 'load current module entry from InMemoryOrderModuleList';
+                } else if (baseType === 'LIST_ENTRY* init-order head') {
+                    setState(movList[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'current module entry'));
+                    note = 'load current module entry from InInitializationOrderModuleList';
+                } else if (baseType === 'LDR_DATA_TABLE_ENTRY*') {
+                    setState(movList[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'next module entry'));
+                    note = 'advance to next module entry';
+                } else if (/LIST_ENTRY/.test(baseType)) {
+                    const expr = semanticExpr(baseState);
+                    const nextType = baseType;
+                    setState(movList[1], semanticValue(nextType, `${expr}->Flink`));
+                    note = `${expr}->Flink`;
+                }
+            }
+            const subContainer = text.match(/^sub\s+([A-Za-z0-9]+)\s*,\s*([0-9A-Fa-f]+)h$/i);
+            if (subContainer && !note) {
+                const baseState = getState(subContainer[1]);
+                const baseType = semanticType(baseState);
+                const off = subContainer[2].toUpperCase();
+                if (baseType === 'LDR_DATA_TABLE_ENTRY.InMemoryOrderLinks*' && off === '10') {
+                    setState(subContainer[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'current module entry'));
+                    note = 'recover module entry from InMemoryOrderLinks';
+                } else if (baseType === 'LDR_DATA_TABLE_ENTRY.InInitializationOrderLinks*' && off === '20') {
+                    setState(subContainer[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'current module entry'));
+                    note = 'recover module entry from InInitializationOrderLinks';
+                } else if (/LDR_DATA_TABLE_ENTRY\./.test(baseType) || /LDR_DATA_TABLE_ENTRY\./.test(semanticExpr(baseState))) {
+                    setState(subContainer[1], semanticValue('LDR_DATA_TABLE_ENTRY*', 'container record'));
+                    note = 'recover LDR_DATA_TABLE_ENTRY from list link';
+                }
+            }
+            const movStore = text.match(/^mov\s+\[([A-Za-z0-9]+)(?:\+([0-9A-Fa-f]+)h)?\]\s*,\s*([A-Za-z0-9]+)$/i);
+            if (movStore && !note) {
+                const destState = getState(movStore[1]);
+                const srcState = getState(movStore[3]);
+                note = classifyUnlinkStore(destState, movStore[2] || '0', srcState, movStore[3]);
+            }
+            const cmpList = text.match(/^cmp\s+([A-Za-z0-9]+)\s*,\s*([A-Za-z0-9]+)$/i);
+            if (cmpList) {
+                const left = getState(cmpList[1]);
+                const right = getState(cmpList[2]);
+                if ((semanticType(left) === 'LDR_DATA_TABLE_ENTRY*' && /loader head/.test(semanticType(right)))
+                    || (semanticType(right) === 'LDR_DATA_TABLE_ENTRY*' && /loader head/.test(semanticType(left)))) {
+                    note = 'check whether traversal reached the loader list head';
+                } else if (/LIST_ENTRY|LDR_DATA_TABLE_ENTRY\./.test(`${left} ${right}`)) {
+                    note = 'compare list links';
+                }
+            }
+            const testList = text.match(/^test\s+([A-Za-z0-9]+)\s*,\s*([A-Za-z0-9]+)$/i);
+            if (testList && semanticExpr(getState(testList[1])) === '0' && semanticExpr(getState(testList[2])) === '0') {
+                note = 'null-check';
+            }
+        }
+        setNote(rvaKey, note);
+        if (/^(xor|sub)\s+([A-Za-z0-9]+)\s*,\s*([A-Za-z0-9]+)$/i.test(lower)) {
+            const zero = text.match(/^(xor|sub)\s+([A-Za-z0-9]+)\s*,\s*([A-Za-z0-9]+)$/i);
+            if (zero && registerFamily(zero[2]) === registerFamily(zero[3])) {
+                setState(zero[2], semanticValue('', '0'));
+            }
+        }
+    }
+    return notes;
 }
 function fnLink(name, opts = {}) {
     const cls = prefixClass(name);
@@ -468,8 +1278,30 @@ document.querySelectorAll('.tab').forEach(btn => {
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === btn));
         document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${btn.dataset.tab}`));
         st.activeTopTab = btn.dataset.tab;
+        persistUiState();
+        // If a data-symbol or disasm type-link triggered a jump to the Types tab while
+        // the panel is already rendered, find and select the right type entry now.
+        if (btn.dataset.tab === 'types' && st._pendingTypeNav) {
+            const pending = st._pendingTypeNav;
+            st._pendingTypeNav = null;
+            const list = document.querySelector('#panel-types .types-list');
+            if (list) {
+                for (const item of Array.from(list.querySelectorAll('.types-item'))) {
+                    const name = (item.querySelector('.types-item-name')?.textContent || '').toLowerCase();
+                    if (name === pending || name === canonicalTypeName(pending)) {
+                        (item as HTMLElement).click();
+                        item.scrollIntoView({ block: 'nearest' });
+                        break;
+                    }
+                }
+            }
+        }
     });
 });
+$('export-btn')?.addEventListener('click', () => exportCurrentView());
+if (st.activeTopTab && st.activeTopTab !== 'dump') {
+    requestAnimationFrame(() => activateTab(st.activeTopTab));
+}
 function activateTab(id) {
     hideTooltip();
     const btn = document.querySelector(`.tab[data-tab="${id}"]`);
@@ -494,6 +1326,57 @@ function activateDumpSubTab(id) {
     const targetId = `stab-${target.dataset.stab}`;
     panel.querySelectorAll('.stab-panel').forEach(p => p.classList.toggle('active', p.id === targetId));
     st.activeDumpSubTab = target.dataset.stab || 'disasm';
+    persistUiState();
+}
+function readDumpSubTabScroll(id) {
+    const panel = $(`stab-${id}`);
+    if (!(panel instanceof HTMLElement))
+        return 0;
+    if (id === 'disasm') {
+        const insnPane = panel.querySelector('.asm-pane-insn');
+        return insnPane instanceof HTMLElement ? insnPane.scrollTop : panel.scrollTop;
+    }
+    return panel.scrollTop;
+}
+function writeDumpSubTabScroll(id, top) {
+    const panel = $(`stab-${id}`);
+    if (!(panel instanceof HTMLElement))
+        return;
+    const next = Math.max(0, Number(top) || 0);
+    if (id === 'disasm') {
+        const insnPane = panel.querySelector('.asm-pane-insn');
+        const metaPane = panel.querySelector('.asm-pane-meta');
+        if (insnPane instanceof HTMLElement)
+            insnPane.scrollTop = next;
+        if (metaPane instanceof HTMLElement)
+            metaPane.scrollTop = next;
+        return;
+    }
+    panel.scrollTop = next;
+}
+function saveCurrentDumpViewState() {
+    const entry = currentNavEntry();
+    if (!entry)
+        return;
+    const scrollTopByTab = {};
+    DUMP_SUBTABS.forEach(id => {
+        scrollTopByTab[id] = readDumpSubTabScroll(id);
+    });
+    entry.viewState = {
+        subTab: st.activeDumpSubTab || 'disasm',
+        scrollTopByTab,
+    };
+}
+function restoreDumpViewState(entry) {
+    const saved = entry?.viewState;
+    activateDumpSubTab(saved?.subTab || st.activeDumpSubTab || 'disasm');
+    if (!saved?.scrollTopByTab)
+        return;
+    requestAnimationFrame(() => {
+        DUMP_SUBTABS.forEach(id => {
+            writeDumpSubTabScroll(id, saved.scrollTopByTab[id]);
+        });
+    });
 }
 function navigate(funcName, dll = null) {
     const target = resolveNavigationTarget(funcName, dll);
@@ -524,7 +1407,37 @@ function navigateRva(rva, label) {
     _navPush(entry);
     _requestDump(entry);
 }
+// Always navigates within the root file (the file opened in the editor).
+// Use this for imports, exports, sections, symbols — panels that are always
+// scoped to the original binary, even if the dump panel has navigated elsewhere.
+function navigateRootRva(rva, label) {
+    const entry = {
+        label: label || `@${rva}`,
+        fn: null,
+        dll: st.rootDll || null,
+        dllPath: st.rootDllPath || null,
+        rva: normalizeRva(rva),
+        funcsDepth: st.apiDepth,
+        originTab: st.activeTopTab !== 'dump' ? st.activeTopTab : (st.navHistory[st.navPos]?.originTab || null),
+    };
+    _navPush(entry);
+    _requestDump(entry);
+}
+function navigateInRoot(funcName) {
+    const entry = {
+        label: funcName,
+        fn: funcName,
+        dll: st.rootDll || null,
+        dllPath: st.rootDllPath || null,
+        rva: null,
+        funcsDepth: st.apiDepth,
+        originTab: st.activeTopTab !== 'dump' ? st.activeTopTab : (st.navHistory[st.navPos]?.originTab || null),
+    };
+    _navPush(entry);
+    _requestDump(entry);
+}
 function _navPush(entry) {
+    saveCurrentDumpViewState();
     if (st.navPos < st.navHistory.length - 1)
         st.navHistory = st.navHistory.slice(0, st.navPos + 1);
     st.navHistory.push(entry);
@@ -539,12 +1452,14 @@ function navBack() {
             activateTab(originTab);
         return;
     }
+    saveCurrentDumpViewState();
     st.navPos--;
     _replayNav(st.navHistory[st.navPos]);
 }
 function navFwd() {
     if (st.navPos >= st.navHistory.length - 1)
         return;
+    saveCurrentDumpViewState();
     st.navPos++;
     _replayNav(st.navHistory[st.navPos]);
 }
@@ -754,6 +1669,51 @@ function showCtxMenu(e, funcName, dll) {
         y = vh - h - 4;
     menu.style.left = `${Math.max(0, x)}px`;
     menu.style.top = `${Math.max(0, y)}px`;
+}
+function showAddrCtxMenu(e, rawValue, shortValue) {
+    e.preventDefault();
+    dismissCtxMenu();
+    const menu = document.createElement('div');
+    menu.id = 'ctx-menu';
+    st.ctxMenu = menu;
+    const add = (label, action) => {
+        const item = document.createElement('div');
+        item.className = 'ctx-item';
+        item.textContent = label;
+        item.addEventListener('click', () => { dismissCtxMenu(); action(); });
+        menu.appendChild(item);
+    };
+    add('Copy raw address', () => copyText(rawValue));
+    if (shortValue && shortValue !== rawValue)
+        add('Copy shortened address', () => copyText(shortValue));
+    document.body.appendChild(menu);
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = e.clientX, y = e.clientY;
+    if (x + 220 > vw)
+        x = vw - 224;
+    const h = menu.offsetHeight || 80;
+    if (y + h > vh)
+        y = vh - h - 4;
+    menu.style.left = `${Math.max(0, x)}px`;
+    menu.style.top = `${Math.max(0, y)}px`;
+}
+function wireShortAddressSpans(root) {
+    root.querySelectorAll('.asm-addr-short').forEach(addrEl => {
+        const raw = addrEl.getAttribute('data-raw') || '';
+        const short = addrEl.getAttribute('data-short') || raw;
+        addrEl.addEventListener('contextmenu', evt => showAddrCtxMenu(evt, raw, short));
+        addrEl.setAttribute('title', `${short}  |  raw ${raw}`);
+    });
+}
+function shortenAddressMarkup(text, sections = [], imageBase = '') {
+    let html = esc(text || '');
+    html = html.replace(/\b(0[xX][0-9A-Fa-f]+|[0-9A-Fa-f]+h)\b/g, (rawHex) => {
+        const shortened = shortenAddressForImage(rawHex, sections, imageBase);
+        if (!shortened)
+            return rawHex;
+        return `<span class="asm-addr-short" data-raw="${esc(shortened.raw)}" data-short="${esc(shortened.short)}">${esc(shortened.short)}</span>`;
+    });
+    return html;
 }
 function dismissCtxMenu() { if (st.ctxMenu) {
     st.ctxMenu.remove();
@@ -1019,17 +1979,25 @@ function _handleFilePicked(msg) {
     }
 }
 function renderPeInfo(msg) {
-    if (msg.error || !msg.data) {
+    const d = unwrapObjectPayload<any>(msg.data, 'peinfo');
+    if (msg.error || !d) {
         $('panel-overview').appendChild(errBox(msg.error || 'peinfo returned no data'));
+        $('panel-entry').appendChild(errBox(msg.error || 'peinfo returned no data'));
         $('panel-sections').appendChild(errBox(msg.error || 'no data'));
         return;
     }
-    const d = msg.data;
+    st.currentPeInfo = d;
     st.currentDumpDll = d.dll || basenamePath(d.dll_path || '') || '';
     st.currentDumpPath = d.dll_path || '';
+    // Root paths are fixed to the file opened in the editor — never updated on navigation.
+    if (!st.rootDllPath) {
+        st.rootDll = st.currentDumpDll;
+        st.rootDllPath = st.currentDumpPath;
+    }
     if (d.entry_point)
         st.entryPoint = d.entry_point;
     renderOverview(d);
+    renderEntryPanel(d);
     renderSections(d.sections || []);
 }
 function renderOverview(d) {
@@ -1040,15 +2008,6 @@ function renderOverview(d) {
     hdr.innerHTML = `
             <span class="ov-file-name">${esc(d.file_name)}</span>
             <span class="ov-file-meta">${esc(d.image_kind)} &middot; ${esc(d.arch)} &middot; ${formatBytes(d.file_size)}</span>`;
-    if (d.entry_point) {
-        const epBtn = document.createElement('button');
-        epBtn.className = 'btn-sm';
-        epBtn.textContent = `EP ${d.entry_point}`;
-        epBtn.title = 'Disassemble entry point';
-        epBtn.style.marginLeft = 'auto';
-        epBtn.addEventListener('click', () => navigateRva(d.entry_point, `entry_point@${d.entry_point}`));
-        hdr.appendChild(epBtn);
-    }
     panel.appendChild(hdr);
     const grid = document.createElement('div');
     grid.className = 'ov-grid';
@@ -1060,8 +2019,7 @@ function renderOverview(d) {
         .forEach(([k, v]) => id.body.appendChild(kvRow(k, v)));
     grid.appendChild(id.card);
     const addr = _card('Addresses');
-    [['Image Base', d.image_base], ['Entry Point', d.entry_point],
-        ['Image Size', d.size_of_image], ['Sec Align', d.section_alignment],
+    [['Image Base', d.image_base], ['Image Size', d.size_of_image], ['Sec Align', d.section_alignment],
         ['File Align', d.file_alignment], ['Checksum', d.checksum]]
         .forEach(([k, v]) => addr.body.appendChild(kvRow(k, v)));
     grid.appendChild(addr.card);
@@ -1093,6 +2051,10 @@ function renderOverview(d) {
             bld.body.appendChild(kvRow('Language', a.likely_languages.join(', ')));
         if (a.likely_toolchains?.length)
             bld.body.appendChild(kvRow('Toolchain', a.likely_toolchains.join(', ')));
+        if (a.likely_components?.length)
+            bld.body.appendChild(kvRow('Components', a.likely_components.join(', ')));
+        if (a.packers?.length)
+            bld.body.appendChild(kvRow('Packers', a.packers.join(', ')));
         if (a.clr_metadata_version)
             bld.body.appendChild(kvRow('CLR', a.clr_metadata_version));
         if (a.evidence?.length) {
@@ -1276,15 +2238,18 @@ function renderSections(secs) {
 function renderEat(msg) {
     const panel = $('panel-exports');
     panel.innerHTML = '';
-    if (msg.error || !msg.data) {
+    const exports = unwrapListPayload<any>(msg.data, 'exports');
+    if (msg.error || (!exports.length && !msg.data)) {
+        setTabVisible('exports', false);
         panel.appendChild(errBox(msg.error || 'No export data'));
         return;
     }
-    const exports = msg.data;
     if (!exports.length) {
+        setTabVisible('exports', false);
         panel.innerHTML = '<p class="no-data">No exports.</p>';
         return;
     }
+    setTabVisible('exports', true);
     const { bar, lbl } = _searchBar(panel, 'Regex filter…');
     const wrap = document.createElement('div');
     wrap.className = 'tbl-wrap';
@@ -1301,9 +2266,20 @@ function renderEat(msg) {
     exports.forEach(e => {
         const tr = body.insertRow();
         const ntd = tr.insertCell();
-        if (e.name)
-            ntd.appendChild(fnLink(e.name));
-        else
+        if (e.name) {
+            // Always navigate within the root binary, not whatever the dump panel last showed.
+            const link = document.createElement('span');
+            link.className = 'fn-link';
+            link.textContent = e.name;
+            link.dataset.func = e.name;
+            link.addEventListener('mouseenter', ev => startTooltip(e.name, ev));
+            link.addEventListener('mousemove', ev => moveTooltip(ev));
+            link.addEventListener('mouseleave', () => hideTooltip());
+            link.addEventListener('contextmenu', ev => showCtxMenu(ev, e.name, null));
+            link.addEventListener('click', () => navigateInRoot(e.name));
+            link.addEventListener('dblclick', () => navigateInRoot(e.name));
+            ntd.appendChild(link);
+        } else
             ntd.innerHTML = '<span class="fwd-cell">(by ordinal)</span>';
         const otd = tr.insertCell();
         otd.className = 'mono';
@@ -1324,15 +2300,18 @@ function renderEat(msg) {
 function renderIat(msg) {
     const panel = $('panel-imports');
     panel.innerHTML = '';
-    if (msg.error || !msg.data) {
+    const dlls = unwrapListPayload<any>(msg.data, 'imports');
+    if (msg.error || (!dlls.length && !msg.data)) {
+        setTabVisible('imports', false);
         panel.appendChild(errBox(msg.error || 'No import data'));
         return;
     }
-    const dlls = msg.data;
     if (!dlls.length) {
+        setTabVisible('imports', false);
         panel.innerHTML = '<p class="no-data">No imports.</p>';
         return;
     }
+    setTabVisible('imports', true);
     st.iatIndex.clear();
     let total = 0;
     dlls.forEach(d => { (d.imports || []).forEach(i => { if (i.name)
@@ -1366,14 +2345,25 @@ function renderIat(msg) {
                 link.textContent = `(ordinal ${imp.ordinal})`;
                 if (imp.slot_rva) {
                     link.title = `Open ${d.dll} ordinal import entry in the current image`;
-                    link.addEventListener('click', () => navigateRva(imp.slot_rva, `${d.dll}!#${imp.ordinal}`));
-                    link.addEventListener('dblclick', () => navigateRva(imp.slot_rva, `${d.dll}!#${imp.ordinal}`));
+                    link.addEventListener('click', () => navigateRootRva(imp.slot_rva, `${d.dll}!#${imp.ordinal}`));
+                    link.addEventListener('dblclick', () => navigateRootRva(imp.slot_rva, `${d.dll}!#${imp.ordinal}`));
                 }
                 ntd.appendChild(link);
             }
             else if (imp.slot_rva) {
-                const link = fnLink(imp.name, { rva: imp.slot_rva });
+                // Use navigateRootRva so the IAT slot RVA is always resolved in the
+                // original binary, not whatever the dump panel last navigated to.
+                const link = document.createElement('span');
+                link.className = 'fn-link';
+                link.textContent = imp.name;
+                link.dataset.func = imp.name;
                 link.title = `Open ${d.dll}!${imp.name} import entry in the current image`;
+                link.addEventListener('mouseenter', ev => startTooltip(imp.name, ev));
+                link.addEventListener('mousemove', ev => moveTooltip(ev));
+                link.addEventListener('mouseleave', () => hideTooltip());
+                link.addEventListener('contextmenu', ev => showCtxMenu(ev, imp.name, d.dll));
+                link.addEventListener('click', () => navigateRootRva(imp.slot_rva, `${d.dll}!${imp.name}`));
+                link.addEventListener('dblclick', () => navigateRootRva(imp.slot_rva, `${d.dll}!${imp.name}`));
                 ntd.appendChild(link);
             }
             else {
@@ -1443,13 +2433,13 @@ function renderIat(msg) {
 function renderSyms(msg) {
     const panel = $('panel-symbols');
     panel.innerHTML = '';
-    if (msg.error || !msg.data?.length) {
+    const syms = unwrapListPayload<any>(msg.data, 'symbols');
+    if (msg.error || !syms.length) {
         panel.innerHTML = '<p class="no-data">No symbols. Use ⚙ Symbols to configure PDB paths and reload.</p>';
         if (msg.error)
             panel.insertAdjacentElement('afterbegin', errBox(msg.error));
         return;
     }
-    const syms = msg.data;
     const { bar, lbl } = _searchBar(panel, 'Regex filter…');
     lbl.textContent = `${syms.length} symbols`;
     const wrap = document.createElement('div');
@@ -1467,7 +2457,43 @@ function renderSyms(msg) {
     syms.forEach(s => {
         const tr = body.insertRow();
         const ntd = tr.insertCell();
-        ntd.appendChild(fnLink(s.name, { rva: s.rva }));
+        const isCode = s.kind === 'function' || s.kind === 'public';
+        if (isCode) {
+            // Navigate within root binary — not whatever DLL the dump panel last visited.
+            const link = document.createElement('span');
+            link.className = 'fn-link';
+            link.textContent = s.name;
+            link.dataset.func = s.name;
+            link.addEventListener('mouseenter', ev => startTooltip(s.name, ev));
+            link.addEventListener('mousemove', ev => moveTooltip(ev));
+            link.addEventListener('mouseleave', () => hideTooltip());
+            link.addEventListener('contextmenu', ev => showCtxMenu(ev, s.name, null));
+            link.addEventListener('click', () => navigateRootRva(s.rva, s.name));
+            link.addEventListener('dblclick', () => navigateRootRva(s.rva, s.name));
+            ntd.appendChild(link);
+        } else {
+            // Data / label symbol — not disassemblable. Navigate to Types if a matching
+            // type entry exists; otherwise just show as plain text.
+            const typeName = (s.type_name || s.name).toLowerCase();
+            const typeEntry = st.typesByName.get(typeName) || st.typesByName.get(s.name.toLowerCase());
+            if (typeEntry) {
+                const link = document.createElement('span');
+                link.className = 'fn-link sym-data';
+                link.textContent = s.name;
+                link.title = `Data symbol · ${s.type_name || s.kind} · navigate to Types`;
+                link.addEventListener('click', () => {
+                    st._pendingTypeNav = typeName;
+                    activateTab('types');
+                });
+                ntd.appendChild(link);
+            } else {
+                const span = document.createElement('span');
+                span.className = 'sym-data';
+                span.textContent = s.name;
+                span.title = `Data symbol · ${s.type_name || s.kind}`;
+                ntd.appendChild(span);
+            }
+        }
         const ktd = tr.insertCell();
         ktd.className = 'mono';
         ktd.textContent = s.kind;
@@ -1491,19 +2517,21 @@ function renderSyms(msg) {
 function renderTypes(msg) {
     const panel = $('panel-types');
     panel.innerHTML = '';
-    if (msg.error || !msg.data?.length) {
+    const types = unwrapListPayload<any>(msg.data, 'types');
+    if (msg.error || !types.length) {
         panel.innerHTML = '<p class="no-data">No PDB-backed types found.</p>';
         if (msg.error)
             panel.insertAdjacentElement('afterbegin', errBox(msg.error));
         return;
     }
-    const types = msg.data;
     const byId = new Map(types.map(entry => [entry.type_id, entry]));
     const byName = new Map();
     types.forEach(entry => {
         rememberTypeEntry(byName, String(entry.name || '').trim().toLowerCase(), entry);
         rememberTypeEntry(byName, canonicalTypeName(entry.name), entry);
     });
+    // Keep a global index so other panels (symbols, disasm) can resolve type names.
+    st.typesByName = byName;
     const { bar, lbl } = _searchBar(panel, 'Search types or refs…');
     lbl.textContent = `${types.length} types`;
     const shell = document.createElement('div');
@@ -1634,31 +2662,57 @@ function renderTypes(msg) {
         }
         renderList(filtered);
     });
-    renderList(types);
+    // If a symbol panel click asked us to jump to a specific type, select it now.
+    if (st._pendingTypeNav) {
+        const pending = st._pendingTypeNav;
+        st._pendingTypeNav = null;
+        const target = byName.get(pending) || byName.get(canonicalTypeName(pending));
+        if (target) {
+            selected = target;
+            renderList(types);
+            renderDetail(target);
+        } else {
+            renderList(types);
+        }
+    } else {
+        renderList(types);
+    }
 }
 function renderTriage(msg) {
     const panel = $('panel-triage');
     panel.innerHTML = '';
-    if (msg.error || !msg.data) {
+    const data = unwrapObjectPayload<any>(msg.data, 'dump');
+    if (msg.error || !data) {
         panel.appendChild(errBox(msg.error || 'No triage data'));
         return;
     }
-    const findings = msg.data.intelli_findings || [];
-    if (!findings.length) {
+    const findings = data.intelli_findings || [];
+    const startupRoutines = Array.isArray(st.currentPeInfo?.startup_routines) ? st.currentPeInfo.startup_routines : [];
+    if (!findings.length && !startupRoutines.length) {
         panel.innerHTML = '<p class="no-data">No triage findings.</p>';
         return;
     }
     const grouped = {};
+    if (startupRoutines.length) {
+        grouped['Startup Execution'] = startupRoutines.map(entry => ({
+            category: 'Startup Execution',
+            rule: entry.kind,
+            source: entry.source,
+            value: `${entry.section || 'section'} ${entry.rva}${entry.note ? ` · ${entry.note}` : ''}`,
+            rva: entry.rva,
+        }));
+    }
     findings.forEach(f => { (grouped[f.category] = grouped[f.category] || []).push(f); });
     const { bar, lbl } = _searchBar(panel, 'Regex search findings…');
-    lbl.textContent = `${findings.length} findings`;
+    const totalFindings = findings.length + startupRoutines.length;
+    lbl.textContent = `${totalFindings} findings`;
     const container = document.createElement('div');
     panel.appendChild(container);
     const allRows = [];
     for (const [cat, items] of Object.entries(grouped)) {
-        const grp = document.createElement('div');
+        const grp = document.createElement('details');
         grp.className = 'finding-group';
-        const title = document.createElement('div');
+        const title = document.createElement('summary');
         title.className = 'finding-group-title';
         title.innerHTML = `${esc(cat)} <span class="tag">${items.length}</span>`;
         grp.appendChild(title);
@@ -1667,6 +2721,10 @@ function renderTriage(msg) {
             row.className = 'finding-row';
             row.dataset.text = `${f.category} ${f.rule} ${f.source} ${f.value}`.toLowerCase();
             row.innerHTML = `<span class="finding-rule">${esc(f.rule)}</span><span class="finding-source">${esc(f.source)}</span><span class="finding-val">${esc(f.value)}</span>`;
+            if (f.rva) {
+                row.title = `Disassemble ${f.rva}`;
+                row.addEventListener('click', () => navigateRva(f.rva, `${f.rule}@${f.rva}`));
+            }
             grp.appendChild(row);
             allRows.push({ row, grp });
         });
@@ -1704,7 +2762,7 @@ function renderTriage(msg) {
             }
         });
         container.querySelectorAll('.finding-group').forEach(g => g.style.display = vis.has(g) ? '' : 'none');
-        lbl.textContent = re ? `${visible} / ${findings.length} findings` : `${findings.length} findings`;
+        lbl.textContent = re ? `${visible} / ${totalFindings} findings` : `${totalFindings} findings`;
     });
 }
 function renderDevLogs() {
@@ -1795,13 +2853,13 @@ function renderDump(msg) {
     initDumpShell();
     _updateNavUI();
     const label = msg.sourceLabel || msg.func || '?';
-    if (msg.error || !msg.data) {
+    const d = unwrapObjectPayload<any>(msg.data, 'dump');
+    if (msg.error || !d) {
         $('dump-header').innerHTML = `<span class="dump-fn">${esc(label)}</span>`;
         $('stab-disasm').innerHTML = '';
         $('stab-disasm').appendChild(errBox(msg.error || 'no data'));
         return;
     }
-    const d = msg.data;
     st.currentDumpDll = d.dll || basenamePath(d.dll_path || '') || st.currentDumpDll || '';
     st.currentDumpPath = d.dll_path || st.currentDumpPath || '';
     setCurrentDepth(currentNavEntry()?.funcsDepth || st.apiDepth || 1);
@@ -1835,6 +2893,8 @@ function renderDump(msg) {
     const hasCfg = !isImportSlot && d.cfg?.trim();
     const hasRecomp = !isImportSlot && d.recomp?.trim();
     const hasHex = !isImportSlot && hasInsns;
+    const callArgumentNotes = buildCallArgumentNotes(d.instructions || [], d.api_calls || [], d.arch || '', d.sections || [], d.image_base || '');
+    const callCommentMap = buildCallCommentMap(callArgumentNotes);
     document.querySelectorAll('.stab').forEach(btn => {
         const s = btn.dataset.stab;
         const show = s === 'disasm' || (s === 'calls' && hasCalls) ||
@@ -1879,8 +2939,10 @@ function renderDump(msg) {
     $('stab-disasm').innerHTML = '';
     if (isImportSlot)
         $('stab-disasm').appendChild(renderImportSlotView(d, slotSection));
-    else if (hasInsns)
-        $('stab-disasm').appendChild(renderDisasmView(d.instructions, d.api_calls || [], d.dll || '', currentSyscall));
+    else if (hasInsns) {
+        const semanticNotes = buildHeuristicInsnNotes(d.instructions || []);
+        $('stab-disasm').appendChild(renderDisasmView(d.instructions, d.api_calls || [], d.dll || '', currentSyscall, d.sections || [], d.image_base || '', semanticNotes, callCommentMap, formatDisasmHeaderText(label, d, hdrMeta, currentSyscall, slotSection)));
+    }
     else
         $('stab-disasm').innerHTML = '<p class="no-data">No disassembly.</p>';
     if (hasCalls) {
@@ -1936,7 +2998,7 @@ function renderDump(msg) {
             indirect: [c.is_indirect ? (c.indirect_method || 'indirect') : '', c.switch_cases?.length ? `${c.switch_cases.length} cases` : '']
                 .filter(Boolean)
                 .join(' · '),
-            notes: [],
+            notes: callArgumentNotes.get(normalizeRva(c.rva)) || [],
             target_rva: c.target_rva || '',
             syscall: c.syscall || null,
         }));
@@ -2175,7 +3237,7 @@ function renderDump(msg) {
         rp.innerHTML = '';
         const pre = document.createElement('pre');
         pre.className = 'pre-block';
-        pre.textContent = d.recomp;
+        pre.textContent = annotateRecompText(d.recomp, d.api_calls || [], callCommentMap);
         rp.appendChild(pre);
     }
     if (hasHex) {
@@ -2183,7 +3245,7 @@ function renderDump(msg) {
         hp.innerHTML = '';
         hp.appendChild(renderHexView(d.instructions));
     }
-    activateDumpSubTab(st.activeDumpSubTab);
+    restoreDumpViewState(currentNavEntry());
     if (!isImportSlot)
         prefetchCallTargets(d.api_calls || []);
 }
@@ -2236,27 +3298,42 @@ function prefetchCallTargets(apiCalls) {
         _requestDump({ label: target.label, fn: null, dll: null, rva: target.rva }, true);
     }
 }
-function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null) {
+function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null, sections = [], imageBase = '', semanticNotes = new Map(), callCommentMap = new Map(), copyHeaderText = '') {
     const view = document.createElement('div');
     view.className = 'asm-view';
-    view.style.setProperty('--asm-meta-width', '280px');
+    view.style.setProperty('--asm-meta-width', `${st.asmMetaWidth}px`);
     const shell = document.createElement('div');
     shell.className = 'asm-shell';
     const insnPane = document.createElement('div');
     insnPane.className = 'asm-pane asm-pane-insn';
     const metaPane = document.createElement('div');
     metaPane.className = 'asm-pane asm-pane-meta';
+    const insnBody = document.createElement('div');
+    insnBody.className = 'asm-body';
+    const flowSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    flowSvg.classList.add('asm-flow');
     const insnRows = document.createElement('div');
     insnRows.className = 'asm-rows asm-rows-insn';
     const metaRows = document.createElement('div');
     metaRows.className = 'asm-rows asm-rows-meta';
     const insnBar = document.createElement('div');
     insnBar.className = 'asm-pane-bar';
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'searchbar asm-searchbar';
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.placeholder = 'Search disasm…';
+    searchInput.autocomplete = 'off';
+    searchInput.spellcheck = false;
+    const searchLabel = document.createElement('span');
+    searchLabel.className = 'count-lbl';
+    searchWrap.append(searchInput, searchLabel);
+    insnBar.appendChild(searchWrap);
     const insnCopy = document.createElement('button');
     insnCopy.className = 'asm-copy-btn';
-    insnCopy.title = 'Copy instructions and comments';
+    insnCopy.title = 'Copy function details, addresses, bytes, instructions, and comments';
     insnCopy.textContent = 'Copy';
-    insnCopy.addEventListener('click', () => copyText(extractPaneText(insnRows)));
+    insnCopy.addEventListener('click', () => copyText(formatDisasmCopyText(insnRows, metaRows, copyHeaderText)));
     insnBar.appendChild(insnCopy);
     const splitter = document.createElement('div');
     splitter.className = 'asm-splitter';
@@ -2266,9 +3343,11 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null) {
         if (call?.rva)
             callIndex.set(normalizeRva(call.rva), call);
     });
+    const insnRowByRva = new Map();
     insns.forEach(insn => {
         const leftRow = document.createElement('div');
         leftRow.className = 'asm-row asm-row-insn';
+        insnRowByRva.set(normalizeRva(insn.rva), leftRow);
         const rightRow = document.createElement('div');
         rightRow.className = 'asm-row asm-row-meta';
         const metaCall = callIndex.get(normalizeRva(insn.rva));
@@ -2284,7 +3363,8 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null) {
         mnemEl.textContent = mnem.padEnd(10, ' ');
         const opsEl = document.createElement('span');
         opsEl.className = 'asm-ops';
-        opsEl.innerHTML = highlightOperands(ops);
+        opsEl.innerHTML = highlightOperands(ops, sections, imageBase);
+        wireShortAddressSpans(opsEl);
         const codeEl = document.createElement('div');
         codeEl.className = 'asm-code';
         codeEl.append(mnemEl, opsEl);
@@ -2292,7 +3372,9 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null) {
         const isSyscallInsn = /^syscall$/i.test(String(insn.text || '').trim())
             || /^sysenter$/i.test(String(insn.text || '').trim())
             || /^int\s+2Eh$/i.test(String(insn.text || '').trim());
-        if (insn.comment || metaCall?.target_rva || metaCall?.dll || (isSyscallInsn && currentSyscall?.kernel_symbol)) {
+        const semantic = semanticNotes.get(normalizeRva(insn.rva));
+        const callSummary = callCommentMap.get(normalizeRva(insn.rva));
+        if (insn.comment || metaCall?.target_rva || metaCall?.dll || semantic || (isSyscallInsn && currentSyscall?.kernel_symbol)) {
             const cmtEl = document.createElement('span');
             cmtEl.className = 'asm-cmt';
             if (isSyscallInsn && currentSyscall?.kernel_symbol && currentSyscall?.kernel_module) {
@@ -2348,9 +3430,44 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null) {
                         navigate(target.func, target.dll);
                 });
                 cmtEl.appendChild(link);
+                if (callSummary) {
+                    cmtEl.append(` ; ${callSummary}`);
+                }
+                if (semantic && !String(cmtEl.textContent || '').includes(semantic)) {
+                    cmtEl.append(` ; ${semantic}`);
+                }
             }
             else {
-                cmtEl.textContent = `; ${resolvedLabel || insn.comment}`;
+                const rawComment = resolvedLabel || insn.comment || '';
+                // Annotate type-name references in parentheses as clickable links to the Types tab.
+                const typeRefMatch = rawComment.match(/^(.*)\(([A-Za-z_][A-Za-z0-9_*[\] :<>]*)\)\s*$/);
+                const candidateType = typeRefMatch ? typeRefMatch[2].trim().replace(/\s*[*[\]]+\s*$/, '').trim() : null;
+                const typeEntry = candidateType && st.typesByName.size > 0
+                    ? (st.typesByName.get(candidateType.toLowerCase()) || st.typesByName.get(canonicalTypeName(candidateType)))
+                    : null;
+                if (typeEntry) {
+                    cmtEl.innerHTML = `; ${shortenAddressMarkup(typeRefMatch[1].trim(), sections, imageBase)} `;
+                    wireShortAddressSpans(cmtEl);
+                    const typeLink = document.createElement('span');
+                    typeLink.className = 'cmt-link cmt-link-type';
+                    typeLink.textContent = `(${candidateType})`;
+                    typeLink.title = `${typeEntry.kind} · ${typeEntry.size}B · ${typeEntry.members?.length || 0} member(s) — navigate to Types`;
+                    typeLink.addEventListener('click', () => {
+                        st._pendingTypeNav = candidateType.toLowerCase();
+                        activateTab('types');
+                    });
+                    cmtEl.appendChild(typeLink);
+                } else {
+                    cmtEl.innerHTML = `; ${shortenAddressMarkup(rawComment, sections, imageBase)}`;
+                    wireShortAddressSpans(cmtEl);
+                }
+                if (callSummary && !String(cmtEl.textContent || '').includes(callSummary)) {
+                    cmtEl.append(` ; ${callSummary}`);
+                }
+                if (semantic) {
+                    const merged = composeSemanticComment(cmtEl.textContent || '', semantic);
+                    cmtEl.textContent = merged ? `; ${merged}` : '';
+                }
             }
             codeEl.appendChild(cmtEl);
             }
@@ -2367,14 +3484,146 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null) {
     });
     const main = document.createElement('div');
     main.className = 'asm-main';
-    insnPane.append(insnBar, insnRows);
+    insnBody.append(flowSvg, insnRows);
+    insnPane.append(insnBar, insnBody);
     metaPane.append(metaRows);
     shell.append(insnPane, splitter, metaPane);
     main.append(shell);
     view.appendChild(main);
+    wireDisasmSearch(searchInput, searchLabel, insnRows, metaRows);
     wireAsmPaneSync(insnPane, metaPane);
     wireAsmSplitter(view, splitter);
+    wireAsmFlow(view, insnPane, insnBody, flowSvg, insns, apiCalls, imageName, insnRowByRva);
     return view;
+}
+function collectAsmFlowEdges(insns, apiCalls, imageName, rowByRva) {
+    const callIndex = new Map();
+    const rowList = insns.map(insn => normalizeRva(insn?.rva)).filter(Boolean);
+    const rowIndex = new Map(rowList.map((rva, idx) => [rva, idx]));
+    (apiCalls || []).forEach(call => {
+        if (call?.rva)
+            callIndex.set(normalizeRva(call.rva), call);
+    });
+    const edges = [];
+    for (const insn of insns || []) {
+        const srcRva = normalizeRva(insn?.rva);
+        if (!srcRva || !rowByRva.has(srcRva))
+            continue;
+        const text = String(insn?.text || '').trim().toLowerCase();
+        const mnemonic = text.split(/\s+/, 1)[0] || '';
+        const metaCall = callIndex.get(srcRva);
+        let targetRva = '';
+        let kind = '';
+        if (metaCall?.target_rva && !metaCall?.dll) {
+            targetRva = normalizeRva(metaCall.target_rva);
+            kind = text.startsWith('call ') ? 'call' : (JCC_MNEMS.has(mnemonic) ? 'jcc' : 'jump');
+        }
+        else {
+            const parsed = parseCommentTarget(insn?.comment, imageName);
+            if (parsed?.rva) {
+                targetRva = normalizeRva(parsed.rva);
+                if (text.startsWith('call '))
+                    kind = 'call';
+                else if (text.startsWith('jmp '))
+                    kind = 'jump';
+                else if (JCC_MNEMS.has(mnemonic))
+                    kind = 'jcc';
+            }
+        }
+        if (!targetRva || !rowByRva.has(targetRva) || targetRva === srcRva || !kind)
+            continue;
+        const srcIdx = rowIndex.get(srcRva);
+        const dstIdx = rowIndex.get(targetRva);
+        if (srcIdx == null || dstIdx == null)
+            continue;
+        edges.push({
+            srcRva,
+            targetRva,
+            kind,
+            srcIdx,
+            dstIdx,
+            start: Math.min(srcIdx, dstIdx),
+            end: Math.max(srcIdx, dstIdx),
+            span: Math.abs(dstIdx - srcIdx),
+            dir: dstIdx > srcIdx ? 'down' : 'up',
+        });
+    }
+    return edges;
+}
+function assignAsmFlowLanes(edges) {
+    const sorted = [...edges].sort((a, b) =>
+        a.span - b.span
+        || (a.kind === 'jcc' ? -1 : 0) - (b.kind === 'jcc' ? -1 : 0)
+        || a.start - b.start
+        || a.srcIdx - b.srcIdx);
+    const lanes = [];
+    for (const edge of sorted) {
+        let lane = 0;
+        for (; lane < lanes.length; lane++) {
+            const conflict = lanes[lane].some(other => !(edge.end < other.start || edge.start > other.end));
+            if (!conflict)
+                break;
+        }
+        if (!lanes[lane])
+            lanes[lane] = [];
+        lanes[lane].push(edge);
+        edge.lane = lane;
+    }
+    return { edges: sorted, laneCount: lanes.length };
+}
+function wireAsmFlow(view, insnPane, insnBody, flowSvg, insns, apiCalls, imageName, rowByRva) {
+    const render = () => {
+        const rawEdges = collectAsmFlowEdges(insns, apiCalls, imageName, rowByRva);
+        const { edges, laneCount } = assignAsmFlowLanes(rawEdges);
+        const width = Math.max(56, 28 + laneCount * 12);
+        const height = Math.max(insnRowsHeight(insnRowsFromBody(insnBody)), insnBody.scrollHeight || 0);
+        flowSvg.setAttribute('width', String(width));
+        flowSvg.setAttribute('height', String(height));
+        flowSvg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        flowSvg.innerHTML = '';
+        flowSvg.style.width = `${width}px`;
+        insnBody.style.setProperty('--asm-flow-width', `${width}px`);
+        for (const edge of edges) {
+            const src = rowByRva.get(edge.srcRva);
+            const dst = rowByRva.get(edge.targetRva);
+            if (!src || !dst)
+                continue;
+            const y1 = src.offsetTop + Math.max(8, Math.floor(src.offsetHeight / 2));
+            const y2 = dst.offsetTop + Math.max(8, Math.floor(dst.offsetHeight / 2));
+            const instructionX = width - 8;
+            const laneX = instructionX - 10 - edge.lane * 12;
+            const color = edge.kind === 'call'
+                ? 'rgba(78,201,176,.95)'
+                : edge.kind === 'jcc'
+                    ? 'rgba(220,220,170,.98)'
+                    : 'rgba(86,156,214,.95)';
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', `M ${instructionX} ${y1} H ${laneX} V ${y2} H ${instructionX - 2}`);
+            path.setAttribute('fill', 'none');
+            path.setAttribute('stroke', color);
+            path.setAttribute('stroke-width', edge.kind === 'call' ? '1.8' : edge.kind === 'jcc' ? '1.6' : '1.4');
+            path.setAttribute('stroke-linecap', 'round');
+            path.setAttribute('stroke-linejoin', 'round');
+            path.setAttribute('opacity', edge.kind === 'call' ? '0.78' : '0.96');
+            flowSvg.appendChild(path);
+            const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            arrow.setAttribute('d', `M ${instructionX - 2} ${y2} l -6 -4 v 8 z`);
+            arrow.setAttribute('fill', color);
+            flowSvg.appendChild(arrow);
+        }
+    };
+    const schedule = () => requestAnimationFrame(render);
+    schedule();
+    insnPane.addEventListener('scroll', schedule);
+    const resizeObs = new ResizeObserver(schedule);
+    resizeObs.observe(insnPane);
+    resizeObs.observe(insnBody);
+}
+function insnRowsFromBody(insnBody) {
+    return insnBody.querySelector('.asm-rows-insn');
+}
+function insnRowsHeight(rows) {
+    return rows instanceof HTMLElement ? rows.scrollHeight : 0;
 }
 function wireAsmPaneSync(leftPane, rightPane) {
     let syncing = false;
@@ -2393,6 +3642,153 @@ function extractPaneText(node) {
         .map(row => row.textContent || '')
         .join('\n')
         .trim();
+}
+function extractPanelText(node) {
+    if (!(node instanceof HTMLElement))
+        return '';
+    return String(node.textContent || '')
+        .replace(/\r/g, '')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+function extractDisasmText(insnRows, metaRows) {
+    const leftRows = Array.from(insnRows.querySelectorAll('.asm-row'));
+    const rightRows = Array.from(metaRows.querySelectorAll('.asm-row'));
+    return leftRows.map((row, idx) => {
+        const metaRow = rightRows[idx];
+        const rva = metaRow?.querySelector('.asm-rva')?.textContent?.trim() || '';
+        const bytes = metaRow?.querySelector('.asm-bytes')?.textContent?.trim() || '';
+        const code = row.textContent?.trim() || '';
+        return [rva, bytes, code].filter(Boolean).join('  ');
+    }).join('\n').trim();
+}
+function formatDisasmCopyText(insnRows, metaRows, headerText = '') {
+    const body = extractDisasmText(insnRows, metaRows);
+    return [String(headerText || '').trim(), body].filter(Boolean).join('\n\n').trim();
+}
+function collectDumpExportText() {
+    const title = currentNavEntry()?.label || 'dump';
+    const header = extractPanelText($('dump-header'));
+    if (st.activeDumpSubTab === 'disasm') {
+        const panel = $('stab-disasm');
+        const insnRows = panel?.querySelector('.asm-rows-insn');
+        const metaRows = panel?.querySelector('.asm-rows-meta');
+        if (insnRows instanceof HTMLElement && metaRows instanceof HTMLElement) {
+            return {
+                title: `${title}-disasm`,
+                content: formatDisasmCopyText(insnRows, metaRows, header),
+            };
+        }
+    }
+    const activePanel = $(`stab-${st.activeDumpSubTab}`);
+    return {
+        title: `${title}-${st.activeDumpSubTab}`,
+        content: [header, extractPanelText(activePanel)].filter(Boolean).join('\n\n').trim(),
+    };
+}
+function exportCurrentView() {
+    let title = st.activeTopTab || 'overview';
+    let content = '';
+    if (st.activeTopTab === 'dump') {
+        const dumpExport = collectDumpExportText();
+        title = dumpExport.title;
+        content = dumpExport.content;
+    } else {
+        const panel = $(`panel-${st.activeTopTab}`);
+        content = extractPanelText(panel);
+    }
+    if (!content)
+        return;
+    vscode.postMessage({
+        command: 'open_text_report',
+        title,
+        content,
+        language: 'text',
+    });
+}
+function formatDisasmHeaderText(label, d, hdrMeta, currentSyscall = null, slotSection = null) {
+    const insns = Array.isArray(d?.instructions) ? d.instructions : [];
+    const stack = summarizeStack(insns);
+    const regs = summarizeRegisters(insns);
+    const lines = [`Function: ${label}`];
+    if (d?.dll)
+        lines.push(`Module: ${d.dll}`);
+    if (d?.rva)
+        lines.push(`RVA: ${d.rva}`);
+    if (slotSection?.name)
+        lines.push(`Section: ${slotSection.name}`);
+    if (d?.arch)
+        lines.push(`Arch: ${d.arch}`);
+    if (d?.pdb_loaded)
+        lines.push('Symbols: PDB loaded');
+    if (hdrMeta?.stackSize)
+        lines.push(`Stack: ${hdrMeta.stackSize}`);
+    if (stack.shadowSpace)
+        lines.push('Shadow Space: present');
+    if (regs.length)
+        lines.push(`Registers: ${regs.map(reg => `${reg.reg}=${reg.summary}`).join(' | ')}`);
+    if (stack.items.length)
+        lines.push(`Stack Slots: ${stack.items.map(item => `${item.slot}=${item.value}`).join(' | ')}`);
+    if (hdrMeta?.xrefCount != null)
+        lines.push(`Xrefs: ${hdrMeta.xrefCount}`);
+    if (currentSyscall?.service_number != null)
+        lines.push(`SSN: ${currentSyscall.service_number}`);
+    if (currentSyscall?.kernel_module && currentSyscall?.kernel_symbol) {
+        const kernelTarget = `${currentSyscall.kernel_module}!${currentSyscall.kernel_symbol}${currentSyscall.kernel_rva ? ` @ ${currentSyscall.kernel_rva}` : ''}`;
+        lines.push(`Kernel: ${kernelTarget}`);
+    }
+    if (Array.isArray(d?.hook_indicators) && d.hook_indicators.length)
+        lines.push(`Hooks: ${d.hook_indicators.join(', ')}`);
+    return lines.join('\n').trim();
+}
+function wireDisasmSearch(input, label, insnRows, metaRows) {
+    const leftRows = Array.from(insnRows.querySelectorAll('.asm-row'));
+    const rightRows = Array.from(metaRows.querySelectorAll('.asm-row'));
+    const update = () => {
+        const raw = input.value.trim();
+        let re = null;
+        let errEl = input.parentElement?.querySelector('.regex-err') as HTMLSpanElement | null;
+        if (!errEl) {
+            errEl = document.createElement('span');
+            errEl.className = 'regex-err';
+            input.parentElement?.appendChild(errEl);
+        }
+        if (raw) {
+            try {
+                re = new RegExp(raw, 'i');
+                input.classList.remove('invalid');
+                errEl.textContent = '';
+            } catch (ex) {
+                input.classList.add('invalid');
+                errEl.textContent = ex instanceof Error ? ex.message : String(ex);
+                return;
+            }
+        } else {
+            input.classList.remove('invalid');
+            errEl.textContent = '';
+        }
+
+        let matches = 0;
+        leftRows.forEach((row, idx) => {
+            const metaRow = rightRows[idx];
+            const hit = !!re && re.test(`${row.textContent || ''} ${metaRow?.textContent || ''}`);
+            row.classList.toggle('asm-search-hit', hit);
+            metaRow?.classList.toggle('asm-search-hit', hit);
+            if (hit)
+                matches++;
+        });
+        label.textContent = re ? `${matches} hit${matches === 1 ? '' : 's'}` : '';
+    };
+    input.addEventListener('input', update);
+    input.addEventListener('keydown', evt => {
+        if (evt.key !== 'Enter')
+            return;
+        const hit = insnRows.querySelector('.asm-row.asm-search-hit');
+        if (hit instanceof HTMLElement)
+            hit.scrollIntoView({ block: 'center' });
+    });
+    update();
 }
 function classifyAsmRow(insn, metaCall) {
     const text = String(insn.text || '').toLowerCase();
@@ -2423,7 +3819,9 @@ function wireAsmSplitter(view, splitter) {
     const setWidthFromClientX = clientX => {
         const rect = view.getBoundingClientRect();
         const next = Math.max(minMeta, Math.min(maxMeta, rect.right - clientX));
-        view.style.setProperty('--asm-meta-width', `${Math.round(next)}px`);
+        st.asmMetaWidth = Math.round(next);
+        view.style.setProperty('--asm-meta-width', `${st.asmMetaWidth}px`);
+        persistUiState();
     };
     splitter.addEventListener('mousedown', e => {
         e.preventDefault();
@@ -2442,13 +3840,19 @@ function wireAsmSplitter(view, splitter) {
         document.body.classList.remove('asm-resizing');
     });
 }
-function highlightOperands(raw) {
+function highlightOperands(raw, sections = [], imageBase = '') {
     if (!raw)
         return '';
     let ops = raw.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     ops = ops.replace(/\b(BYTE|WORD|DWORD|QWORD|XMMWORD|YMMWORD|ZMMWORD|TWORD|OWORD)\s+PTR\b/g, '<span class="asm-size">$1 PTR</span>');
     ops = ops.replace(/\b(__?imp_\w+)\b/g, '<span class="asm-imp">$1</span>');
-    ops = ops.replace(/\b(0[xX][0-9A-Fa-f]+)\b/g, '<span class="asm-imm">$1</span>');
+    ops = ops.replace(/\b(0[xX][0-9A-Fa-f]+|[0-9A-Fa-f]+h)\b/g, '<span class="asm-imm">$1</span>');
+    ops = ops.replace(/<span class="asm-imm">(0[xX][0-9A-Fa-f]+|[0-9A-Fa-f]+h)<\/span>/g, (_, rawHex) => {
+        const shortened = shortenAddressForImage(rawHex, sections, imageBase);
+        if (!shortened)
+            return `<span class="asm-imm">${rawHex}</span>`;
+        return `<span class="asm-imm asm-addr-short" data-raw="${esc(shortened.raw)}" data-short="${esc(shortened.short)}">${esc(shortened.short)}</span>`;
+    });
     ops = ops.replace(/\b([re]?(?:ax|bx|cx|dx|si|di|bp|sp)|r(?:[8-9]|1[0-5])(?:d|w|b)?|[abcd][lh]|rip|eip|xmm\d+|ymm\d+|zmm\d+)\b/gi, '<span class="asm-reg">$1</span>');
     ops = ops.replace(/\b([A-Z][A-Za-z0-9_]{3,})\b/g, (m) => REGS.has(m.toLowerCase()) ? m : `<span class="asm-sym">${m}</span>`);
     return ops;

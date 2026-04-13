@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { unwrapObjectPayload } from './payloads';
 import { getRunTraceHistory, runJson, RunOptions, subscribeRunTrace } from './runner';
 
 interface PendingNavigation {
@@ -192,6 +193,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
         });
 
         const send = (msg: object): void => { webview.postMessage(msg); };
+        let symReloadToken = 0;
 
         function cfgOpts(): RunOptions {
             const cfg = vscode.workspace.getConfiguration('resx');
@@ -223,13 +225,14 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
                 case 'explain': {
                     const result = await runJson(this.context, ['explain', msg.name, '--api']);
-                    const d = result.data;
+                    const d = unwrapObjectPayload<any>(result.data, 'explain');
                     const useful = d && (d.exact_match || d.prefix || (d.chunks && d.chunks.length > 0));
                     send({ type: 'explain_result', name: msg.name, data: useful ? d : null });
                     break;
                 }
 
                 case 'reload_syms': {
+                    const reloadToken = ++symReloadToken;
                     const opts: RunOptions = {
                         symPaths: msg.symPaths || [],
                         pdbFile:  msg.pdbFile  || undefined,
@@ -242,8 +245,10 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         opts,
                         `RESX: loading PDB symbols for ${path.basename(filePath)}`,
                     );
+                    if (reloadToken !== symReloadToken) break;
                     send({ type: 'syms', ...result });
                     const typesResult = await runJson(this.context, ['types', filePath], opts);
+                    if (reloadToken !== symReloadToken) break;
                     send({ type: 'types', ...typesResult });
                     break;
                 }
@@ -266,6 +271,18 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 case 'open_recomp': {
                     const doc = await vscode.workspace.openTextDocument({
                         language: 'c',
+                        content: msg.content || '',
+                    });
+                    await vscode.window.showTextDocument(doc, {
+                        preview: false,
+                        viewColumn: vscode.ViewColumn.Beside,
+                    });
+                    break;
+                }
+
+                case 'open_text_report': {
+                    const doc = await vscode.workspace.openTextDocument({
+                        language: msg.language || 'text',
                         content: msg.content || '',
                     });
                     await vscode.window.showTextDocument(doc, {
@@ -362,19 +379,22 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     <span id="fname">${escapeHtml(fileName)}</span>
     <nav id="tabs">
       <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="entry">Entry</button>
       <button class="tab" data-tab="triage">Triage</button>
       <button class="tab" data-tab="sections">Sections</button>
       <button class="tab" data-tab="exports">Exports</button>
       <button class="tab" data-tab="imports">Imports</button>
       <button class="tab" data-tab="symbols">Symbols</button>
       <button class="tab" data-tab="types">Types</button>
-      <button class="tab" data-tab="dev">Dev</button>
       <button class="tab" id="tab-dump" data-tab="dump" style="display:none">Dump</button>
+      <button class="tab tab-dev" data-tab="dev">Dev</button>
     </nav>
+    <button id="export-btn" title="Export current view">&#10515; Export</button>
     <button id="pdb-btn" title="Symbol &amp; PDB settings">&#9881; Symbols</button>
   </div>
   <div id="panels">
     <div id="panel-overview"  class="panel active"><p class="loading">Analyzing&hellip;</p></div>
+    <div id="panel-entry"     class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-triage"    class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-sections"  class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-exports"   class="panel"><p class="loading">Analyzing&hellip;</p></div>

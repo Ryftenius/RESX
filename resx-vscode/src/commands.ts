@@ -2,6 +2,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ResxEditorProvider } from './editor';
+import { unwrapListPayload } from './payloads';
 import { runJson, RunOptions } from './runner';
 
 interface LocateHit {
@@ -101,7 +102,7 @@ async function openLocate(context: vscode.ExtensionContext, kind: 'locate' | 'lo
         return;
     }
 
-    const hits = Array.isArray(result.data) ? result.data as LocateHit[] : [];
+    const hits = unwrapListPayload<LocateHit>(result.data, 'matches');
     if (!hits.length) {
         void vscode.window.showWarningMessage(`No matches found for ${query}.`);
         return;
@@ -330,9 +331,10 @@ async function refreshLocateIndex(context: vscode.ExtensionContext): Promise<str
     const results = await Promise.all(
         preferred.map(async module => {
             const result = await runJson(context, ['eat', module.modulePath]);
-            return result.error || !Array.isArray(result.data)
+            const exports = unwrapListPayload<ExportHit>(result.data, 'exports');
+            return result.error || !exports.length
                 ? []
-                : (result.data as ExportHit[]);
+                : exports;
         }),
     );
 
@@ -379,8 +381,8 @@ async function pickDumpTarget(context: vscode.ExtensionContext, module: ModulePi
         return undefined;
     }
 
-    const exports = Array.isArray(eatResult.data) ? eatResult.data as ExportHit[] : [];
-    const symbols = Array.isArray(symsResult.data) ? symsResult.data as SymbolHit[] : [];
+    const exports = unwrapListPayload<ExportHit>(eatResult.data, 'exports');
+    const symbols = unwrapListPayload<SymbolHit>(symsResult.data, 'symbols');
     const merged = new Map<string, DumpTargetPick>();
 
     for (const hit of exports) {
