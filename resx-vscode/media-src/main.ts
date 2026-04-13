@@ -804,7 +804,71 @@ function simplifyArgumentValue(raw, sections = [], imageBase = '') {
         .replace(/\s+/g, ' ')
         .trim();
 }
-function inferRegisterValueBefore(insns, idx, reg, sections = [], imageBase = '', semanticNotes = new Map()) {
+function parseIntegerValue(value) {
+    const raw = String(value || '').trim();
+    if (!raw)
+        return null;
+    if (/^-?\d+$/.test(raw)) {
+        try {
+            return BigInt(raw);
+        }
+        catch {
+            return null;
+        }
+    }
+    if (/^(?:0x[0-9A-Fa-f]+|[0-9A-Fa-f]+h)$/i.test(raw)) {
+        return parseAddressValue(raw);
+    }
+    return null;
+}
+function parseStringRefEntry(text) {
+    const raw = String(text || '').trim();
+    if (!raw)
+        return null;
+    const match = raw.match(/^(0x[0-9A-Fa-f]+)(?:\s+len\s+(0x[0-9A-Fa-f]+))?\s+→\s+(L?"(?:[^"\\]|\\.)*")$/);
+    if (!match)
+        return null;
+    return {
+        rva: normalizeRva(match[1]),
+        len: match[2] ? normalizeRva(match[2]) : '',
+        value: match[3],
+    };
+}
+function buildStringRefMaps(strings = []) {
+    const byRva = new Map();
+    const byRvaLen = new Map();
+    for (const entry of strings || []) {
+        const parsed = parseStringRefEntry(entry);
+        if (!parsed)
+            continue;
+        if (!byRva.has(parsed.rva))
+            byRva.set(parsed.rva, parsed.value);
+        if (parsed.len)
+            byRvaLen.set(`${parsed.rva}:${parsed.len.toLowerCase()}`, parsed.value);
+    }
+    return { byRva, byRvaLen };
+}
+function resolveOperandRva(raw, sections = [], imageBase = '') {
+    const text = String(raw || '').trim();
+    if (!text)
+        return '';
+    const addressMatch = text.match(/(?:^|[\[\s,])(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+h)(?:$|[\]\s,])/i);
+    if (addressMatch) {
+        const shortened = shortenAddressForImage(addressMatch[1], sections, imageBase);
+        if (shortened?.rva)
+            return normalizeRva(shortened.rva);
+    }
+    const sectionMatch = text.match(/\[?([.A-Za-z0-9_$]+)\+(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+h)\]?/);
+    if (!sectionMatch)
+        return '';
+    const section = (sections || []).find(sec => String(sec?.name || '').toLowerCase() === sectionMatch[1].toLowerCase());
+    const sectionBase = parseAddressValue(section?.rva);
+    const offset = parseIntegerValue(sectionMatch[2]);
+    if (sectionBase == null || offset == null)
+        return '';
+    return formatAddressHex(sectionBase + offset);
+}
+function inferRegisterValueBefore(insns, idx, reg, sections = [], imageBase = '', semanticNotes = new Map(), stringRefs = { byRva: new Map(), byRvaLen: new Map() }) {
     const want = registerFamily(reg);
     for (let i = idx - 1, seen = 0; i >= 0 && seen < 20; i--, seen++) {
         const text = String(insns[i]?.text || '').trim();
@@ -815,6 +879,12 @@ function inferRegisterValueBefore(insns, idx, reg, sections = [], imageBase = ''
             const semantic = semanticNotes.get(normalizeRva(insns[i]?.rva));
             if (semantic)
                 return semantic;
+            const sourceRva = resolveOperandRva(mov[3], sections, imageBase);
+            if (sourceRva) {
+                const literal = stringRefs.byRva?.get(sourceRva);
+                if (literal)
+                    return literal;
+            }
             if (insns[i]?.comment)
                 return simplifyArgumentValue(insns[i].comment, sections, imageBase);
             return simplifyArgumentValue(mov[3], sections, imageBase);
@@ -830,7 +900,7 @@ function inferRegisterValueBefore(insns, idx, reg, sections = [], imageBase = ''
     }
     return '';
 }
-function inferCallArguments(insns, callRva, arch, sections = [], imageBase = '', semanticNotes = new Map()) {
+function inferCallArguments(insns, callRva, arch, sections = [], imageBase = '', semanticNotes = new Map(), stringRefs = { byRva: new Map(), byRvaLen: new Map() }) {
     const targetRva = normalizeRva(callRva);
     const idx = insns.findIndex(insn => normalizeRva(insn?.rva) === targetRva);
     if (idx < 0)
@@ -838,7 +908,7 @@ function inferCallArguments(insns, callRva, arch, sections = [], imageBase = '',
     if (String(arch || '').includes('64')) {
         return ['rcx', 'rdx', 'r8', 'r9']
             .map(reg => {
-            const value = inferRegisterValueBefore(insns, idx, reg, sections, imageBase, semanticNotes);
+            const value = inferRegisterValueBefore(insns, idx, reg, sections, imageBase, semanticNotes, stringRefs);
             return value ? `${reg}=${value}` : '';
         })
             .filter(Boolean);
@@ -860,11 +930,49 @@ function inferCallArguments(insns, callRva, arch, sections = [], imageBase = '',
     }
     return args;
 }
-function buildCallArgumentNotes(insns, apiCalls, arch, sections = [], imageBase = '') {
+function resolveCallStringSlices(args, stringRefs, sections = [], imageBase = '') {
+    const parsed = new Map();
+    for (const arg of args || []) {
+        const parts = String(arg).split('=');
+        const key = String(parts[0] || '').trim().toLowerCase();
+        const value = parts.slice(1).join('=').trim();
+        if (key && value)
+            parsed.set(key, value);
+    }
+    const pairs = [['rcx', 'rdx'], ['r8', 'r9'], ['arg0', 'arg1'], ['arg2', 'arg3']];
+    for (const [ptrReg, lenReg] of pairs) {
+        const ptrValue = parsed.get(ptrReg);
+        const lenValue = parsed.get(lenReg);
+        if (!ptrValue || !lenValue)
+            continue;
+        const rva = resolveOperandRva(ptrValue, sections, imageBase);
+        const len = parseIntegerValue(lenValue);
+        if (!rva || len == null)
+            continue;
+        const exact = stringRefs.byRvaLen?.get(`${normalizeRva(rva)}:${normalizeRva(`0x${len.toString(16)}`)?.toLowerCase()}`);
+        if (exact)
+            return { literal: exact, pointer: ptrReg, length: lenReg };
+        const fallback = stringRefs.byRva?.get(normalizeRva(rva));
+        if (fallback)
+            return { literal: fallback, pointer: ptrReg, length: lenReg };
+    }
+    return null;
+}
+function buildCallArgumentNotes(insns, apiCalls, arch, sections = [], imageBase = '', strings = []) {
     const notes = new Map();
     const semanticNotes = buildHeuristicInsnNotes(insns || []);
+    const stringRefs = buildStringRefMaps(strings || []);
     for (const call of apiCalls || []) {
-        const args = inferCallArguments(insns || [], call?.rva, arch, sections, imageBase, semanticNotes);
+        let args = inferCallArguments(insns || [], call?.rva, arch, sections, imageBase, semanticNotes, stringRefs);
+        const stringSlice = resolveCallStringSlices(args, stringRefs, sections, imageBase);
+        if (stringSlice) {
+            args = args.map(arg => {
+                const key = String(arg).split('=')[0].trim().toLowerCase();
+                if (key === stringSlice.pointer)
+                    return `${key}=${stringSlice.literal}`;
+                return arg;
+            });
+        }
         const semanticCall = summarizeCallSemantics(call, args);
         const callNotes = semanticCall ? [semanticCall] : (args.length ? [args.join(', ')] : []);
         if (callNotes.length)
@@ -1594,8 +1702,8 @@ function parseXrefEntry(text) {
     if (!raw)
         return null;
     const site = raw.match(/\[site\s+(0x[0-9A-Fa-f]+)\]/);
-    const kind = raw.match(/^(CALL|JMP)\b/);
-    const owner = raw.match(/^(?:CALL|JMP)\s+(.+?)\s+\[site\b/);
+    const kind = raw.match(/^(CALL|JMP|STARTUP(?:-TLS)?)\b/);
+    const owner = raw.match(/^(?:CALL|JMP|STARTUP(?:-TLS)?)\s+(.+?)\s+\[site\b/);
     const target = raw.match(/->\s+(.+?)\s+\[(?:target|IAT)\s+/);
     return {
         raw,
@@ -2893,7 +3001,7 @@ function renderDump(msg) {
     const hasCfg = !isImportSlot && d.cfg?.trim();
     const hasRecomp = !isImportSlot && d.recomp?.trim();
     const hasHex = !isImportSlot && hasInsns;
-    const callArgumentNotes = buildCallArgumentNotes(d.instructions || [], d.api_calls || [], d.arch || '', d.sections || [], d.image_base || '');
+    const callArgumentNotes = buildCallArgumentNotes(d.instructions || [], d.api_calls || [], d.arch || '', d.sections || [], d.image_base || '', d.strings || []);
     const callCommentMap = buildCallCommentMap(callArgumentNotes);
     document.querySelectorAll('.stab').forEach(btn => {
         const s = btn.dataset.stab;
