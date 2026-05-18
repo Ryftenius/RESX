@@ -7,6 +7,8 @@ const TOP_TABS = new Set([
     'imports',
     'symbols',
     'types',
+    'flow',
+    'scan',
     'dump',
     'dev',
 ]);

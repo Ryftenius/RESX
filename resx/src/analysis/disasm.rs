@@ -127,8 +127,30 @@ pub fn disassemble_at(
         ));
     }
 
-    let mut chunk = &raw[file_off..];
-    if cfg.max_bytes > 0 && chunk.len() > cfg.max_bytes {
+    let runtime_function = crate::formats::pe::read_runtime_function(pe, raw, start_rva);
+    let runtime_size = runtime_function
+        .as_ref()
+        .and_then(|func| func.end_rva.checked_sub(start_rva))
+        .map(|size| size as usize)
+        .filter(|&size| size > 0);
+
+    let section_limit = pe
+        .rva_to_section(start_rva)
+        .and_then(|section| {
+            section
+                .virtual_address
+                .saturating_add(section.virtual_size.max(section.raw_size))
+                .checked_sub(start_rva)
+        })
+        .map(|size| size as usize)
+        .unwrap_or_else(|| raw.len().saturating_sub(file_off));
+
+    let decode_len = runtime_size
+        .unwrap_or(section_limit)
+        .min(section_limit)
+        .min(raw.len().saturating_sub(file_off));
+    let mut chunk = &raw[file_off..file_off + decode_len];
+    if runtime_size.is_none() && cfg.max_bytes > 0 && chunk.len() > cfg.max_bytes {
         chunk = &chunk[..cfg.max_bytes];
     }
 
@@ -165,7 +187,7 @@ pub fn disassemble_at(
     let mut padding_after_ret = 0usize;
 
     while pos < chunk.len() {
-        if cfg.max_insns > 0 && insns.len() >= cfg.max_insns {
+        if runtime_size.is_none() && cfg.max_insns > 0 && insns.len() >= cfg.max_insns {
             break;
         }
 
@@ -178,6 +200,9 @@ pub fn disassemble_at(
         decoder.decode_out(&mut iced);
 
         let i_len = iced.len();
+        if i_len == 0 {
+            break;
+        }
         let i_bytes: Vec<u8> = chunk[pos..pos + i_len.min(chunk.len() - pos)].to_vec();
         let pc = ip + pos as u64;
         let m = iced.mnemonic();
@@ -237,6 +262,14 @@ pub fn disassemble_at(
             }
         }
 
+        if cfg.hostile {
+            if let Some(note) = suspicious_flow_note(&iced) {
+                if !comment_parts.iter().any(|p| p == &note) {
+                    comment_parts.push(note);
+                }
+            }
+        }
+
         let comment = comment_parts.join(" | ");
         let is_int3 = i_bytes.len() == 1 && i_bytes[0] == 0xCC;
         let is_all_pad = i_bytes.iter().all(|&b| b == 0xCC || b == 0x90 || b == 0x00);
@@ -259,23 +292,25 @@ pub fn disassemble_at(
 
         insns.push(insn);
 
-        if is_ret(m) {
+        if runtime_size.is_none() && is_ret(m) {
             last_ret_idx = Some(insns.len() - 1);
             padding_after_ret = 0;
-        } else if let Some(ret_idx) = last_ret_idx {
-            if is_all_pad || m == Mnemonic::Nop || is_int3 {
-                padding_after_ret += i_len;
-                if padding_after_ret >= 3 {
-                    insns.truncate(ret_idx + 1);
-                    break;
+        } else if runtime_size.is_none() {
+            if let Some(ret_idx) = last_ret_idx {
+                if is_all_pad || m == Mnemonic::Nop || is_int3 {
+                    padding_after_ret += i_len;
+                    if padding_after_ret >= 3 {
+                        insns.truncate(ret_idx + 1);
+                        break;
+                    }
+                } else {
+                    last_ret_idx = None;
+                    padding_after_ret = 0;
                 }
-            } else {
-                last_ret_idx = None;
-                padding_after_ret = 0;
             }
         }
 
-        if last_ret_idx.is_none() && is_int3 {
+        if runtime_size.is_none() && last_ret_idx.is_none() && is_int3 {
             break;
         }
 
@@ -800,22 +835,264 @@ fn register_short_name(reg: Register) -> String {
     format!("{:?}", reg.full_register()).to_lowercase()
 }
 
-/// Describes how an indirect register's value originated (backward dataflow, up to 16 insns).
+/// Describes how an indirect register's value originated.
 struct RegSource {
     label: String,
     dll: String,
     is_import: bool,
-    /// Human-readable description of how the register was loaded, e.g. "rax ← IAT [rip+0x1234]".
+    /// Human-readable description of how the register was loaded.
     method: String,
     target_rva: u32,
     iat_slot_rva: u32,
 }
 
-/// Scan backwards from `call_idx` looking for the most recent def of `target_reg`.
-/// Handles:
-///   - `mov reg, [rip+rel32]` or `mov reg, [abs]`  → IAT resolution attempt
-///   - `add reg, other`                             → returns None (table-dispatch, handled upstream)
-///   - Anything else                                → returns None
+/// Expression type for backward register slicing.
+#[derive(Debug, Clone)]
+enum RegExpr {
+    Unknown,
+    Imm(u64),
+    Va(u64),
+    Import {
+        dll: String,
+        func: String,
+        slot_rva: u32,
+    },
+    Derived(String),
+}
+
+fn combine_add(base: RegExpr, rhs: u64) -> RegExpr {
+    match base {
+        RegExpr::Imm(v) => RegExpr::Imm(v.wrapping_add(rhs)),
+        RegExpr::Va(v) => RegExpr::Va(v.wrapping_add(rhs)),
+        RegExpr::Import {
+            dll,
+            func,
+            slot_rva,
+        } => RegExpr::Derived(format!(
+            "{dll}!{func} @IAT+0x{rhs:X} [slot 0x{slot_rva:08X}]"
+        )),
+        RegExpr::Derived(s) => RegExpr::Derived(format!("({s}) + 0x{rhs:X}")),
+        RegExpr::Unknown => RegExpr::Unknown,
+    }
+}
+
+fn combine_sub(base: RegExpr, rhs: u64) -> RegExpr {
+    match base {
+        RegExpr::Imm(v) => RegExpr::Imm(v.wrapping_sub(rhs)),
+        RegExpr::Va(v) => RegExpr::Va(v.wrapping_sub(rhs)),
+        RegExpr::Import {
+            dll,
+            func,
+            slot_rva,
+        } => RegExpr::Derived(format!(
+            "{dll}!{func} @IAT-0x{rhs:X} [slot 0x{slot_rva:08X}]"
+        )),
+        RegExpr::Derived(s) => RegExpr::Derived(format!("({s}) - 0x{rhs:X}")),
+        RegExpr::Unknown => RegExpr::Unknown,
+    }
+}
+
+fn expr_to_regsource(expr: RegExpr, reg: Register) -> RegSource {
+    let reg_name = register_short_name(reg);
+    match expr {
+        RegExpr::Import {
+            dll,
+            func,
+            slot_rva,
+        } => RegSource {
+            label: func,
+            dll,
+            is_import: true,
+            method: format!("{reg_name} ← IAT slot 0x{slot_rva:08X}"),
+            target_rva: 0,
+            iat_slot_rva: slot_rva,
+        },
+        RegExpr::Va(va) => RegSource {
+            label: format!("0x{va:016X}"),
+            dll: String::new(),
+            is_import: false,
+            method: format!("{reg_name} ← VA 0x{va:016X}"),
+            target_rva: va as u32,
+            iat_slot_rva: 0,
+        },
+        RegExpr::Imm(v) => RegSource {
+            label: format!("0x{v:016X}"),
+            dll: String::new(),
+            is_import: false,
+            method: format!("{reg_name} ← imm 0x{v:016X}"),
+            target_rva: 0,
+            iat_slot_rva: 0,
+        },
+        RegExpr::Derived(s) => RegSource {
+            label: format!("[{s}]"),
+            dll: String::new(),
+            is_import: false,
+            method: format!("{reg_name} ← {s}"),
+            target_rva: 0,
+            iat_slot_rva: 0,
+        },
+        RegExpr::Unknown => RegSource {
+            label: format!("[via {reg_name}]"),
+            dll: String::new(),
+            is_import: false,
+            method: format!("unresolved register {reg_name}"),
+            target_rva: 0,
+            iat_slot_rva: 0,
+        },
+    }
+}
+
+fn resolve_reg_expr(
+    insns: &[Instruction],
+    until_idx: usize,
+    reg: Register,
+    image_base: u64,
+    pe: &PeFile,
+    raw: &[u8],
+    depth: usize,
+) -> RegExpr {
+    use iced_x86::Mnemonic;
+
+    if depth > 8 {
+        return RegExpr::Unknown;
+    }
+
+    let full_reg = reg.full_register();
+
+    // Scan at most 64 instructions backwards from until_idx.
+    // Use enumerate to get the absolute index directly — avoids the O(N)
+    // linear position() search that made this catastrophically slow on large images.
+    let scan_start = until_idx.saturating_sub(64);
+    for (rel, insn) in insns[scan_start..until_idx].iter().enumerate().rev() {
+        if insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Register {
+            continue;
+        }
+
+        let dst = insn.iced.op0_register().full_register();
+        if dst != full_reg {
+            continue;
+        }
+
+        let insn_pos = scan_start + rel;
+
+        return match insn.iced.mnemonic() {
+            Mnemonic::Mov => match insn.iced.op1_kind() {
+                OpKind::Register => {
+                    let src = insn.iced.op1_register().full_register();
+                    resolve_reg_expr(insns, insn_pos, src, image_base, pe, raw, depth + 1)
+                }
+                OpKind::Immediate8 => RegExpr::Imm(insn.iced.immediate8() as u64),
+                OpKind::Immediate16 => RegExpr::Imm(insn.iced.immediate16() as u64),
+                OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                    RegExpr::Imm(insn.iced.immediate32() as u64)
+                }
+                OpKind::Immediate64 => RegExpr::Imm(insn.iced.immediate64()),
+                OpKind::Memory => {
+                    let slot_va =
+                        if matches!(insn.iced.memory_base(), Register::RIP | Register::EIP) {
+                            insn.iced.ip_rel_memory_address()
+                        } else if insn.iced.memory_base() == Register::None
+                            && insn.iced.memory_index() == Register::None
+                        {
+                            insn.iced.memory_displacement64()
+                        } else {
+                            0
+                        };
+
+                    if slot_va >= image_base {
+                        let slot_rva = (slot_va - image_base) as u32;
+                        if let Some((dll, func)) =
+                            crate::formats::pe::resolve_iat_slot(pe, raw, slot_rva)
+                        {
+                            RegExpr::Import {
+                                dll,
+                                func,
+                                slot_rva,
+                            }
+                        } else {
+                            RegExpr::Va(slot_va)
+                        }
+                    } else {
+                        RegExpr::Unknown
+                    }
+                }
+                _ => RegExpr::Unknown,
+            },
+
+            Mnemonic::Lea => {
+                if matches!(insn.iced.memory_base(), Register::RIP | Register::EIP) {
+                    RegExpr::Va(insn.iced.ip_rel_memory_address())
+                } else if insn.iced.memory_base() == Register::None
+                    && insn.iced.memory_index() == Register::None
+                {
+                    RegExpr::Va(insn.iced.memory_displacement64())
+                } else {
+                    RegExpr::Derived(format!("lea {}", insn.operands))
+                }
+            }
+
+            Mnemonic::Add => {
+                let base =
+                    resolve_reg_expr(insns, insn_pos, full_reg, image_base, pe, raw, depth + 1);
+                match insn.iced.op1_kind() {
+                    OpKind::Immediate8 => combine_add(base, insn.iced.immediate8() as u64),
+                    OpKind::Immediate16 => combine_add(base, insn.iced.immediate16() as u64),
+                    OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                        combine_add(base, insn.iced.immediate32() as u64)
+                    }
+                    OpKind::Immediate64 => combine_add(base, insn.iced.immediate64()),
+                    _ => RegExpr::Derived(format!(
+                        "{} + {}",
+                        register_short_name(full_reg),
+                        insn.operands
+                    )),
+                }
+            }
+
+            Mnemonic::Sub => {
+                let base =
+                    resolve_reg_expr(insns, insn_pos, full_reg, image_base, pe, raw, depth + 1);
+                match insn.iced.op1_kind() {
+                    OpKind::Immediate8 => combine_sub(base, insn.iced.immediate8() as u64),
+                    OpKind::Immediate16 => combine_sub(base, insn.iced.immediate16() as u64),
+                    OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                        combine_sub(base, insn.iced.immediate32() as u64)
+                    }
+                    OpKind::Immediate64 => combine_sub(base, insn.iced.immediate64()),
+                    _ => RegExpr::Derived(format!(
+                        "{} - {}",
+                        register_short_name(full_reg),
+                        insn.operands
+                    )),
+                }
+            }
+
+            Mnemonic::Xor
+                if insn.iced.op1_kind() == OpKind::Register
+                    && insn.iced.op1_register().full_register() == full_reg =>
+            {
+                RegExpr::Imm(0)
+            }
+
+            Mnemonic::Rol
+            | Mnemonic::Ror
+            | Mnemonic::Shl
+            | Mnemonic::Shr
+            | Mnemonic::Sar
+            | Mnemonic::And
+            | Mnemonic::Or => RegExpr::Derived(format!(
+                "{} {}",
+                insn.mnemonic.to_lowercase(),
+                insn.operands
+            )),
+
+            _ => RegExpr::Unknown,
+        };
+    }
+
+    RegExpr::Unknown
+}
+
 fn track_indirect_register(
     insns: &[Instruction],
     call_idx: usize,
@@ -824,75 +1101,30 @@ fn track_indirect_register(
     pe: &PeFile,
     raw: &[u8],
 ) -> Option<RegSource> {
+    Some(expr_to_regsource(
+        resolve_reg_expr(insns, call_idx, target_reg, image_base, pe, raw, 0),
+        target_reg,
+    ))
+}
+
+/// Flag suspicious indirect control-flow for annotation in the disasm listing.
+fn suspicious_flow_note(instr: &iced_x86::Instruction) -> Option<String> {
     use iced_x86::Mnemonic;
-    let full_target = target_reg.full_register();
+    let m = instr.mnemonic();
 
-    for insn in insns[..call_idx].iter().rev().take(16) {
-        if insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Register {
-            continue;
-        }
-        let dst = insn.iced.op0_register().full_register();
-        if dst != full_target {
-            continue;
-        }
+    if matches!(m, Mnemonic::Call | Mnemonic::Jmp) && instr.op0_kind() == OpKind::Register {
+        return Some(format!(
+            "indirect {} via {}",
+            format!("{:?}", m).to_lowercase(),
+            format!("{:?}", instr.op0_register().full_register()).to_lowercase()
+        ));
+    }
 
-        return match insn.iced.mnemonic() {
-            Mnemonic::Mov if insn.iced.op1_kind() == OpKind::Memory => {
-                let slot_va = if insn.iced.memory_base() == Register::RIP
-                    || insn.iced.memory_base() == Register::EIP
-                {
-                    insn.iced.ip_rel_memory_address()
-                } else if insn.iced.memory_base() == Register::None
-                    && insn.iced.memory_index() == Register::None
-                {
-                    insn.iced.memory_displacement64()
-                } else {
-                    // indexed or based memory — too complex to follow here
-                    return None;
-                };
-
-                let load_desc = if insn.iced.memory_base() == Register::RIP
-                    || insn.iced.memory_base() == Register::EIP
-                {
-                    format!("[rip+0x{:X}]", insn.iced.memory_displacement64())
-                } else {
-                    format!("[0x{:X}]", slot_va)
-                };
-                let reg_name = register_short_name(target_reg);
-
-                if slot_va != 0 && slot_va >= image_base {
-                    let slot_rva = (slot_va - image_base) as u32;
-                    if let Some((dll, func)) =
-                        crate::formats::pe::resolve_iat_slot(pe, raw, slot_rva)
-                    {
-                        return Some(RegSource {
-                            label: func,
-                            dll,
-                            is_import: true,
-                            method: format!("{reg_name} ← {load_desc} (IAT)"),
-                            target_rva: 0,
-                            iat_slot_rva: slot_rva,
-                        });
-                    }
-                }
-                // Memory load but not a recognised IAT slot.
-                Some(RegSource {
-                    label: format!("[{reg_name} ← {load_desc}]"),
-                    dll: String::new(),
-                    is_import: false,
-                    method: format!("{reg_name} ← {load_desc} (ptr)"),
-                    target_rva: 0,
-                    iat_slot_rva: 0,
-                })
-            }
-            // ADD modifying the target register is the tail of a table-dispatch sequence
-            // (e.g. `add r9, rcx`).  The switch-dispatch path handles those; bail here.
-            Mnemonic::Add => None,
-            // LEA usually loads a table base, not a call target.
-            Mnemonic::Lea => None,
-            // Any other def of the register — stop.
-            _ => None,
-        };
+    if matches!(
+        m,
+        Mnemonic::Rol | Mnemonic::Ror | Mnemonic::Shl | Mnemonic::Shr | Mnemonic::Sar
+    ) {
+        return Some("bit-mix / pointer-transform candidate".to_owned());
     }
 
     None
@@ -912,6 +1144,7 @@ pub fn collect_api_calls(
     raw: &[u8],
     symbol_index: &SymbolIndex,
     image_base: u64,
+    hostile: bool,
 ) -> Vec<ApiCall> {
     let mut results = Vec::new();
 
@@ -1009,20 +1242,31 @@ pub fn collect_api_calls(
             let reg = insn.iced.op0_register();
             let reg_name = register_short_name(reg);
 
-            if let Some(src) = track_indirect_register(insns, idx, reg, image_base, pe, raw) {
-                results.push(ApiCall {
-                    rva: insn.rva,
-                    kind,
-                    target_rva: src.target_rva,
-                    label: src.label,
-                    dll: src.dll,
-                    is_import: src.is_import,
-                    is_indirect: true,
-                    indirect_method: Some(src.method),
-                    switch_cases: Vec::new(),
-                });
-            } else if insn.is_call {
-                // Unresolved CALL via register — always emit so the call site is visible.
+            let src = track_indirect_register(insns, idx, reg, image_base, pe, raw);
+            let is_unresolved = src
+                .as_ref()
+                .map(|s| !s.is_import && s.target_rva == 0 && s.iat_slot_rva == 0)
+                .unwrap_or(true);
+
+            if let Some(src) = src {
+                // Emit resolved or partially-resolved result.
+                // For unresolved JMPs, only emit when hostile (they are handled by
+                // switch-dispatch otherwise).
+                if insn.is_call || hostile || !is_unresolved {
+                    results.push(ApiCall {
+                        rva: insn.rva,
+                        kind,
+                        target_rva: src.target_rva,
+                        label: src.label,
+                        dll: src.dll,
+                        is_import: src.is_import,
+                        is_indirect: true,
+                        indirect_method: Some(src.method),
+                        switch_cases: Vec::new(),
+                    });
+                }
+            } else if insn.is_call || hostile {
+                // Fallback: completely unresolvable register.
                 results.push(ApiCall {
                     rva: insn.rva,
                     kind,
@@ -1035,8 +1279,7 @@ pub fn collect_api_calls(
                     switch_cases: Vec::new(),
                 });
             }
-            // Unresolved JMP via register: skip here — the switch-dispatch path in
-            // the caller resolves and merges those targets separately.
+            // Non-hostile unresolved JMP via register: left for the switch-dispatch path.
         }
     }
 

@@ -23,6 +23,42 @@ pub fn dispatch(
         return commands::update::run(cfg, w, c);
     }
 
+    if cli.resx_scan {
+        return commands::scan::run(cli, w);
+    }
+
+    if cfg.resx_diff {
+        if dll_arg.is_empty() || func_arg.is_empty() {
+            return Err("Use `resx diff <image-a> <image-b> [image-c ...]`".to_owned());
+        }
+        return commands::diff::run(&dll_arg, &func_arg, cfg, w, c);
+    }
+
+    if !cfg.extra_diff_images.is_empty() {
+        return Err(format!(
+            "unexpected extra positional argument `{}`; multi-image positional inputs are supported by `resx diff`",
+            cfg.extra_diff_images[0]
+        ));
+    }
+
+    if cfg.resx_index {
+        if dll_arg.is_empty() {
+            return Err("Use `resx index <dir-or-image> --db <file>`".to_owned());
+        }
+        return commands::index::run(&dll_arg, cfg, w, c);
+    }
+
+    if cfg.resx_hunt {
+        if dll_arg.is_empty() {
+            return Err("Use `resx hunt <sample> --db <file>`".to_owned());
+        }
+        return commands::hunt::run(&dll_arg, cfg, w, c);
+    }
+
+    if cfg.reconstruct_cfg {
+        return commands::reconstruct_cfg::run(&dll_arg, cfg, w, c);
+    }
+
     if cfg.explain {
         let term = if !func_arg.is_empty() {
             &func_arg
@@ -85,12 +121,12 @@ pub fn dispatch(
     }
     if dll_arg.is_empty() {
         return Err(
-            "Specify a command such as dump, cfg, intelli, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, yara, update, or help".to_owned(),
+            "Specify a command such as dump, cfg, reconstruct-cfg, intelli, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, scan, yara, update, or help".to_owned(),
         );
     }
 
     Err(
-        "Incomplete command. Use `resx dump <dll> <function>`, `resx callers <dll> <function>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
+        "Incomplete command. Use `resx dump <dll> <function>`, `resx reconstruct-cfg <dll>`, `resx callers <dll> <function>`, `resx scan <path>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
     )
 }
 
@@ -111,6 +147,10 @@ fn is_locate_mode(cfg: &Config, dll_arg: &str, func_arg: &str) -> bool {
             && !cfg.pechk
             && !cfg.hookchk
             && !cfg.intelli
+            && !cfg.reconstruct_cfg
+            && !cfg.resx_diff
+            && !cfg.resx_index
+            && !cfg.resx_hunt
             && !cfg.explain
             && cfg.cfg_view.is_empty()
             && cfg.yara.is_empty())
@@ -126,6 +166,10 @@ fn should_dump(cfg: &Config, func_arg: &str) -> bool {
         || cfg.pechk
         || cfg.hookchk
         || cfg.intelli
+        || cfg.reconstruct_cfg
+        || cfg.resx_diff
+        || cfg.resx_index
+        || cfg.resx_hunt
         || !cfg.cfg_view.is_empty()
         || !cfg.yara.is_empty()
 }

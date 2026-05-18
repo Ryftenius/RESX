@@ -138,6 +138,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     public static readonly viewType = 'resx.binaryViewer';
     private static readonly panelByPath = new Map<string, vscode.WebviewPanel>();
     private static readonly pendingNavigation = new Map<string, PendingNavigation>();
+    private static activePathKey: string | undefined;
 
     public static register(context: vscode.ExtensionContext): vscode.Disposable {
         return vscode.window.registerCustomEditorProvider(
@@ -159,6 +160,18 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
             return;
         }
         ResxEditorProvider.pendingNavigation.set(key, target);
+    }
+
+    public static async refreshActive(): Promise<boolean> {
+        const panel = ResxEditorProvider.activePathKey
+            ? ResxEditorProvider.panelByPath.get(ResxEditorProvider.activePathKey)
+            : undefined;
+        if (!panel) {
+            return false;
+        }
+        panel.reveal(panel.viewColumn, false);
+        await panel.webview.postMessage({ type: 'refresh_requested' });
+        return true;
     }
 
     constructor(private readonly context: vscode.ExtensionContext) {}
@@ -184,11 +197,22 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
 
         webview.html = this.buildHtml(webview, fileName, nonce);
         ResxEditorProvider.panelByPath.set(docKey, webviewPanel);
+        if (webviewPanel.active) {
+            ResxEditorProvider.activePathKey = docKey;
+        }
+        webviewPanel.onDidChangeViewState(event => {
+            if (event.webviewPanel.active) {
+                ResxEditorProvider.activePathKey = docKey;
+            }
+        });
         const traceSubscription = subscribeRunTrace((entry) => {
             void webview.postMessage({ type: 'dev_log_append', entry });
         });
         webviewPanel.onDidDispose(() => {
             ResxEditorProvider.panelByPath.delete(docKey);
+            if (ResxEditorProvider.activePathKey === docKey) {
+                ResxEditorProvider.activePathKey = undefined;
+            }
             traceSubscription.dispose();
         });
 
@@ -203,6 +227,33 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
             };
         }
 
+        const runInitialAnalysis = (forceLoadSymbols?: boolean): void => {
+            const cfg = vscode.workspace.getConfiguration('resx');
+            const loadSymbols = forceLoadSymbols ?? cfg.get<boolean>('loadSymbolsOnOpen', false);
+            const opts = cfgOpts();
+            const symsArgs = loadSymbols ? ['syms', filePath] : ['syms', filePath, '--no-pdb'];
+
+            Promise.all([
+                runJson(this.context, ['peinfo', filePath], opts).then(r => send({ type: 'peinfo', ...r })),
+                runJson(this.context, ['eat',    filePath], opts).then(r => send({ type: 'eat',    ...r })),
+                runJson(this.context, ['iat',    filePath], opts).then(r => send({ type: 'iat',    ...r })),
+                runJson(this.context, ['intelli',filePath], opts).then(r => send({ type: 'intelli',...r })),
+                (loadSymbols
+                    ? runJson(this.context, ['types', filePath], opts)
+                    : Promise.resolve({ data: [] })
+                ).then(r => send({ type: 'types', ...r })),
+                (loadSymbols
+                    ? runSymsWithProgress(
+                        this.context,
+                        symsArgs,
+                        opts,
+                        `RESX: loading PDB symbols for ${path.basename(filePath)}`,
+                    )
+                    : runJson(this.context, symsArgs, opts)
+                ).then(r => send({ type: 'syms', ...r })),
+            ]).catch(() => {});
+        };
+
         webview.onDidReceiveMessage(async (msg) => {
             switch (msg.command) {
 
@@ -210,7 +261,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     const target = msg.dllPath || msg.dll || filePath;
                     const args = ['dump', target, msg.func,
                         '--cfg', 'text', '--funcs-depth', String(msg.funcsDepth || 1), '--strings', '--xrefs', '--recomp'];
-                    const result = await runDumpWithForwardFallback(this.context, args, { ...cfgOpts(), funcsDepth: msg.funcsDepth || 1 });
+                    const result = await runDumpWithForwardFallback(this.context, args, { ...cfgOpts(), funcsDepth: msg.funcsDepth || 1, hostile: !!msg.hostile });
                     send({
                         type: 'dump_result',
                         func: msg.func,
@@ -253,9 +304,37 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     break;
                 }
 
+                case 'reconstruct_cfg': {
+                    const result = await vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: `RESX: reconstructing startup flow for ${path.basename(filePath)}`,
+                        cancellable: false,
+                    }, async () => runJson(this.context, ['reconstruct-cfg', filePath], cfgOpts()));
+                    send({ type: 'reconstruct_cfg_result', ...result });
+                    break;
+                }
+
+                case 'scan_path': {
+                    const root = typeof msg.path === 'string' && msg.path.trim()
+                        ? msg.path.trim()
+                        : path.dirname(filePath);
+                    const result = await vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: `RESX: scanning ${path.basename(root) || root}`,
+                        cancellable: false,
+                    }, async () => runJson(this.context, ['scan', root]));
+                    send({ type: 'scan_result', root, ...result });
+                    break;
+                }
+
+                case 'refresh': {
+                    runInitialAnalysis();
+                    break;
+                }
+
                 case 'dump_at_rva': {
                     const target = msg.dllPath || filePath;
-                    const result = await runDumpAtRvaWithFallback(this.context, target, msg.rva, msg.dll, { ...cfgOpts(), funcsDepth: msg.funcsDepth || 1 });
+                    const result = await runDumpAtRvaWithFallback(this.context, target, msg.rva, msg.dll, { ...cfgOpts(), funcsDepth: msg.funcsDepth || 1, hostile: !!msg.hostile });
                     send({
                         type: 'dump_result',
                         func: msg.label,
@@ -313,6 +392,17 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                     break;
                 }
 
+                case 'scan_browse_folder': {
+                    const uris = await vscode.window.showOpenDialog({
+                        canSelectMany: false,
+                        canSelectFiles: false,
+                        canSelectFolders: true,
+                        title: 'Select folder to scan',
+                    });
+                    send({ type: 'file_picked', kind: 'scan_root', path: uris?.[0]?.fsPath ?? null });
+                    break;
+                }
+
                 case 'ready': {
                     const pending = ResxEditorProvider.pendingNavigation.get(docKey);
                     send({ type: 'dev_log_history', entries: getRunTraceHistory() });
@@ -328,28 +418,7 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
         const pending = ResxEditorProvider.pendingNavigation.get(docKey);
         const cfg = vscode.workspace.getConfiguration('resx');
         const loadSymbols = !!pending?.loadSymbols || cfg.get<boolean>('loadSymbolsOnOpen', false);
-        const opts = cfgOpts();
-        const symsArgs = loadSymbols ? ['syms', filePath] : ['syms', filePath, '--no-pdb'];
-
-        Promise.all([
-            runJson(this.context, ['peinfo', filePath], opts).then(r => send({ type: 'peinfo', ...r })),
-            runJson(this.context, ['eat',    filePath], opts).then(r => send({ type: 'eat',    ...r })),
-            runJson(this.context, ['iat',    filePath], opts).then(r => send({ type: 'iat',    ...r })),
-            runJson(this.context, ['intelli',filePath], opts).then(r => send({ type: 'intelli',...r })),
-            (loadSymbols
-                ? runJson(this.context, ['types', filePath], opts)
-                : Promise.resolve({ data: [] })
-            ).then(r => send({ type: 'types', ...r })),
-            (loadSymbols
-                ? runSymsWithProgress(
-                    this.context,
-                    symsArgs,
-                    opts,
-                    `RESX: loading PDB symbols for ${path.basename(filePath)}`,
-                )
-                : runJson(this.context, symsArgs, opts)
-            ).then(r => send({ type: 'syms', ...r })),
-        ]).catch(() => {});
+        runInitialAnalysis(loadSymbols);
     }
 
     private buildHtml(webview: vscode.Webview, fileName: string, nonce: string): string {
@@ -386,6 +455,8 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
       <button class="tab" data-tab="imports">Imports</button>
       <button class="tab" data-tab="symbols">Symbols</button>
       <button class="tab" data-tab="types">Types</button>
+      <button class="tab" data-tab="flow">Flow</button>
+      <button class="tab" data-tab="scan">Scan</button>
       <button class="tab" id="tab-dump" data-tab="dump" style="display:none">Dump</button>
       <button class="tab tab-dev" data-tab="dev">Dev</button>
     </nav>
@@ -401,6 +472,8 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     <div id="panel-imports"   class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-symbols"   class="panel"><p class="loading">Analyzing&hellip;</p></div>
     <div id="panel-types"     class="panel"><p class="loading">Analyzing&hellip;</p></div>
+    <div id="panel-flow"      class="panel"><p class="loading">Run reconstruct-cfg to build startup flow.</p></div>
+    <div id="panel-scan"      class="panel"><p class="loading">Run scan to discover fuzz candidates.</p></div>
     <div id="panel-dev"       class="panel"><p class="loading">Waiting for RESX commands&hellip;</p></div>
     <div id="panel-dump"      class="panel"></div>
   </div>

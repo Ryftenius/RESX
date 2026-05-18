@@ -1,4 +1,5 @@
 /target/
+/target-resx-tests/
 /resx.exe
 /*.exe
 /*.pdb
@@ -12,5 +13,6 @@
 /resx-vscode/bin/
 /resx-vscode/out/
 /resx-vscode/*.vsix
+/resx-demo/
 *.dll
 *.sys

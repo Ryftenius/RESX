@@ -33,7 +33,11 @@ USAGE
   resx cfg <dll> <function> [options]
   resx cfg <dll> --at <rva> [options]
   resx cfg <dll> --ordinal <n> [options]
+  resx reconstruct-cfg <dll> [flow options]
   resx intelli <dll> [function] [options]
+  resx diff <image-a> <image-b> [image-c ...] [diff options]
+  resx index <dir-or-image> --db <file> [corpus options]
+  resx hunt <sample> --db <file> [corpus options]
   resx types <dll> [query] [options]
 
   resx peinfo <dll> [options]
@@ -50,6 +54,7 @@ USAGE
   resx locate-sym <funcname> [options]
   resx explain <name> [--prefix|--api] [options]
 
+  resx scan <path> [--jsonl] [scan options]
   resx yara <dll> <rule.yar> [options]
   resx update [options]
   resx help
@@ -57,7 +62,12 @@ USAGE
 COMMANDS
   dump        Disassemble or reconstruct one target by name, RVA, or ordinal.
   cfg         Show a control-flow graph view for one target by name, RVA, or ordinal.
+  reconstruct-cfg
+              Rebuild a best-effort startup-to-exit flow waterfall for one image.
   intelli     Run heuristic triage over a target image or function.
+  diff        Compare normalized function and control-flow structure between images.
+  index       Build a reusable structural fingerprint corpus.
+  hunt        Rank corpus images related to one sample by code structure.
   types       Browse PDB-backed type names and symbol references.
   peinfo      Show PE metadata, version resources, signer info, and headers.
   sections    Show section layout, entropy, and protection expectations.
@@ -70,6 +80,7 @@ COMMANDS
   locate      Show export-backed matches in the priority list.
   locate-sym  Show export/symbol-backed matches in the priority list.
   explain     Explain a prefix or API-style symbol name from the built-in glossary.
+  scan        Inventory EXE/DLL/SYS files and rank fuzz target candidates.
   yara        Scan a PE image with one or more YARA rules.
   update      Pull the latest version from the current git remote/branch.
   help        Show this help text.
@@ -83,11 +94,18 @@ DUMP / INTELLI OPTIONS
   --unsafe-map-image         allow mapping an on-disk image into RESX for checks that need memory bytes
   --hookchk                  show static entry-hook / thunk indicators
   --intelli                  run heuristic triage
+  --hostile                  aggressive tracing: recursive register backward-slice,
+                             decoder-driven reverse-index, indirect-JMP emission,
+                             suspicion annotations in disasm output
   --xrefs                    show incoming intra-image CALL/JMP references to the target
   --strings                  show referenced string literals
   --funcs                    show API call map: every CALL/JMP with its resolved target
   --funcs-depth <N>          recursively trace internal subs N levels deep (implies --funcs)
   --cfg text                 show a colour-coded basic control-flow graph
+  --reconstruct-cfg          reconstruct startup/TLS flow as an ASCII waterfall
+  --thread-filter <term>     filter reconstruct-cfg to thread paths/APIs
+                             values: all, spawned, api, or text
+  --api-filter <term>        filter reconstruct-cfg to matching API/function paths
   --explain                  explain the current dump target name with prefix/body glossary hints
   --prefix                   force explain-mode prefix interpretation
   --api                      force explain-mode API/symbol interpretation
@@ -119,6 +137,38 @@ FOLLOW OPTIONS
   --max-dll-size <mb>        max image size
   --workers <n>              parallel workers
 
+SCAN OPTIONS
+  --jsonl                    emit one JSON object per image
+  --extensions <list>        comma-separated extensions, default exe,dll,sys
+  --max-files <n>            cap files scanned
+  --max-file-mb <mb>         skip images above this size
+  --max-candidates <n>       cap fuzz candidates per image
+
+DIFF OPTIONS
+  --diff-mode quick|balanced|deep
+  --diff-threshold <0-100>   minimum function match score, default 65
+  --include-weak             include weak 50-64 similarity candidates
+  --max-functions <n>        cap functions decoded per image, default 2000
+  --left-pdb <file>          explicit PDB for the left image
+  --right-pdb <file>         explicit PDB for the right image
+  --show-cfg-diff <fn|rva|auto>
+                             render a side-by-side basic-block diff for one matched function
+  --cfg-diff-format text|json|dot
+                             output format for --show-cfg-diff, default text
+  --cfg-diff-out <file>      write the CFG diff view to a file
+  --max-cfg-blocks <n>       cap CFG diff blocks per side, default 128
+  --diff-graph               emit a code/control-structure heatmap
+  --diff-graph-format text|json|dot
+                             output format for --diff-graph, default text
+  --diff-graph-out <file>    write the heatmap/graph view to a file
+
+CORPUS OPTIONS
+  --db <file>                 corpus index path, default resx-corpus.json
+  --extensions <list>         index extensions, default exe,dll,sys
+  --max-files <n>             cap files indexed
+  --max-file-mb <mb>          skip images above this size
+  --max-candidates <n>        cap hunt candidates printed
+
 GLOBAL OPTIONS
   --arch <auto|x86|x64>
   --path <dir>
@@ -148,12 +198,18 @@ EXAMPLES
   resx pechk .\sample.dll
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx cfg ntdll.dll --at 0x161F40
+  resx reconstruct-cfg suspicious.dll --depth 6 --max-total 300
+  resx diff .\old.dll .\new.dll --json
+  resx diff .\old.dll .\new.dll .\canary.dll --diff-graph
+  resx index .\samples --db .\samples.resxdb --no-pdb
+  resx hunt .\unknown.dll --db .\samples.resxdb --diff-threshold 70
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
   resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
   resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
   resx priority
   resx locate NtOpenProcess --include-dir C:\Work\Drivers
   resx locate-sym NtOpenProcess --include-image .\mydriver.sys
+  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
   resx explain Nt
   resx explain NtQuerySystemInformation
   resx dump ntoskrnl.exe NtQuerySystemInformation --explain
@@ -172,6 +228,7 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
     const KNOWN: &[&str] = &[
         "dump",
         "cfg",
+        "reconstruct-cfg",
         "intelli",
         "peinfo",
         "sections",
@@ -184,6 +241,10 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "locate",
         "locate-sym",
         "explain",
+        "scan",
+        "diff",
+        "index",
+        "hunt",
         "yara",
         "edrchk",
         "follow",
@@ -228,6 +289,10 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--cfg".to_string());
             rewritten.push("text".to_string());
+        }
+        "reconstruct-cfg" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--reconstruct-cfg".to_string());
         }
         "intelli" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
@@ -276,6 +341,28 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
         "explain" => {
             rewritten.push("--explain".to_string());
             rewritten.extend(raw_args.iter().skip(2).cloned());
+        }
+        "scan" => {
+            rewritten.push("--resx-scan".to_string());
+            if let Some(root) = raw_args.get(2) {
+                rewritten.push("--scan-root".to_string());
+                rewritten.push(root.clone());
+                rewritten.extend(raw_args.iter().skip(3).cloned());
+            } else {
+                rewritten.extend(raw_args.iter().skip(2).cloned());
+            }
+        }
+        "diff" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--resx-diff".to_string());
+        }
+        "index" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--resx-index".to_string());
+        }
+        "hunt" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--resx-hunt".to_string());
         }
         "yara" => {
             if raw_args.len() >= 4 {
@@ -343,6 +430,25 @@ CFG EXAMPLES
   resx cfg user32.dll --ordinal 650
 "#
         }
+        "reconstruct-cfg" => {
+            r#"
+RECONSTRUCT-CFG EXAMPLES
+  resx reconstruct-cfg suspicious.dll
+  resx suspicious.dll --reconstruct-cfg --depth 8 --max-total 500
+  resx reconstruct-cfg suspicious.dll --thread-filter spawned
+  resx reconstruct-cfg suspicious.dll --thread-filter api --api-filter GetThreadContext
+  resx reconstruct-cfg .\sample.exe --json
+
+NOTES
+  Starts at PE entry/TLS/startup handoff candidates, follows intra-image CALL/JMP
+  targets, marks imports and unresolved indirect calls, and follows statically
+  recovered thread/workpool callback arguments when they point back into the image.
+  PDB symbols are used when available for names, prototype text, and size-backed
+  decode bounds. Internal PDB/export functions, Nt APIs, Microsoft DLL imports,
+  CRT/C++ runtime calls, and external DLL imports are tagged separately.
+  Use --thread-filter and --api-filter for non-interactive focus.
+"#
+        }
         "peinfo" => {
             r#"
 PEINFO EXAMPLES
@@ -385,6 +491,54 @@ YARA EXAMPLES
 
 NOTES
   Accepts one or more rule files through the `yara` shorthand command or `--yara`.
+"#
+        }
+        "scan" => {
+            r#"
+SCAN EXAMPLES
+  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
+  resx scan .\samples --extensions exe,dll,sys --max-candidates 16
+  resx scan .\samples --max-file-mb 100 --json
+
+NOTES
+  Inventories PE images and ranks fuzz-target candidates using image kind,
+  risk imports, exports, startup paths, section anomalies, and symbol names.
+"#
+        }
+        "diff" => {
+            r#"
+DIFF EXAMPLES
+  resx diff .\old.dll .\new.dll
+  resx diff .\old.dll .\new.dll --json
+  resx diff .\old.dll .\new.dll .\canary.dll --diff-graph
+  resx diff .\old.exe .\new.exe --diff-mode deep --include-weak
+  resx diff .\left.dll .\right.dll --left-pdb .\left.pdb --right-pdb .\right.pdb
+  resx diff .\old.dll .\new.dll --diff-graph --diff-graph-format dot --diff-graph-out heatmap.dot
+  resx diff .\old.dll .\new.dll --show-cfg-diff auto
+  resx diff .\old.dll .\new.dll --show-cfg-diff TargetFunc --cfg-diff-format dot --cfg-diff-out cfg.dot
+
+NOTES
+  Compares normalized function code, basic-block shape, calls/imports, constants,
+  and metadata so small string/debug/address changes do not dominate the score.
+  With three or more images, emits an all-pairs matrix after profiling each image
+  once. --diff-graph adds function hotspots, section entropy deltas, and DOT/JSON
+  graph output for recording or offline inspection.
+  CFG diff mode pairs basic blocks and highlights exact, similar, changed,
+  left-only, and right-only control-flow/code regions.
+"#
+        }
+        "index" | "hunt" => {
+            r#"
+CORPUS EXAMPLES
+  resx index .\samples --db .\samples.resxdb --no-pdb
+  resx index C:\Windows\System32\drivers --db drivers.resxdb --extensions sys --max-files 500
+  resx hunt .\unknown.dll --db .\samples.resxdb
+  resx hunt .\unknown.dll --db .\samples.resxdb --diff-threshold 75 --include-weak
+
+NOTES
+  `index` stores normalized function/CFG/API fingerprints for many PE images.
+  `hunt` compares one sample against that index to find variants, subsets,
+  repacked builds, renamed/debug-stripped builds, and shared-code families.
 "#
         }
         "follow" | "callers" => {
@@ -446,7 +600,12 @@ GENERAL EXAMPLES
   resx dump ntdll.dll NtCreateFile
   resx intelli suspicious.dll
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
+  resx reconstruct-cfg suspicious.dll --depth 6
+  resx diff .\old.dll .\new.dll
+  resx index .\samples --db .\samples.resxdb --no-pdb
+  resx hunt .\unknown.dll --db .\samples.resxdb
   resx callers ntdll.dll NtOpenProcess --depth 2
+  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
   resx locate-sym NtOpenProcess
   resx update
 "#

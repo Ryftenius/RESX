@@ -1,10 +1,14 @@
 use serde::Serialize;
 
+use crate::analysis::discovery::FunctionDiscoveryReport;
 use crate::analysis::edr::EdrCheckResult;
 use crate::analysis::explain::ExplainResult;
+use crate::analysis::indirect::IndirectFlowReport;
 use crate::analysis::intelli::IntelliFinding;
+use crate::analysis::ir::TypedIrSummary;
+use crate::analysis::recursive_cfg::RecursiveCfg;
 use crate::analysis::yara::YaraMatch;
-use crate::formats::pe::{PeAnomaly, PeSection, PeStartupRoutine};
+use crate::formats::pe::{PeAnomaly, PeDataSummary, PeSection, PeStartupRoutine};
 
 #[derive(Serialize)]
 pub(crate) struct InsnJson {
@@ -68,6 +72,16 @@ pub(crate) struct FuncResult {
     pub(crate) xrefs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) strings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) data: Option<PeDataSummaryJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) function_discovery: Option<FunctionDiscoveryReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recursive_cfg: Option<RecursiveCfg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) typed_ir: Option<TypedIrSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) indirect_flow: Option<IndirectFlowReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) intelli_findings: Vec<IntelliFinding>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -170,6 +184,65 @@ pub(crate) struct StartupRoutineJson {
     pub(crate) note: String,
 }
 
+#[derive(Serialize)]
+pub(crate) struct PeDataSummaryJson {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) strings: Vec<PeDataStringJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) vtables: Vec<PeVTableJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pointers: Vec<PeDataPointerJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unwind: Vec<PeRuntimeFunctionJson>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PeDataStringJson {
+    pub(crate) rva: String,
+    pub(crate) section: String,
+    pub(crate) encoding: String,
+    pub(crate) value: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PeVTableJson {
+    pub(crate) rva: String,
+    pub(crate) section: String,
+    pub(crate) entries: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PeDataPointerJson {
+    pub(crate) rva: String,
+    pub(crate) target_rva: String,
+    pub(crate) section: String,
+    pub(crate) target_section: String,
+    pub(crate) kind: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PeRuntimeFunctionJson {
+    pub(crate) begin_rva: String,
+    pub(crate) end_rva: String,
+    pub(crate) unwind_info_rva: String,
+    pub(crate) prolog_size: u8,
+    pub(crate) unwind_codes: u8,
+    pub(crate) flags: String,
+    pub(crate) stack_alloc_size: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unwind_operations: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) saved_registers: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) exception_handler_rva: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) handler_data_rva: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) chained_parent: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) epilog_scopes: Vec<String>,
+}
+
 pub(crate) fn to_edr_json(edr: &EdrCheckResult) -> EdrJson {
     EdrJson {
         in_memory_available: edr.in_memory_available,
@@ -222,6 +295,115 @@ pub(crate) fn to_yara_json(m: &YaraMatch) -> YaraJson {
         namespace: m.namespace.clone(),
         tags: m.tags.clone(),
         file: m.file.clone(),
+    }
+}
+
+pub(crate) fn to_data_summary_json(summary: &PeDataSummary) -> PeDataSummaryJson {
+    PeDataSummaryJson {
+        strings: summary
+            .strings
+            .iter()
+            .map(|s| PeDataStringJson {
+                rva: format!("0x{:08X}", s.rva),
+                section: s.section_name.clone(),
+                encoding: s.encoding.clone(),
+                value: s.value.clone(),
+            })
+            .collect(),
+        vtables: summary
+            .vtables
+            .iter()
+            .map(|v| PeVTableJson {
+                rva: format!("0x{:08X}", v.rva),
+                section: v.section_name.clone(),
+                entries: v
+                    .entries
+                    .iter()
+                    .map(|rva| format!("0x{:08X}", rva))
+                    .collect(),
+            })
+            .collect(),
+        pointers: summary
+            .pointers
+            .iter()
+            .map(|p| PeDataPointerJson {
+                rva: format!("0x{:08X}", p.rva),
+                target_rva: format!("0x{:08X}", p.target_rva),
+                section: p.section_name.clone(),
+                target_section: p.target_section_name.clone(),
+                kind: p.kind.clone(),
+            })
+            .collect(),
+        unwind: summary
+            .runtime_functions
+            .iter()
+            .map(|u| PeRuntimeFunctionJson {
+                begin_rva: format!("0x{:08X}", u.begin_rva),
+                end_rva: format!("0x{:08X}", u.end_rva),
+                unwind_info_rva: format!("0x{:08X}", u.unwind_info_rva),
+                prolog_size: u.prolog_size,
+                unwind_codes: u.unwind_code_count,
+                flags: format!("0x{:X}", u.unwind_flags),
+                stack_alloc_size: format!("0x{:X}", u.stack_alloc_size),
+                unwind_operations: u
+                    .unwind_operations
+                    .iter()
+                    .map(|op| {
+                        if op.stack_offset == 0 {
+                            format!(
+                                "{}@+0x{:X}/info{}: {}",
+                                op.op, op.code_offset, op.info, op.description
+                            )
+                        } else {
+                            format!(
+                                "{}@+0x{:X}/info{}: {} [stack+0x{:X}]",
+                                op.op, op.code_offset, op.info, op.description, op.stack_offset
+                            )
+                        }
+                    })
+                    .collect(),
+                saved_registers: u
+                    .saved_registers
+                    .iter()
+                    .map(|reg| {
+                        format!(
+                            "{} stack+0x{:X} prolog+0x{:X}",
+                            reg.register, reg.stack_offset, reg.prolog_offset
+                        )
+                    })
+                    .collect(),
+                exception_handler_rva: if u.exception_handler_rva == 0 {
+                    String::new()
+                } else {
+                    format!("0x{:08X}", u.exception_handler_rva)
+                },
+                handler_data_rva: if u.handler_data_rva == 0 {
+                    String::new()
+                } else {
+                    format!("0x{:08X}", u.handler_data_rva)
+                },
+                chained_parent: u
+                    .chained_parent
+                    .as_ref()
+                    .map(|parent| {
+                        format!(
+                            "0x{:08X}..0x{:08X} unwind=0x{:08X}",
+                            parent.begin_rva, parent.end_rva, parent.unwind_info_rva
+                        )
+                    })
+                    .unwrap_or_default(),
+                epilog_scopes: u
+                    .epilog_scopes
+                    .iter()
+                    .map(|scope| {
+                        format!(
+                            "0x{:X}..0x{:X} {}",
+                            scope.start_offset, scope.end_offset, scope.source
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 

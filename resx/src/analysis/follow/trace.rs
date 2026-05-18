@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::follow::scan::{
-    import_lookup_key, CallSite, Caller, FollowScanConfig, ScanImage,
+    import_lookup_key, CallSite, Caller, FollowScanConfig, ScanImage, WrapperTarget,
 };
 use crate::core::color::Colors;
 use crate::core::output::{AsyncProgress, StageProgress};
@@ -70,6 +70,9 @@ pub struct CallNode {
     pub sites: Vec<CallSite>,
     pub callers: Vec<CallNode>,
     pub truncated: bool,
+    /// Set when this node reached its target via a wrapper/thunk export.
+    /// Format: "dll_name!ExportName"
+    pub via_wrapper: Option<String>,
 }
 
 pub struct TraceCtx<'a> {
@@ -181,6 +184,48 @@ impl GlobalCallGraph {
         for callers in imports.values_mut() {
             dedup_callers(callers);
         }
+
+        // Wrapper expansion: for each export in any scanned image that is a JMP-thunk
+        // wrapper around another target, inject the wrapper's own callers as indirect
+        // callers of the final target, annotated with `via_wrapper`.
+        for index in &loaded {
+            for wrapper in &index.wrappers {
+                let wrapper_dt = DirectTarget {
+                    dll_base: index.dll_base_lower.clone(),
+                    rva: wrapper.rva,
+                };
+                let wrapper_callers = match direct.get(&wrapper_dt) {
+                    Some(c) if !c.is_empty() => c.clone(),
+                    _ => continue,
+                };
+                let via = format!("{}!{}", index.dll_name, wrapper.name);
+                let expanded: Vec<Caller> = wrapper_callers
+                    .into_iter()
+                    .map(|mut c| {
+                        c.via_wrapper = Some(via.clone());
+                        c
+                    })
+                    .collect();
+                match &wrapper.resolves_to {
+                    WrapperTarget::Import { dll_base, func } => {
+                        imports
+                            .entry(import_lookup_key(dll_base, func))
+                            .or_default()
+                            .extend(expanded);
+                    }
+                    WrapperTarget::Direct { target_rva } => {
+                        direct
+                            .entry(DirectTarget {
+                                dll_base: index.dll_base_lower.clone(),
+                                rva: *target_rva,
+                            })
+                            .or_default()
+                            .extend(expanded);
+                    }
+                }
+            }
+        }
+
         stage.finish();
 
         Self {
@@ -218,10 +263,17 @@ impl GlobalCallGraph {
 fn dedup_callers(callers: &mut Vec<Caller>) {
     let mut merged: std::collections::BTreeMap<String, Caller> = std::collections::BTreeMap::new();
     for caller in callers.drain(..) {
-        let key = caller.func.key().to_owned();
+        // Include via_wrapper in the key so a function that calls both directly
+        // and via a wrapper is preserved as two distinct entries.
+        let key = format!(
+            "{}|{}",
+            caller.func.key(),
+            caller.via_wrapper.as_deref().unwrap_or("")
+        );
         let entry = merged.entry(key).or_insert_with(|| Caller {
             func: caller.func.clone(),
             sites: Vec::new(),
+            via_wrapper: caller.via_wrapper.clone(),
         });
         entry.sites.extend(caller.sites);
     }
@@ -246,6 +298,7 @@ struct FlatEntry {
     depth: usize,
     truncated: bool,
     children: Vec<usize>,
+    via_wrapper: Option<String>,
 }
 
 pub fn build_call_tree(
@@ -260,6 +313,7 @@ pub fn build_call_tree(
         depth: 0,
         truncated: false,
         children: Vec::new(),
+        via_wrapper: None,
     }];
     let mut frontier: Vec<(FuncRef, usize)> = vec![(root, 0)];
 
@@ -317,6 +371,7 @@ pub fn build_call_tree(
                     depth: depth + 1,
                     truncated: !is_new,
                     children: Vec::new(),
+                    via_wrapper: caller.via_wrapper,
                 });
                 flat[*parent_idx].children.push(new_idx);
                 if is_new {
@@ -349,6 +404,7 @@ pub fn build_call_tree(
             depth: e.depth,
             sites: e.sites.clone(),
             truncated: e.truncated,
+            via_wrapper: e.via_wrapper.clone(),
             callers: e
                 .children
                 .iter()

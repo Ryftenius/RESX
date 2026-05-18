@@ -102,6 +102,21 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
     ]);
     assert_eq!(imports["schema_version"], 1);
     assert!(imports["imports"].as_array().is_some());
+
+    let diff = run_json(&[
+        "diff",
+        j58.to_str().unwrap(),
+        j58.to_str().unwrap(),
+        "--json",
+        "--no-color",
+        "--quiet",
+        "--no-pdb",
+    ]);
+    assert_eq!(diff["schema_version"], 1);
+    assert_eq!(diff["diff"]["summary"]["similarity_score"], 100);
+    assert!(diff["diff"]["matches"]
+        .as_array()
+        .is_some_and(|v| !v.is_empty()));
 }
 
 #[test]

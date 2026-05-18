@@ -266,6 +266,74 @@ pub struct PeRuntimeFunctionInfo {
     pub frame_register: u8,
     pub frame_offset: u8,
     pub exception_handler_rva: u32,
+    pub handler_data_rva: u32,
+    pub stack_alloc_size: u32,
+    pub saved_registers: Vec<PeSavedRegister>,
+    pub unwind_operations: Vec<PeUnwindOperation>,
+    pub chained_parent: Option<PeChainedRuntimeFunction>,
+    pub epilog_scopes: Vec<PeEpilogScope>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PeDataSummary {
+    pub strings: Vec<PeDataString>,
+    pub vtables: Vec<PeVTable>,
+    pub pointers: Vec<PeDataPointer>,
+    pub runtime_functions: Vec<PeRuntimeFunctionInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeDataString {
+    pub rva: u32,
+    pub section_name: String,
+    pub encoding: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeVTable {
+    pub rva: u32,
+    pub section_name: String,
+    pub entries: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeDataPointer {
+    pub rva: u32,
+    pub target_rva: u32,
+    pub section_name: String,
+    pub target_section_name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeUnwindOperation {
+    pub code_offset: u8,
+    pub op: String,
+    pub info: u8,
+    pub stack_offset: u32,
+    pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeSavedRegister {
+    pub register: String,
+    pub stack_offset: u32,
+    pub prolog_offset: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeChainedRuntimeFunction {
+    pub begin_rva: u32,
+    pub end_rva: u32,
+    pub unwind_info_rva: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeEpilogScope {
+    pub start_offset: u32,
+    pub end_offset: u32,
+    pub source: String,
 }
 
 #[derive(Debug)]

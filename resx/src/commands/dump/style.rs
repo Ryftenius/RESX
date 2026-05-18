@@ -35,6 +35,10 @@ pub(super) fn color_kind(kind: &str, c: &Colors) -> String {
 pub(super) fn short_dll_name(name: &str) -> &str {
     name.strip_suffix(".dll")
         .or_else(|| name.strip_suffix(".DLL"))
+        .or_else(|| name.strip_suffix(".exe"))
+        .or_else(|| name.strip_suffix(".EXE"))
+        .or_else(|| name.strip_suffix(".sys"))
+        .or_else(|| name.strip_suffix(".SYS"))
         .unwrap_or(name)
 }
 

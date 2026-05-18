@@ -14,12 +14,22 @@ use super::style::{color_kind, color_target, is_nt_api, short_dll_name};
 use super::switchfmt::{format_case_values, format_class_value};
 use super::{RecoveredSwitchDispatch, RecoveredSwitchTarget};
 
+const NT_KERNEL_IMAGES: &[&str] = &[
+    "ntoskrnl.exe",
+    "ntkrnlmp.exe",
+    "ntkrnlpa.exe",
+    "ntkrpamp.exe",
+];
+const WIN32K_KERNEL_IMAGES: &[&str] = &["win32kbase.sys", "win32kfull.sys", "win32k.sys"];
+const NO_KERNEL_IMAGES: &[&str] = &[];
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn print_api_calls(
     w: &mut dyn Write,
     calls: &[ApiCall],
     insns: &[Instruction],
     func_name: &str,
+    source_image_name: &str,
     c: &Colors,
     raw: &[u8],
     pe: &crate::formats::pe::PeFile,
@@ -30,7 +40,7 @@ pub(super) fn print_api_calls(
     cfg: &Config,
     root_rva: u32,
 ) {
-    let synthetic_syscall = synthetic_syscall_call(insns, func_name);
+    let synthetic_syscall = synthetic_syscall_call(insns, func_name, source_image_name);
     let display_calls: Vec<ApiCall> = if let Some(call) = synthetic_syscall {
         let mut merged = calls.to_vec();
         if !merged.iter().any(|existing| {
@@ -92,6 +102,7 @@ pub(super) fn render_api_call_tree(
     calls: &[ApiCall],
     insns: &[Instruction],
     func_name: &str,
+    source_image_name: &str,
     raw: &[u8],
     pe: &crate::formats::pe::PeFile,
     symbol_index: &crate::analysis::symbols::SymbolIndex,
@@ -101,7 +112,7 @@ pub(super) fn render_api_call_tree(
     cfg: &Config,
     root_rva: u32,
 ) -> String {
-    let synthetic_syscall = synthetic_syscall_call(insns, func_name);
+    let synthetic_syscall = synthetic_syscall_call(insns, func_name, source_image_name);
     let display_calls: Vec<ApiCall> = if let Some(call) = synthetic_syscall {
         let mut merged = calls.to_vec();
         if !merged.iter().any(|existing| {
@@ -151,7 +162,11 @@ pub(super) struct SyscallCallDetails {
     pub service_number: Option<u32>,
 }
 
-fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiCall> {
+fn synthetic_syscall_call(
+    insns: &[Instruction],
+    func_name: &str,
+    source_image_name: &str,
+) -> Option<ApiCall> {
     if !is_nt_api(func_name) {
         return None;
     }
@@ -166,7 +181,7 @@ fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiC
         kind: "syscall".to_owned(),
         target_rva: 0,
         label: func_name.to_owned(),
-        dll: "ntdll.dll".to_owned(),
+        dll: syscall_stub_provider(func_name, source_image_name).to_owned(),
         is_import: true,
         is_indirect: false,
         indirect_method: None,
@@ -177,8 +192,9 @@ fn synthetic_syscall_call(insns: &[Instruction], func_name: &str) -> Option<ApiC
 pub(super) fn synthetic_syscall_api_call(
     insns: &[Instruction],
     func_name: &str,
+    source_image_name: &str,
 ) -> Option<ApiCall> {
-    synthetic_syscall_call(insns, func_name)
+    synthetic_syscall_call(insns, func_name, source_image_name)
 }
 
 fn detect_syscall_number_from_insns(insns: &[Instruction]) -> Option<u32> {
@@ -406,6 +422,7 @@ fn print_calls_recursive(
                         image.raw,
                         image.symbol_index,
                         image.image_base,
+                        cfg.hostile,
                     );
                     if !sub_calls.is_empty() {
                         let child_prefix =
@@ -447,6 +464,7 @@ fn print_calls_recursive(
                         &target.image.raw,
                         &target.image.symbol_index,
                         target.image.image_base,
+                        cfg.hostile,
                     );
                     if !sub_calls.is_empty() {
                         let child_prefix =
@@ -562,6 +580,7 @@ fn write_calls_recursive_text(
                         image.raw,
                         image.symbol_index,
                         image.image_base,
+                        cfg.hostile,
                     );
                     if !sub_calls.is_empty() {
                         let child_prefix =
@@ -601,6 +620,7 @@ fn write_calls_recursive_text(
                         &target.image.raw,
                         &target.image.symbol_index,
                         target.image.image_base,
+                        cfg.hostile,
                     );
                     if !sub_calls.is_empty() {
                         let child_prefix =
@@ -638,17 +658,12 @@ fn resolve_syscall_trace_target(
     if !call.is_import || !is_nt_api(&call.label) {
         return None;
     }
-    let dll = call.dll.to_ascii_lowercase();
-    if !dll.eq("ntdll.dll") && !dll.eq("ntdll") {
+    let kernel_images = syscall_kernel_images(call);
+    if kernel_images.is_empty() {
         return None;
     }
 
-    for kernel_name in [
-        "ntoskrnl.exe",
-        "ntkrnlmp.exe",
-        "ntkrnlpa.exe",
-        "ntkrpamp.exe",
-    ] {
+    for kernel_name in kernel_images {
         let Some(image) = load_trace_image(kernel_name, cfg) else {
             continue;
         };
@@ -671,6 +686,91 @@ fn resolve_syscall_trace_target(
     }
 
     None
+}
+
+fn syscall_stub_provider(func_name: &str, source_image_name: &str) -> &'static str {
+    if is_win32k_syscall_provider(source_image_name) || is_probable_win32k_syscall_name(func_name) {
+        "win32u.dll"
+    } else {
+        "ntdll.dll"
+    }
+}
+
+fn syscall_kernel_images(call: &ApiCall) -> &'static [&'static str] {
+    if is_win32k_syscall_provider(&call.dll) || is_probable_win32k_syscall_name(&call.label) {
+        WIN32K_KERNEL_IMAGES
+    } else if is_native_syscall_provider(&call.dll) {
+        NT_KERNEL_IMAGES
+    } else {
+        NO_KERNEL_IMAGES
+    }
+}
+
+fn is_native_syscall_provider(name: &str) -> bool {
+    normalize_image_base(name) == "ntdll"
+}
+
+fn is_win32k_syscall_provider(name: &str) -> bool {
+    matches!(
+        normalize_image_base(name).as_str(),
+        "win32u" | "user32" | "gdi32" | "gdi32full"
+    )
+}
+
+fn normalize_image_base(name: &str) -> String {
+    let file = name
+        .rsplit(&['/', '\\'][..])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    file.strip_suffix(".dll")
+        .or_else(|| file.strip_suffix(".exe"))
+        .or_else(|| file.strip_suffix(".sys"))
+        .unwrap_or(&file)
+        .to_owned()
+}
+
+fn is_probable_win32k_syscall_name(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "NtBindComposition",
+        "NtCloseComposition",
+        "NtComposition",
+        "NtCompositor",
+        "NtConfigureInputSpace",
+        "NtConfirmComposition",
+        "NtCreateComposition",
+        "NtCreateImplicitComposition",
+        "NtDComposition",
+        "NtDesktop",
+        "NtDuplicateComposition",
+        "NtDxgk",
+        "NtEnableOneCore",
+        "NtFlipObject",
+        "NtGdi",
+        "NtHWCursor",
+        "NtInputSpace",
+        "NtIsOneCore",
+        "NtKST",
+        "NtMIT",
+        "NtMapVisual",
+        "NtMin",
+        "NtModerncore",
+        "NtNotifyPresent",
+        "NtOpenComposition",
+        "NtQueryComposition",
+        "NtRIM",
+        "NtSetComposition",
+        "NtSetCursor",
+        "NtSetPointer",
+        "NtSetShell",
+        "NtTokenManager",
+        "NtUnBindComposition",
+        "NtUpdateInputSink",
+        "NtUser",
+        "NtValidateComposition",
+        "NtVisual",
+    ];
+    PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceImage> {
@@ -987,27 +1087,24 @@ fn infer_immediate_arg_values(
 
     for insn in insns[..pos].iter().rev().take(16) {
         match insn.iced.mnemonic() {
-            Mnemonic::Mov => {
-                if insn.iced.op0_kind() == OpKind::Register {
-                    let dst = insn.iced.op0_register();
-                    if dst == arg32 || dst == arg64 {
-                        if let Some(value) = immediate_value(&insn.iced) {
-                            values.push(value);
-                        } else {
-                            break;
-                        }
+            Mnemonic::Mov if insn.iced.op0_kind() == OpKind::Register => {
+                let dst = insn.iced.op0_register();
+                if dst == arg32 || dst == arg64 {
+                    if let Some(value) = immediate_value(&insn.iced) {
+                        values.push(value);
+                    } else {
+                        break;
                     }
                 }
             }
-            Mnemonic::Xor => {
+            Mnemonic::Xor
                 if insn.iced.op0_kind() == OpKind::Register
                     && insn.iced.op1_kind() == OpKind::Register
-                    && insn.iced.op0_register() == insn.iced.op1_register()
-                {
-                    let dst = insn.iced.op0_register();
-                    if dst == arg32 || dst == arg64 {
-                        values.push(0);
-                    }
+                    && insn.iced.op0_register() == insn.iced.op1_register() =>
+            {
+                let dst = insn.iced.op0_register();
+                if dst == arg32 || dst == arg64 {
+                    values.push(0);
                 }
             }
             Mnemonic::Jne
@@ -1133,4 +1230,75 @@ fn resolve_dispatch_rva_local(
         return None;
     }
     Some(target_rva)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_probable_win32k_syscall_name, normalize_image_base, syscall_kernel_images,
+        syscall_stub_provider, NT_KERNEL_IMAGES, WIN32K_KERNEL_IMAGES,
+    };
+    use crate::analysis::disasm::ApiCall;
+
+    fn import_call(dll: &str, label: &str) -> ApiCall {
+        ApiCall {
+            rva: 0x1000,
+            kind: "call".to_owned(),
+            target_rva: 0,
+            label: label.to_owned(),
+            dll: dll.to_owned(),
+            is_import: true,
+            is_indirect: false,
+            indirect_method: None,
+            switch_cases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn syscall_images_route_native_and_win32k_families() {
+        let native = import_call("ntdll.dll", "NtOpenProcess");
+        assert_eq!(syscall_kernel_images(&native), NT_KERNEL_IMAGES);
+
+        let gui = import_call("win32u.dll", "NtUserGetMessage");
+        assert_eq!(syscall_kernel_images(&gui), WIN32K_KERNEL_IMAGES);
+
+        let gdi = import_call("user32.dll", "NtGdiDdDDICreateDevice");
+        assert_eq!(syscall_kernel_images(&gdi), WIN32K_KERNEL_IMAGES);
+    }
+
+    #[test]
+    fn synthetic_provider_uses_win32u_for_gui_syscalls() {
+        assert_eq!(
+            syscall_stub_provider("NtUserGetMessage", "win32u.dll"),
+            "win32u.dll"
+        );
+        assert_eq!(
+            syscall_stub_provider("NtDCompositionCreateChannel", "win32u.dll"),
+            "win32u.dll"
+        );
+        assert_eq!(
+            syscall_stub_provider("NtQuerySystemInformation", "ntdll.dll"),
+            "ntdll.dll"
+        );
+    }
+
+    #[test]
+    fn win32k_syscall_name_detection_covers_gui_exports() {
+        assert!(is_probable_win32k_syscall_name("NtUserGetMessage"));
+        assert!(is_probable_win32k_syscall_name("NtGdiCreateBitmap"));
+        assert!(is_probable_win32k_syscall_name(
+            "NtDCompositionCommitChannel"
+        ));
+        assert!(!is_probable_win32k_syscall_name("NtOpenProcess"));
+    }
+
+    #[test]
+    fn image_base_normalization_strips_common_extensions() {
+        assert_eq!(
+            normalize_image_base(r"C:\Windows\System32\win32kfull.sys"),
+            "win32kfull"
+        );
+        assert_eq!(normalize_image_base("ntoskrnl.exe"), "ntoskrnl");
+        assert_eq!(normalize_image_base("win32u.dll"), "win32u");
+    }
 }

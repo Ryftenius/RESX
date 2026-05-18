@@ -113,23 +113,65 @@ impl SymbolIndex {
             });
         }
 
-        let (_, sym) = self.inner.ordered.range(..=address).next_back()?;
-        let displacement = address.saturating_sub(sym.va);
-        let within = if sym.size > 0 {
-            displacement < sym.size
-        } else {
-            displacement <= 0x100
+        let prev = self.inner.ordered.range(..=address).next_back()?;
+        let next = self.inner.ordered.range(address..).next();
+
+        let prev_sym = prev.1;
+        let prev_disp = address.saturating_sub(prev_sym.va);
+
+        // Strong match if the symbol has a real size and we're inside it.
+        if prev_sym.size > 0 && prev_disp < prev_sym.size {
+            return Some(SymbolMatch {
+                symbol: prev_sym.clone(),
+                displacement: prev_disp,
+            });
+        }
+
+        // Unknown-size symbols are dangerous. Be much stricter.
+        // Allow only a tiny near-window, and only if there isn't a competing next symbol
+        // that is equally or more plausible.
+        let near_window = match prev_sym.kind.as_str() {
+            "function" => 0x20,
+            "data" => 0x10,
+            _ => 0x08,
         };
 
-        if !within {
+        if prev_disp > near_window {
             return None;
         }
 
+        if let Some((next_va, _next_sym)) = next {
+            let next_gap = next_va.saturating_sub(address);
+            if next_gap <= prev_disp {
+                return None;
+            }
+        }
+
         Some(SymbolMatch {
-            symbol: sym.clone(),
-            displacement,
+            symbol: prev_sym.clone(),
+            displacement: prev_disp,
         })
     }
+}
+
+fn score(sym: &ResolvedSymbol) -> u32 {
+    let mut score = 0;
+    if sym.kind == "function" {
+        score += 6;
+    }
+    if sym.kind == "data" {
+        score += 4;
+    }
+    if sym.size > 0 {
+        score += 4;
+    }
+    if !sym.type_name.is_empty() {
+        score += 2;
+    }
+    if !sym.name.starts_with('#') {
+        score += 1;
+    }
+    score
 }
 
 fn insert_symbol(index: &mut SymbolIndexInner, sym: ResolvedSymbol) {
@@ -142,21 +184,4 @@ fn insert_symbol(index: &mut SymbolIndexInner, sym: ResolvedSymbol) {
         index.exact.insert(sym.va, sym.clone());
         index.ordered.insert(sym.va, sym);
     }
-}
-
-fn score(sym: &ResolvedSymbol) -> u32 {
-    let mut score = 0;
-    if sym.kind == "data" {
-        score += 4;
-    }
-    if sym.kind == "function" {
-        score += 3;
-    }
-    if !sym.type_name.is_empty() {
-        score += 2;
-    }
-    if !sym.name.starts_with('#') {
-        score += 1;
-    }
-    score
 }

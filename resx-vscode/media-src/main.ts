@@ -108,7 +108,11 @@ vscode.postMessage({ command: 'ready' });
         currentDumpDll: '',
         currentDumpPath: '',
         apiDepth: 1,
+        hostile: false,
         devLogs: [],
+        reconstructRequested: false,
+        scanRequested: false,
+        scanRoot: '',
         currentPeInfo: null,
         typesByName: new Map() as Map<string, any>, // lowercased type name → TypeEntryJson
         asmMetaWidth: persistedUiState.asmMetaWidth,
@@ -271,11 +275,12 @@ function resolveNavigationTarget(funcName, dll = null) {
 function dumpCacheKey(entry) {
     const scope = moduleScope(entry);
     const depth = Math.max(1, Math.min(5, Number(entry?.funcsDepth || 1) || 1));
+    const hostile = st.hostile ? ':hostile' : '';
     if (entry?.rva)
-        return `rva:${scope}:${normalizeRva(entry.rva)}:depth:${depth}`;
+        return `rva:${scope}:${normalizeRva(entry.rva)}:depth:${depth}${hostile}`;
     const dll = entry?.dll ? String(entry.dll).toLowerCase() : '';
     const fn = entry?.fn ? String(entry.fn).toLowerCase() : '';
-    return `fn:${scope}:${dll}!${fn}:depth:${depth}`;
+    return `fn:${scope}:${dll}!${fn}:depth:${depth}${hostile}`;
 }
 function startupBadgeLabel(entry) {
     const kind = String(entry?.kind || '').toLowerCase();
@@ -498,7 +503,7 @@ function renderEntryPanel(d) {
     const rawDetails = document.createElement('details');
     rawDetails.className = 'startup-raw';
     const summary = document.createElement('summary');
-    summary.textContent = `Raw startup evidence (${startupSummary.rawEntries.length} entries, ${startupSummary.chainCount} chain edges)`;
+    summary.textContent = `Raw startup evidence (${startupSummary.rawEntries.length} entries, ${startupSummary.chainCount} startup branches)`;
     rawDetails.appendChild(summary);
     startupSummary.rawEntries.forEach(entry => {
         const row = document.createElement('div');
@@ -1387,6 +1392,12 @@ document.querySelectorAll('.tab').forEach(btn => {
         document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${btn.dataset.tab}`));
         st.activeTopTab = btn.dataset.tab;
         persistUiState();
+        if (btn.dataset.tab === 'flow') {
+            ensureReconstructCfg();
+        }
+        if (btn.dataset.tab === 'scan') {
+            ensureScanPanel();
+        }
         // If a data-symbol or disasm type-link triggered a jump to the Types tab while
         // the panel is already rendered, find and select the right type entry now.
         if (btn.dataset.tab === 'types' && st._pendingTypeNav) {
@@ -1604,6 +1615,7 @@ function _requestDump(entry, prefetch = false) {
             rva: normalizeRva(entry.rva),
             label: entry.label,
             funcsDepth: Math.max(1, Math.min(5, Number(entry.funcsDepth || st.apiDepth || 1) || 1)),
+            hostile: st.hostile,
             ...request,
         });
     }
@@ -1615,6 +1627,7 @@ function _requestDump(entry, prefetch = false) {
             dllPath: entry.dllPath || null,
             sourceLabel: entry.label,
             funcsDepth: Math.max(1, Math.min(5, Number(entry.funcsDepth || st.apiDepth || 1) || 1)),
+            hostile: st.hostile,
             ...request,
         });
     }
@@ -2028,6 +2041,12 @@ window.addEventListener('message', e => {
         case 'intelli':
             renderTriage(msg);
             break;
+        case 'reconstruct_cfg_result':
+            renderReconstructCfg(msg);
+            break;
+        case 'scan_result':
+            renderScan(msg);
+            break;
         case 'dev_log_history':
             st.devLogs = Array.isArray(msg.entries) ? msg.entries.slice() : [];
             renderDevLogs();
@@ -2049,6 +2068,9 @@ window.addEventListener('message', e => {
         case 'file_picked':
             _handleFilePicked(msg);
             break;
+        case 'refresh_requested':
+            refreshAnalysisPanels();
+            break;
         case 'external_navigate':
             if (msg.loadSymbols) {
                 $('panel-symbols').innerHTML = '<p class="loading">Loading symbols…</p>';
@@ -2061,6 +2083,22 @@ window.addEventListener('message', e => {
             break;
     }
 });
+function refreshAnalysisPanels() {
+    ['overview', 'entry', 'triage', 'sections', 'exports', 'imports', 'symbols', 'types'].forEach(id => {
+        const panel = $(`panel-${id}`);
+        if (panel)
+            panel.innerHTML = '<p class="loading">Analyzing…</p>';
+    });
+    st.currentPeInfo = null;
+    st.typesByName = new Map();
+    st.iatIndex.clear();
+    st.dumpCache.clear();
+    st.reconstructRequested = false;
+    st.scanRequested = false;
+    $('panel-flow').innerHTML = '<p class="loading">Run reconstruct-cfg to build startup flow.</p>';
+    $('panel-scan').innerHTML = '<p class="loading">Run scan to discover fuzz candidates.</p>';
+    vscode.postMessage({ command: 'refresh' });
+}
 function _handleExplain(msg) {
     st.explainPending.delete(msg.name);
     st.explainCache.set(msg.name, msg.data || null);
@@ -2085,6 +2123,355 @@ function _handleFilePicked(msg) {
         if (lbl)
             lbl.textContent = msg.path.split(/[/\\]/).pop() || msg.path;
     }
+    else if (msg.kind === 'scan_root') {
+        st.scanRoot = msg.path;
+        st.scanRequested = true;
+        $('panel-scan').innerHTML = '<p class="loading">Scanning…</p>';
+        activateTab('scan');
+        vscode.postMessage({ command: 'scan_path', path: st.scanRoot });
+    }
+}
+function ensureReconstructCfg() {
+    if (st.reconstructRequested)
+        return;
+    st.reconstructRequested = true;
+    const panel = $('panel-flow');
+    panel.innerHTML = '<p class="loading">Running reconstruct-cfg…</p>';
+    vscode.postMessage({ command: 'reconstruct_cfg' });
+}
+function ensureScanPanel() {
+    const panel = $('panel-scan');
+    if (st.scanRequested)
+        return;
+    panel.innerHTML = '';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'analysis-toolbar';
+    const meta = document.createElement('div');
+    meta.className = 'analysis-toolbar-meta';
+    meta.textContent = 'Scan a folder for risky images and fuzz entry candidates.';
+    const runCurrent = document.createElement('button');
+    runCurrent.className = 'btn-sm';
+    runCurrent.textContent = 'Scan Current Folder';
+    runCurrent.addEventListener('click', () => {
+        st.scanRequested = true;
+        panel.innerHTML = '<p class="loading">Scanning…</p>';
+        vscode.postMessage({ command: 'scan_path' });
+    });
+    const browse = document.createElement('button');
+    browse.className = 'btn-sm';
+    browse.textContent = 'Browse…';
+    browse.addEventListener('click', () => vscode.postMessage({ command: 'scan_browse_folder' }));
+    toolbar.append(meta, runCurrent, browse);
+    panel.appendChild(toolbar);
+}
+function getPayloadObject(data, key) {
+    if (!data || typeof data !== 'object')
+        return null;
+    const record = data;
+    if (record[key] && typeof record[key] === 'object')
+        return record[key];
+    return record;
+}
+function makeTag(text, extraClass = '') {
+    const tag = document.createElement('span');
+    tag.className = `tag ${extraClass}`.trim();
+    tag.textContent = String(text || '');
+    return tag;
+}
+function appendMiniStats(container, stats) {
+    const grid = document.createElement('div');
+    grid.className = 'mini-stats';
+    Object.entries(stats).forEach(([label, value]) => {
+        const item = document.createElement('div');
+        item.className = 'mini-stat';
+        item.innerHTML = `<span>${esc(value)}</span><small>${esc(label)}</small>`;
+        grid.appendChild(item);
+    });
+    container.appendChild(grid);
+}
+function renderReconstructCfg(msg) {
+    const panel = $('panel-flow');
+    panel.innerHTML = '';
+    const data = getPayloadObject(msg.data, 'reconstruct_cfg');
+    if (msg.error || !data) {
+        panel.appendChild(errBox(msg.error || 'reconstruct-cfg returned no data'));
+        st.reconstructRequested = false;
+        return;
+    }
+    const toolbar = document.createElement('div');
+    toolbar.className = 'analysis-toolbar';
+    const title = document.createElement('div');
+    title.className = 'analysis-toolbar-meta';
+    title.textContent = `${data.image || 'image'} ${data.arch ? `· ${data.arch}` : ''} · entry ${data.entry_point || 'unknown'}`;
+    const rerun = document.createElement('button');
+    rerun.className = 'btn-sm';
+    rerun.textContent = 'Re-run';
+    rerun.addEventListener('click', () => {
+        panel.innerHTML = '<p class="loading">Running reconstruct-cfg…</p>';
+        vscode.postMessage({ command: 'reconstruct_cfg' });
+    });
+    const raw = document.createElement('button');
+    raw.className = 'btn-sm';
+    raw.textContent = 'Open JSON';
+    raw.addEventListener('click', () => vscode.postMessage({
+        command: 'open_text_report',
+        language: 'json',
+        content: JSON.stringify(msg.data, null, 2),
+    }));
+    toolbar.append(title, rerun, raw);
+    panel.appendChild(toolbar);
+    appendMiniStats(panel, {
+        roots: data.stats?.roots ?? (data.roots || []).length,
+        functions: data.stats?.functions_expanded ?? 0,
+        calls: data.stats?.call_edges ?? 0,
+        imports: data.stats?.import_edges ?? 0,
+        indirect: data.stats?.indirect_edges ?? 0,
+        threads: data.stats?.thread_edges ?? 0,
+        workpools: data.stats?.workpool_edges ?? 0,
+        exceptions: data.stats?.exception_edges ?? 0,
+    });
+    if (data.pdb) {
+        const pdb = _card('Function Discovery');
+        pdb.body.appendChild(kvRow('PDB', data.pdb.status || (data.pdb.loaded ? 'loaded' : 'unavailable')));
+        pdb.body.appendChild(kvRow('Symbols', data.pdb.symbol_count ?? 0));
+        pdb.body.appendChild(kvRow('Functions', data.pdb.function_count ?? 0));
+        pdb.body.appendChild(kvRow('Sized Functions', data.pdb.sized_function_count ?? 0));
+        if (data.pdb.error)
+            pdb.body.appendChild(kvRow('PDB Error', data.pdb.error));
+        panel.appendChild(pdb.card);
+    }
+    const roots = Array.isArray(data.roots) ? data.roots : [];
+    if (!roots.length) {
+        panel.appendChild(document.createRange().createContextualFragment('<p class="no-data">No reconstructed roots.</p>'));
+    }
+    else {
+        const tree = document.createElement('div');
+        tree.className = 'flow-tree';
+        roots.forEach(root => tree.appendChild(renderFlowFunction(root, 0)));
+        panel.appendChild(tree);
+    }
+    if (Array.isArray(data.notes) && data.notes.length) {
+        const notes = document.createElement('div');
+        notes.className = 'analysis-notes';
+        data.notes.forEach(note => notes.appendChild(makeTag(note)));
+        panel.appendChild(notes);
+    }
+}
+function renderFlowFunction(fn, depth) {
+    const node = document.createElement('details');
+    node.className = `flow-node depth-${Math.min(depth, 4)}`;
+    node.open = depth < 2;
+    const summary = document.createElement('summary');
+    summary.className = 'flow-summary';
+    const name = document.createElement('span');
+    name.className = 'flow-name';
+    name.textContent = fn.name || fn.rva || 'function';
+    const rva = document.createElement('span');
+    rva.className = 'rva flow-rva';
+    rva.textContent = fn.rva || '';
+    if (fn.rva) {
+        rva.title = 'Open function disassembly';
+        rva.addEventListener('click', evt => {
+            evt.preventDefault();
+            navigateRva(fn.rva, fn.name || fn.rva);
+        });
+    }
+    summary.append(name, rva);
+    ['kind', 'section', 'symbol_source', 'symbol_category', 'status'].forEach(key => {
+        if (fn[key])
+            summary.appendChild(makeTag(fn[key], `flow-tag-${key}`));
+    });
+    if (fn.thread_lane)
+        summary.appendChild(makeTag(`lane ${fn.thread_lane}`, 'flow-tag-thread'));
+    node.appendChild(summary);
+    if (fn.prototype || fn.decode_bound || fn.note || fn.returns?.length) {
+        const meta = document.createElement('div');
+        meta.className = 'flow-meta';
+        if (fn.prototype)
+            meta.appendChild(kvRow('Prototype', fn.prototype));
+        if (fn.decode_bound)
+            meta.appendChild(kvRow('Decode Bound', fn.decode_bound));
+        if (fn.note)
+            meta.appendChild(kvRow('Note', fn.note));
+        if (fn.returns?.length)
+            meta.appendChild(kvRow('Returns', fn.returns.join(', ')));
+        node.appendChild(meta);
+    }
+    const edges = Array.isArray(fn.edges) ? fn.edges : [];
+    if (edges.length) {
+        const list = document.createElement('div');
+        list.className = 'flow-edge-list';
+        edges.forEach(edge => {
+            const row = document.createElement('div');
+            row.className = 'flow-edge';
+            const site = document.createElement('span');
+            site.className = 'rva';
+            site.textContent = edge.site_rva || '';
+            if (edge.site_rva) {
+                site.title = 'Open edge site';
+                site.addEventListener('click', () => navigateRva(edge.site_rva, edge.target || edge.site_rva));
+            }
+            const target = document.createElement('span');
+            target.className = 'flow-edge-target';
+            target.textContent = edge.target || edge.target_rva || '';
+            const detail = document.createElement('span');
+            detail.className = 'flow-edge-detail';
+            detail.textContent = [edge.kind, edge.relation, edge.detail].filter(Boolean).join(' · ');
+            row.append(site, target, detail);
+            (edge.tags || []).forEach(tag => row.appendChild(makeTag(tag, tag === 'indirect' ? 'tag-warn' : '')));
+            list.appendChild(row);
+            if (edge.child)
+                list.appendChild(renderFlowFunction(edge.child, depth + 1));
+        });
+        node.appendChild(list);
+    }
+    return node;
+}
+function renderScan(msg) {
+    const panel = $('panel-scan');
+    panel.innerHTML = '';
+    const data = getPayloadObject(msg.data, 'scan');
+    if (msg.error || !data) {
+        panel.appendChild(errBox(msg.error || 'scan returned no data'));
+        st.scanRequested = false;
+        const browse = document.createElement('button');
+        browse.className = 'btn-sm';
+        browse.textContent = 'Choose Folder';
+        browse.addEventListener('click', () => vscode.postMessage({ command: 'scan_browse_folder' }));
+        panel.appendChild(browse);
+        return;
+    }
+    const results = Array.isArray(data.results) ? data.results : [];
+    const toolbar = document.createElement('div');
+    toolbar.className = 'analysis-toolbar';
+    const meta = document.createElement('div');
+    meta.className = 'analysis-toolbar-meta';
+    meta.textContent = `${results.length} image${results.length === 1 ? '' : 's'} · root ${data.root || msg.root || ''}`;
+    const rerun = document.createElement('button');
+    rerun.className = 'btn-sm';
+    rerun.textContent = 'Re-run';
+    rerun.addEventListener('click', () => {
+        panel.innerHTML = '<p class="loading">Scanning…</p>';
+        vscode.postMessage({ command: 'scan_path', path: st.scanRoot || data.root || msg.root || '' });
+    });
+    const browse = document.createElement('button');
+    browse.className = 'btn-sm';
+    browse.textContent = 'Browse…';
+    browse.addEventListener('click', () => vscode.postMessage({ command: 'scan_browse_folder' }));
+    const raw = document.createElement('button');
+    raw.className = 'btn-sm';
+    raw.textContent = 'Open JSON';
+    raw.addEventListener('click', () => vscode.postMessage({
+        command: 'open_text_report',
+        language: 'json',
+        content: JSON.stringify(msg.data, null, 2),
+    }));
+    toolbar.append(meta, rerun, browse, raw);
+    panel.appendChild(toolbar);
+    appendMiniStats(panel, {
+        seen: data.files_seen ?? results.length,
+        reported: data.files_reported ?? results.length,
+        candidates: results.reduce((n, item) => n + (Array.isArray(item.candidates) ? item.candidates.length : 0), 0),
+        risk_imports: results.reduce((n, item) => n + (Array.isArray(item.risk_imports) ? item.risk_imports.length : 0), 0),
+    });
+    if (!results.length) {
+        panel.appendChild(document.createRange().createContextualFragment('<p class="no-data">No matching PE images were reported.</p>'));
+        return;
+    }
+    const { bar, lbl } = _searchBar(panel, 'Regex search scan results…');
+    lbl.textContent = `${results.length} images`;
+    const list = document.createElement('div');
+    list.className = 'scan-results';
+    panel.appendChild(list);
+    const rows = [];
+    results.forEach(item => {
+        const details = document.createElement('details');
+        details.className = 'scan-item';
+        details.open = rows.length < 8;
+        details.dataset.text = JSON.stringify(item).toLowerCase();
+        const summary = document.createElement('summary');
+        summary.className = 'scan-summary';
+        summary.innerHTML = `<span class="scan-risk">${esc(item.risk_score ?? 0)}</span><span class="scan-name">${esc(item.name || item.path)}</span><span class="scan-meta">${esc([item.kind, item.arch, formatBytes(item.size_bytes), item.entry_point].filter(Boolean).join(' · '))}</span>`;
+        details.appendChild(summary);
+        const body = document.createElement('div');
+        body.className = 'scan-body';
+        body.appendChild(kvRow('Path', item.path || ''));
+        body.appendChild(kvRow('Exports', item.exports ?? 0));
+        body.appendChild(kvRow('Imports', item.imports ?? 0));
+        body.appendChild(kvRow('Runtime Functions', item.runtime_functions ?? 0));
+        if (item.pdb_name)
+            body.appendChild(kvRow('PDB', item.pdb_name));
+        appendScanCandidateSection(body, item.candidates || []);
+        appendScanRiskImports(body, item.risk_imports || []);
+        if (Array.isArray(item.anomalies) && item.anomalies.length) {
+            const anom = document.createElement('div');
+            anom.className = 'analysis-notes';
+            item.anomalies.forEach(a => anom.appendChild(makeTag(a, 'tag-warn')));
+            body.appendChild(anom);
+        }
+        details.appendChild(body);
+        list.appendChild(details);
+        rows.push(details);
+    });
+    const inp = bar.querySelector('input');
+    inp.addEventListener('input', () => {
+        const raw = inp.value.trim();
+        let re = null;
+        let errEl = bar.querySelector('.regex-err') || (() => { const e = document.createElement('span'); e.className = 'regex-err'; bar.appendChild(e); return e; })();
+        if (raw) {
+            try {
+                re = new RegExp(raw, 'i');
+                inp.classList.remove('invalid');
+                errEl.textContent = '';
+            }
+            catch (ex) {
+                inp.classList.add('invalid');
+                errEl.textContent = ex.message;
+                return;
+            }
+        }
+        else {
+            inp.classList.remove('invalid');
+            errEl.textContent = '';
+        }
+        let visible = 0;
+        rows.forEach(row => {
+            const show = !re || re.test(row.dataset.text || '');
+            row.style.display = show ? '' : 'none';
+            if (show)
+                visible++;
+        });
+        lbl.textContent = re ? `${visible} / ${results.length} images` : `${results.length} images`;
+    });
+}
+function appendScanCandidateSection(container, candidates) {
+    if (!candidates.length)
+        return;
+    const title = document.createElement('div');
+    title.className = 'section-label';
+    title.textContent = `Fuzz Candidates (${candidates.length})`;
+    container.appendChild(title);
+    candidates.slice(0, 12).forEach(candidate => {
+        const row = document.createElement('div');
+        row.className = 'scan-candidate';
+        row.innerHTML = `<span class="scan-risk">${esc(candidate.score ?? 0)}</span><span class="rva">${esc(candidate.rva || '')}</span><span class="scan-candidate-name">${esc(candidate.name || '')}</span><span class="scan-meta">${esc(candidate.source || '')}</span>`;
+        if (Array.isArray(candidate.reasons)) {
+            candidate.reasons.forEach(reason => row.appendChild(makeTag(reason)));
+        }
+        container.appendChild(row);
+    });
+}
+function appendScanRiskImports(container, imports) {
+    if (!imports.length)
+        return;
+    const title = document.createElement('div');
+    title.className = 'section-label';
+    title.textContent = `Risk Imports (${imports.length})`;
+    container.appendChild(title);
+    const wrap = document.createElement('div');
+    wrap.className = 'tag-wrap';
+    imports.slice(0, 32).forEach(item => wrap.appendChild(makeTag(`${item.dll}!${item.name} · ${item.category}`, 'tag-warn')));
+    container.appendChild(wrap);
 }
 function renderPeInfo(msg) {
     const d = unwrapObjectPayload<any>(msg.data, 'peinfo');
@@ -2135,6 +2522,17 @@ function renderOverview(d) {
     [['Exports', d.export_count], ['Import DLLs', d.import_dll_count], ['Imports', d.import_count]]
         .forEach(([k, v]) => cnts.body.appendChild(kvRow(k, v)));
     grid.appendChild(cnts.card);
+    const dataSummary = d.data || {};
+    if (dataSummary.unwind_count || dataSummary.vtable_count || dataSummary.pointer_count || d.startup_routines?.length) {
+        const funcs = _card('Function Discovery');
+        funcs.body.appendChild(kvRow('Startup Routines', d.startup_routines?.length || 0));
+        funcs.body.appendChild(kvRow('Runtime Functions', dataSummary.unwind_count || 0));
+        funcs.body.appendChild(kvRow('VTables', dataSummary.vtable_count || 0));
+        funcs.body.appendChild(kvRow('Pointers', dataSummary.pointer_count || 0));
+        if (d.mitigations?.cfg_function_table != null)
+            funcs.body.appendChild(kvRow('CFG Function Table', d.mitigations.cfg_function_table ? 'Present' : 'Absent'));
+        grid.appendChild(funcs.card);
+    }
     const n = d.names || {};
     if (n.product_name || n.file_description) {
         const ver = _card('Version Info');
@@ -3083,6 +3481,27 @@ function renderDump(msg) {
         });
         depthLabel.appendChild(depthSelect);
         toolbar.appendChild(depthLabel);
+
+        const hostileLabel = document.createElement('label');
+        hostileLabel.className = 'calls-hostile-label';
+        hostileLabel.title = 'Enable aggressive tracing: recursive register backward-slice, decoder-driven cross-reference scan, indirect-JMP emission, suspicion annotations';
+        const hostileCheck = document.createElement('input');
+        hostileCheck.type = 'checkbox';
+        hostileCheck.className = 'calls-hostile-check';
+        hostileCheck.checked = st.hostile;
+        hostileCheck.addEventListener('change', () => {
+            st.hostile = hostileCheck.checked;
+            const entry = currentNavEntry();
+            if (entry) {
+                st.dumpCache.clear();
+                _showDumpLoading(entry.label);
+                _requestDump(entry);
+            }
+        });
+        hostileLabel.appendChild(hostileCheck);
+        hostileLabel.appendChild(document.createTextNode(' Hostile'));
+        toolbar.appendChild(hostileLabel);
+
         cp.appendChild(toolbar);
         const wrap = document.createElement('div');
         wrap.className = 'tbl-wrap';
@@ -3698,15 +4117,15 @@ function wireAsmFlow(view, insnPane, insnBody, flowSvg, insns, apiCalls, imageNa
                 continue;
             const y1 = src.offsetTop + Math.max(8, Math.floor(src.offsetHeight / 2));
             const y2 = dst.offsetTop + Math.max(8, Math.floor(dst.offsetHeight / 2));
-            const instructionX = width - 8;
-            const laneX = instructionX - 10 - edge.lane * 12;
+            const rightX = width - 8;
+            const laneX = rightX - 10 - edge.lane * 12;
             const color = edge.kind === 'call'
                 ? 'rgba(78,201,176,.95)'
                 : edge.kind === 'jcc'
                     ? 'rgba(220,220,170,.98)'
                     : 'rgba(86,156,214,.95)';
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            path.setAttribute('d', `M ${instructionX} ${y1} H ${laneX} V ${y2} H ${instructionX - 2}`);
+            path.setAttribute('d', `M ${rightX} ${y1} H ${laneX} V ${y2} H ${rightX - 2}`);
             path.setAttribute('fill', 'none');
             path.setAttribute('stroke', color);
             path.setAttribute('stroke-width', edge.kind === 'call' ? '1.8' : edge.kind === 'jcc' ? '1.6' : '1.4');
@@ -3715,7 +4134,7 @@ function wireAsmFlow(view, insnPane, insnBody, flowSvg, insns, apiCalls, imageNa
             path.setAttribute('opacity', edge.kind === 'call' ? '0.78' : '0.96');
             flowSvg.appendChild(path);
             const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-            arrow.setAttribute('d', `M ${instructionX - 2} ${y2} l -6 -4 v 8 z`);
+            arrow.setAttribute('d', `M ${rightX - 2} ${y2} l -6 -4 v 8 z`);
             arrow.setAttribute('fill', color);
             flowSvg.appendChild(arrow);
         }

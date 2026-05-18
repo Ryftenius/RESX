@@ -45,6 +45,9 @@ pub fn print_call_tree(
             .collect();
         extra.push_str(&c.dim(&format!("  call@[{}]", site_strs.join(", "))));
     }
+    if let Some(ref via) = node.via_wrapper {
+        extra.push_str(&c.dim(&format!("  [via wrapper: {}]", via)));
+    }
 
     if node.depth == 0 {
         writeln!(w, "{}{}  {}", func_label, extra, dll_label).ok();
@@ -86,15 +89,21 @@ pub fn print_call_flat(w: &mut dyn Write, node: &CallNode, cfg: &FollowScanConfi
         } else {
             String::new()
         };
+        let wrapper = if let Some(ref via) = n.via_wrapper {
+            c.dim(&format!("  [via wrapper: {}]", via))
+        } else {
+            String::new()
+        };
         writeln!(
             w,
-            "{} {} {}!{}{}{}",
+            "{} {} {}!{}{}{}{}",
             indent,
             c.dim(arrow),
             c.cyan(&n.func.dll),
             c.b_yellow(n.func.display()),
             rva,
-            site
+            site,
+            wrapper
         )
         .ok();
         for child in &n.callers {
@@ -119,12 +128,18 @@ pub fn print_call_list(w: &mut dyn Write, node: &CallNode, cfg: &FollowScanConfi
             } else {
                 String::new()
             };
+            let wrapper = if let Some(ref via) = n.via_wrapper {
+                c.dim(&format!("  [via wrapper: {}]", via))
+            } else {
+                String::new()
+            };
             writeln!(
                 w,
-                "  {}!{}{}",
+                "  {}!{}{}{}",
                 c.cyan(&n.func.dll),
                 c.b_yellow(n.func.display()),
-                rva
+                rva,
+                wrapper
             )
             .ok();
         }
@@ -145,6 +160,8 @@ pub struct NodeJson {
     #[serde(skip_serializing_if = "is_false")]
     pub internal: bool,
     pub depth: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via_wrapper: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub call_sites: Vec<SiteJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -171,6 +188,7 @@ pub fn node_to_json(node: &CallNode) -> NodeJson {
         },
         internal: node.func.is_internal,
         depth: node.depth,
+        via_wrapper: node.via_wrapper.clone(),
         truncated: node.truncated,
         call_sites: node
             .sites

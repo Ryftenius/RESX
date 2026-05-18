@@ -1,9 +1,3 @@
-mod analysis;
-mod cli;
-mod commands;
-mod core;
-mod formats;
-
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::time::Instant;
@@ -11,13 +5,13 @@ use std::time::Instant;
 use clap::Parser;
 use rayon::ThreadPoolBuilder;
 
-use crate::cli::help::{
+use resx::cli::help::{
     example_topic, is_help_request, is_version_request, preprocess_args, print_examples,
     print_usage, version_string,
 };
-use crate::cli::router::dispatch;
-use crate::core::color::{enable_windows_ansi, is_terminal, Colors};
-use crate::core::config::{Cli, Config};
+use resx::cli::router::dispatch;
+use resx::core::color::{enable_windows_ansi, is_terminal, Colors};
+use resx::core::config::{Cli, Config};
 
 fn main() {
     let started = Instant::now();

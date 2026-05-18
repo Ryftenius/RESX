@@ -1,0 +1,7 @@
+LIBRARY "resx_palace"
+EXPORTS
+    ResxParsePacket
+    ResxDeviceIoctlDispatch
+    ResxThreadCallbackEntry
+    ResxSwitchJumpTableDispatch
+    ResxIndirectCallMessage

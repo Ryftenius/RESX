@@ -8,6 +8,10 @@ repository = "https://github.com/TITAN-Softwork-Solutions/RESX"
 homepage = "https://github.com/TITAN-Softwork-Solutions/RESX"
 build = "build.rs"
 
+[lib]
+name = "resx"
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 iced-x86 = "1"
 serde        = { version = "1", features = ["derive"] }
