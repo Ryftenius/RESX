@@ -1,10 +1,16 @@
 pub mod cfgview;
+pub mod diff;
 pub mod disasm;
+pub mod discovery;
 pub mod edr;
 pub mod explain;
 pub mod follow;
+pub mod indirect;
 pub mod intelli;
+pub mod ir;
 pub mod recomp;
+pub mod reconstruct;
+pub mod recursive_cfg;
 pub mod symbols;
 pub mod thunk;
 pub mod yara;

@@ -6,8 +6,10 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::thunk::{follow_jmp_thunk, ThunkResolution};
 use crate::core::config::Config;
 use crate::core::priority::{default_priority_dirs, matcher_from_lists};
+use crate::core::search::image_name_candidates;
 use crate::formats::pe::{
     attribute_to_func, parse_pe, read_cstr, read_exports, read_u32, read_u64,
 };
@@ -39,6 +41,7 @@ pub struct FollowScanConfig {
     pub show_site: bool,
     pub quiet: bool,
     pub reload: bool,
+    pub hostile: bool,
 }
 
 impl FollowScanConfig {
@@ -69,6 +72,7 @@ impl FollowScanConfig {
             show_site: cfg.show_site,
             quiet: cfg.quiet,
             reload: cfg.reload,
+            hostile: cfg.hostile,
         }
     }
 }
@@ -83,6 +87,29 @@ pub struct CallSite {
 pub struct Caller {
     pub func: crate::analysis::follow::trace::FuncRef,
     pub sites: Vec<CallSite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_wrapper: Option<String>,
+}
+
+/// A named export that is purely a single-JMP stub (thunk) wrapping another target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrapperEntry {
+    /// Export name of the wrapper function in this image.
+    pub name: String,
+    /// RVA of the wrapper function in this image.
+    pub rva: u32,
+    /// What the wrapper ultimately resolves to.
+    pub resolves_to: WrapperTarget,
+}
+
+/// The target a wrapper export resolves to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum WrapperTarget {
+    /// Resolves to another function inside the same image.
+    Direct { target_rva: u32 },
+    /// Resolves to an IAT import (dll_base is lowercase, no extension).
+    Import { dll_base: String, func: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +125,9 @@ pub struct ReverseCallIndex {
     pub dll_path_str: String,
     pub direct: std::collections::HashMap<u32, Vec<Caller>>,
     pub imports: std::collections::HashMap<String, Vec<Caller>>,
+    /// Exports in this image that are single-JMP wrappers around another target.
+    #[serde(default)]
+    pub wrappers: Vec<WrapperEntry>,
 }
 
 pub struct ScanImage {
@@ -258,6 +288,7 @@ fn push_indexed_site(
     let entry = bucket.entry(owner_rva).or_insert_with(|| Caller {
         func,
         sites: Vec::new(),
+        via_wrapper: None,
     });
     entry.sites.push(site);
 }
@@ -269,7 +300,7 @@ fn direct_target_rva(pe: &crate::formats::pe::PeFile, target_va: u64) -> Option<
     Some(rva)
 }
 
-fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta) -> ReverseCallIndex {
+fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -> ReverseCallIndex {
     let mut direct: std::collections::HashMap<u32, std::collections::HashMap<u32, Caller>> =
         std::collections::HashMap::new();
     let mut imports: std::collections::HashMap<String, std::collections::HashMap<u32, Caller>> =
@@ -291,60 +322,154 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta) -> ReverseCallIn
         let sec = &data.raw[start..end];
         let sec_va_base = data.pe.image_base + s.virtual_address as u64;
 
-        for i in 0..sec.len().saturating_sub(5) {
-            let b0 = sec[i];
-            let b1 = sec.get(i + 1).copied().unwrap_or(0);
-            if (b0 == 0xFF && (b1 == 0x15 || b1 == 0x25)) && i + 6 <= sec.len() {
-                let slot_va = if data.pe.arch == 64 {
-                    let rel32 = i32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap());
+        if hostile {
+            use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+            let mut decoder =
+                Decoder::with_ip(data.pe.arch, sec, sec_va_base, DecoderOptions::NONE);
+            let mut instr = iced_x86::Instruction::default();
+
+            while decoder.can_decode() {
+                decoder.decode_out(&mut instr);
+                let len = instr.len();
+                if len == 0 {
+                    break;
+                }
+
+                let site_rva = (instr.ip().wrapping_sub(data.pe.image_base)) as u32;
+                let m = instr.mnemonic();
+                let is_call = m == Mnemonic::Call;
+                let is_jmp = m == Mnemonic::Jmp;
+                if !is_call && !is_jmp {
+                    continue;
+                }
+
+                match instr.op0_kind() {
+                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+                        let target_va = instr.near_branch_target();
+                        if let Some(target_rva) = direct_target_rva(&data.pe, target_va) {
+                            push_indexed_site(
+                                direct.entry(target_rva).or_default(),
+                                CallSite {
+                                    rva: site_rva,
+                                    pattern: if is_call {
+                                        "CALL rel".to_owned()
+                                    } else {
+                                        "JMP rel".to_owned()
+                                    },
+                                },
+                                data,
+                            );
+                        }
+                    }
+
+                    OpKind::Memory => {
+                        let slot_va =
+                            if matches!(instr.memory_base(), Register::RIP | Register::EIP) {
+                                instr.ip_rel_memory_address()
+                            } else if instr.memory_base() == Register::None
+                                && instr.memory_index() == Register::None
+                            {
+                                instr.memory_displacement64()
+                            } else {
+                                0
+                            };
+
+                        if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
+                            push_indexed_site(
+                                imports
+                                    .entry(import_lookup_key(dll_base, func_name))
+                                    .or_default(),
+                                CallSite {
+                                    rva: site_rva,
+                                    pattern: if is_call {
+                                        "CALL [IAT]".to_owned()
+                                    } else {
+                                        "JMP [IAT]".to_owned()
+                                    },
+                                },
+                                data,
+                            );
+                        }
+                    }
+
+                    // Register-indirect: keep visible by site, even if unresolved.
+                    OpKind::Register => {
+                        let reg =
+                            format!("{:?}", instr.op0_register().full_register()).to_lowercase();
+                        push_indexed_site(
+                            direct.entry(site_rva).or_default(),
+                            CallSite {
+                                rva: site_rva,
+                                pattern: if is_call {
+                                    format!("CALL {reg}")
+                                } else {
+                                    format!("JMP {reg}")
+                                },
+                            },
+                            data,
+                        );
+                    }
+
+                    _ => {}
+                }
+            }
+        } else {
+            // Fast raw-byte scan for the common E8/E9 and FF 15/25 patterns.
+            for i in 0..sec.len().saturating_sub(5) {
+                let b0 = sec[i];
+                let b1 = sec.get(i + 1).copied().unwrap_or(0);
+                if (b0 == 0xFF && (b1 == 0x15 || b1 == 0x25)) && i + 6 <= sec.len() {
+                    let slot_va = if data.pe.arch == 64 {
+                        let rel32 = i32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap());
+                        let instr_va = sec_va_base + i as u64;
+                        (instr_va as i64 + 6 + rel32 as i64) as u64
+                    } else {
+                        u32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap()) as u64
+                    };
+                    if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
+                        push_indexed_site(
+                            imports
+                                .entry(import_lookup_key(dll_base, func_name))
+                                .or_default(),
+                            CallSite {
+                                rva: s.virtual_address + i as u32,
+                                pattern: if b1 == 0x15 {
+                                    "CALL [IAT]"
+                                } else {
+                                    "JMP [IAT]"
+                                }
+                                .to_owned(),
+                            },
+                            data,
+                        );
+                    }
+                    continue;
+                }
+
+                if (b0 == 0xE8 || b0 == 0xE9) && i + 5 <= sec.len() {
+                    let rel32 = i32::from_le_bytes(sec[i + 1..i + 5].try_into().unwrap());
                     let instr_va = sec_va_base + i as u64;
-                    (instr_va as i64 + 6 + rel32 as i64) as u64
-                } else {
-                    u32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap()) as u64
-                };
-                if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
+                    let target_va = (instr_va as i64 + 5 + rel32 as i64) as u64;
+                    let Some(target_rva) = direct_target_rva(&data.pe, target_va) else {
+                        continue;
+                    };
                     push_indexed_site(
-                        imports
-                            .entry(import_lookup_key(dll_base, func_name))
-                            .or_default(),
+                        direct.entry(target_rva).or_default(),
                         CallSite {
                             rva: s.virtual_address + i as u32,
-                            pattern: if b1 == 0x15 {
-                                "CALL [IAT]"
+                            pattern: if b0 == 0xE8 {
+                                "CALL rel32"
                             } else {
-                                "JMP [IAT]"
+                                "JMP rel32 (tail)"
                             }
                             .to_owned(),
                         },
                         data,
                     );
                 }
-                continue;
-            }
-
-            if (b0 == 0xE8 || b0 == 0xE9) && i + 5 <= sec.len() {
-                let rel32 = i32::from_le_bytes(sec[i + 1..i + 5].try_into().unwrap());
-                let instr_va = sec_va_base + i as u64;
-                let target_va = (instr_va as i64 + 5 + rel32 as i64) as u64;
-                let Some(target_rva) = direct_target_rva(&data.pe, target_va) else {
-                    continue;
-                };
-                push_indexed_site(
-                    direct.entry(target_rva).or_default(),
-                    CallSite {
-                        rva: s.virtual_address + i as u32,
-                        pattern: if b0 == 0xE8 {
-                            "CALL rel32"
-                        } else {
-                            "JMP rel32 (tail)"
-                        }
-                        .to_owned(),
-                    },
-                    data,
-                );
             }
         }
-    }
+    } // end for s in &data.pe.sections
 
     let direct = direct
         .into_iter()
@@ -364,6 +489,56 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta) -> ReverseCallIn
         })
         .collect();
 
+    // Wrapper detection: scan every named export for a single-JMP stub.
+    // Always-on — not gated on `hostile` — because detecting callers via wrappers
+    // is a fundamental capability independent of aggressive tracing.
+    let mut wrappers: Vec<WrapperEntry> = Vec::new();
+    for export in &data.exports {
+        if export.name.is_empty() || export.rva == 0 {
+            continue;
+        }
+        let Some(res) = follow_jmp_thunk(&data.raw, &data.pe, export.rva) else {
+            continue;
+        };
+        let target = match res {
+            ThunkResolution::Iat { dll, func, .. } => WrapperTarget::Import {
+                dll_base: normalize_dll_base(&dll),
+                func,
+            },
+            ThunkResolution::Chain {
+                ref final_target, ..
+            } => match final_target.as_ref() {
+                ThunkResolution::Iat { dll, func, .. } => WrapperTarget::Import {
+                    dll_base: normalize_dll_base(dll),
+                    func: func.clone(),
+                },
+                ThunkResolution::Direct { target_rva } => {
+                    if *target_rva != export.rva {
+                        WrapperTarget::Direct {
+                            target_rva: *target_rva,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            },
+            ThunkResolution::Direct { target_rva } => {
+                if target_rva != export.rva {
+                    WrapperTarget::Direct { target_rva }
+                } else {
+                    continue;
+                }
+            }
+            ThunkResolution::IatUnresolved { .. } => continue,
+        };
+        wrappers.push(WrapperEntry {
+            name: export.name.clone(),
+            rva: export.rva,
+            resolves_to: target,
+        });
+    }
+
     ReverseCallIndex {
         source_path: meta.path.clone(),
         file_len: meta.file_len,
@@ -376,6 +551,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta) -> ReverseCallIn
         dll_path_str: data.dll_path_str.clone(),
         direct,
         imports,
+        wrappers,
     }
 }
 
@@ -398,11 +574,7 @@ pub fn find_target_dll(name: &str, cfg: &FollowScanConfig) -> Result<PathBuf, St
         }
         return Err(format!("not found: {}", name));
     }
-    let base = if Path::new(name).extension().is_none() {
-        format!("{}.dll", name)
-    } else {
-        name.to_owned()
-    };
+    let bases = image_name_candidates(name);
 
     let mut dirs: Vec<PathBuf> = cfg.extra_paths.iter().map(PathBuf::from).collect();
     if !cfg.no_cwd {
@@ -422,9 +594,11 @@ pub fn find_target_dll(name: &str, cfg: &FollowScanConfig) -> Result<PathBuf, St
     }
 
     for dir in &dirs {
-        let c = dir.join(&base);
-        if c.exists() {
-            return c.canonicalize().map_err(|e| e.to_string());
+        for base in &bases {
+            let c = dir.join(base);
+            if c.exists() {
+                return c.canonicalize().map_err(|e| e.to_string());
+            }
         }
     }
     Err(format!(
@@ -622,7 +796,7 @@ fn load_or_build_index(path: &Path, cfg: &FollowScanConfig) -> Option<ReverseCal
     }
 
     let data = load_scan_data(path)?;
-    let index = build_reverse_index(&data, &meta);
+    let index = build_reverse_index(&data, &meta, cfg.hostile);
     if !cfg.reload {
         let _ = write_index_to_cache(path, &index);
     }

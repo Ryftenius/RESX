@@ -7,8 +7,11 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(...registerResxCommands(context));
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('resx.refreshBinary', () => {
-            vscode.commands.executeCommand('workbench.action.revertFile');
+        vscode.commands.registerCommand('resx.refreshBinary', async () => {
+            const refreshed = await ResxEditorProvider.refreshActive();
+            if (!refreshed) {
+                void vscode.window.showInformationMessage('Open a RESX binary viewer before refreshing analysis.');
+            }
         })
     );
 }

@@ -681,13 +681,11 @@ fn detect_syscall_stub(
                     syscall_number,
                 });
             }
-            Mnemonic::Int => {
-                if instr.immediate8() == 0x2E {
-                    return Some(SyscallStubInfo {
-                        is_syscall_stub: true,
-                        syscall_number,
-                    });
-                }
+            Mnemonic::Int if instr.immediate8() == 0x2E => {
+                return Some(SyscallStubInfo {
+                    is_syscall_stub: true,
+                    syscall_number,
+                });
             }
             Mnemonic::Ret => break,
             _ => {}

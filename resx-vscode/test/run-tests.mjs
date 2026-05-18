@@ -48,4 +48,9 @@ run('buildPersistedUiState preserves valid values', () => {
   });
 });
 
+run('coercePersistedUiState preserves flow and scan tabs', () => {
+  assert.equal(coercePersistedUiState({ topTab: 'flow' }).topTab, 'flow');
+  assert.equal(coercePersistedUiState({ topTab: 'scan' }).topTab, 'scan');
+});
+
 console.log('webview tests passed');

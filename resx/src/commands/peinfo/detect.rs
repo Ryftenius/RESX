@@ -1,6 +1,7 @@
 use crate::formats::pe::{
     ImportDll, PeClrInfo, PeDebugInfo, PeFile, PeLoadConfigInfo, IMAGE_GUARD_XFG_ENABLED,
 };
+use regex::Regex;
 
 use super::model::{BuildAssessment, Candidate};
 
@@ -90,10 +91,10 @@ pub fn assess_build(
         })
         .collect::<Vec<_>>();
 
-    let mut langs: Vec<(&str, Candidate)> = Vec::new();
-    let mut tools: Vec<(&str, Candidate)> = Vec::new();
-    let mut components: Vec<(&str, Candidate)> = Vec::new();
-    let mut packers: Vec<(&str, Candidate)> = Vec::new();
+    let mut langs: Vec<(String, Candidate)> = Vec::new();
+    let mut tools: Vec<(String, Candidate)> = Vec::new();
+    let mut components: Vec<(String, Candidate)> = Vec::new();
+    let mut packers: Vec<(String, Candidate)> = Vec::new();
 
     if let Some(clr_info) = clr {
         push_candidate(
@@ -442,7 +443,7 @@ pub fn assess_build(
     }
 }
 
-fn apply_rust_crate_heuristics(list: &mut Vec<(&'static str, Candidate)>, strings: &[String]) {
+fn apply_rust_crate_heuristics(list: &mut Vec<(String, Candidate)>, strings: &[String]) {
     let crate_markers: [(&str, &[&str]); 13] = [
         (
             "Tokio",
@@ -475,10 +476,71 @@ fn apply_rust_crate_heuristics(list: &mut Vec<(&'static str, Candidate)>, string
             );
         }
     }
+
+    for crate_name in infer_rust_crates(strings).into_iter().take(16) {
+        let label = format!("Rust crate: {}", crate_name);
+        push_candidate(
+            list,
+            label,
+            65,
+            format!(
+                "Rust crate inferred from string/symbol patterns ({})",
+                crate_name
+            ),
+        );
+    }
+}
+
+fn infer_rust_crates(strings: &[String]) -> Vec<String> {
+    let patterns = [
+        r"(?:^|[^a-z0-9_])([a-z][a-z0-9_]{1,31})::[a-z_][a-z0-9_]*",
+        r"registry/src/[^/\\]+/([a-z0-9_-]+)-\d+\.\d+\.\d+",
+        r"cargo/registry/src/[^/\\]+/([a-z0-9_-]+)-\d+\.\d+\.\d+",
+    ];
+    let regexes = patterns
+        .iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
+        .collect::<Vec<_>>();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let deny = [
+        "alloc",
+        "core",
+        "std",
+        "proc_macro",
+        "test",
+        "panic_unwind",
+        "compiler_builtins",
+        "windows",
+    ];
+
+    for s in strings {
+        for re in &regexes {
+            for cap in re.captures_iter(s) {
+                let Some(raw) = cap.get(1).map(|m| m.as_str()) else {
+                    continue;
+                };
+                let name = raw.replace('-', "_").to_ascii_lowercase();
+                if name.len() < 2
+                    || deny.contains(&name.as_str())
+                    || name.chars().all(|ch| ch.is_ascii_digit())
+                {
+                    continue;
+                }
+                *counts.entry(name).or_default() += 1;
+            }
+        }
+    }
+
+    let mut crates = counts
+        .into_iter()
+        .filter(|(_, count)| *count >= 1)
+        .collect::<Vec<_>>();
+    crates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    crates.into_iter().map(|(name, _)| name).collect()
 }
 
 fn apply_component_heuristics(
-    list: &mut Vec<(&'static str, Candidate)>,
+    list: &mut Vec<(String, Candidate)>,
     import_dlls: &[String],
     strings: &[String],
 ) {
@@ -555,7 +617,7 @@ fn apply_component_heuristics(
 }
 
 fn apply_packer_heuristics(
-    list: &mut Vec<(&'static str, Candidate)>,
+    list: &mut Vec<(String, Candidate)>,
     pe: &PeFile,
     sections: &[String],
     import_dlls: &[String],
@@ -692,12 +754,13 @@ fn collect_image_strings(raw: &[u8]) -> Vec<String> {
 }
 
 fn push_candidate(
-    list: &mut Vec<(&'static str, Candidate)>,
-    label: &'static str,
+    list: &mut Vec<(String, Candidate)>,
+    label: impl Into<String>,
     score: i32,
     evidence: impl Into<String>,
 ) {
-    if let Some((_, existing)) = list.iter_mut().find(|(name, _)| *name == label) {
+    let label = label.into();
+    if let Some((_, existing)) = list.iter_mut().find(|(name, _)| name == &label) {
         existing.score += score;
         existing.evidence.push(evidence.into());
         return;
@@ -712,19 +775,19 @@ fn push_candidate(
 }
 
 fn finalize_candidates(
-    list: &mut Vec<(&'static str, Candidate)>,
+    list: &mut [(String, Candidate)],
     limit: usize,
     min_score: i32,
 ) -> Vec<String> {
-    list.sort_by(|a, b| b.1.score.cmp(&a.1.score).then_with(|| a.0.cmp(b.0)));
+    list.sort_by(|a, b| b.1.score.cmp(&a.1.score).then_with(|| a.0.cmp(&b.0)));
     list.iter()
         .filter(|(_, item)| item.score >= min_score)
         .take(limit)
-        .map(|(label, _)| (*label).to_owned())
+        .map(|(label, _)| label.clone())
         .collect()
 }
 
-fn collect_evidence(list: &[(&'static str, Candidate)], min_score: i32) -> Vec<String> {
+fn collect_evidence(list: &[(String, Candidate)], min_score: i32) -> Vec<String> {
     let mut out = Vec::new();
     for (label, candidate) in list {
         if candidate.score < min_score {
@@ -758,11 +821,11 @@ fn has_section(sections: &[String], name: &str) -> bool {
     sections.iter().any(|section| section == &want)
 }
 
-fn contains_label(list: &[(&str, Candidate)], label: &str) -> bool {
+fn contains_label(list: &[(String, Candidate)], label: &str) -> bool {
     list.iter()
-        .any(|(name, item)| *name == label && item.score >= 40)
+        .any(|(name, item)| name == label && item.score >= 40)
 }
 
-fn contains_any_label(list: &[(&str, Candidate)], labels: &[&str]) -> bool {
+fn contains_any_label(list: &[(String, Candidate)], labels: &[&str]) -> bool {
     labels.iter().any(|label| contains_label(list, label))
 }

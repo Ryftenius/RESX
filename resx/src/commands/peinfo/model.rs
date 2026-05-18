@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use crate::formats::pe::{PeAnomaly, PeDebugInfo, PeLoadConfigInfo, PeSection, PeStartupRoutine};
+use crate::formats::pe::{
+    PeAnomaly, PeDataSummary, PeDebugInfo, PeLoadConfigInfo, PeSection, PeStartupRoutine,
+};
 
 #[derive(Serialize)]
 pub struct PeInfoJson {
@@ -30,6 +32,7 @@ pub struct PeInfoJson {
     pub analysis: AnalysisJson,
     pub debug: DebugJson,
     pub mitigations: MitigationsJson,
+    pub data: DataSummaryJson,
     pub names: NameJson,
     pub signer: SignerJson,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -173,6 +176,33 @@ pub struct MitigationsJson {
     pub veh_imports: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct DataSummaryJson {
+    pub string_count: usize,
+    pub vtable_count: usize,
+    pub pointer_count: usize,
+    pub unwind_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strings: Vec<DataStringJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vtables: Vec<VTableJson>,
+}
+
+#[derive(Serialize)]
+pub struct DataStringJson {
+    pub rva: String,
+    pub section: String,
+    pub encoding: String,
+    pub value: String,
+}
+
+#[derive(Serialize)]
+pub struct VTableJson {
+    pub rva: String,
+    pub section: String,
+    pub entries: Vec<String>,
+}
+
 pub struct BuildAssessment {
     pub platform: String,
     pub runtime: String,
@@ -219,6 +249,41 @@ pub fn to_startup_json(entry: &PeStartupRoutine) -> StartupRoutineJson {
         va: format!("0x{:016X}", entry.va),
         section: entry.section_name.clone(),
         note: entry.note.clone(),
+    }
+}
+
+pub fn to_data_summary_json(summary: &PeDataSummary) -> DataSummaryJson {
+    DataSummaryJson {
+        string_count: summary.strings.len(),
+        vtable_count: summary.vtables.len(),
+        pointer_count: summary.pointers.len(),
+        unwind_count: summary.runtime_functions.len(),
+        strings: summary
+            .strings
+            .iter()
+            .take(64)
+            .map(|s| DataStringJson {
+                rva: format!("0x{:08X}", s.rva),
+                section: s.section_name.clone(),
+                encoding: s.encoding.clone(),
+                value: s.value.clone(),
+            })
+            .collect(),
+        vtables: summary
+            .vtables
+            .iter()
+            .take(64)
+            .map(|v| VTableJson {
+                rva: format!("0x{:08X}", v.rva),
+                section: v.section_name.clone(),
+                entries: v
+                    .entries
+                    .iter()
+                    .take(32)
+                    .map(|rva| format!("0x{:08X}", rva))
+                    .collect(),
+            })
+            .collect(),
     }
 }
 

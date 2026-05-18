@@ -98,6 +98,16 @@
         "command": "resx.dump",
         "category": "RESX",
         "title": "Dump"
+      },
+      {
+        "command": "resx.reconstructCfg",
+        "category": "RESX",
+        "title": "Reconstruct CFG"
+      },
+      {
+        "command": "resx.scan",
+        "category": "RESX",
+        "title": "Scan Folder"
       }
     ]
   },

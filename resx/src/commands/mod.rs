@@ -1,11 +1,16 @@
 pub mod cfg;
+pub mod diff;
 pub mod dump;
 pub mod explain;
 pub mod follow;
+pub mod hunt;
+pub mod index;
 pub mod intelli;
 pub mod locate;
 pub mod peinfo;
 pub mod priority;
+pub mod reconstruct_cfg;
+pub mod scan;
 pub mod show_eat;
 pub mod show_iat;
 pub mod show_syms;

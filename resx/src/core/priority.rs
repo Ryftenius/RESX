@@ -7,7 +7,11 @@ use crate::core::config::Config;
 
 pub const EXACT_SEARCH_PRIORITY: &[&str] = &[
     "ntoskrnl.exe",
+    "win32k.sys",
+    "win32kbase.sys",
+    "win32kfull.sys",
     "ntdll.dll",
+    "win32u.dll",
     "kernelbase.dll",
     "kernel32.dll",
     "advapi32.dll",
@@ -73,6 +77,7 @@ pub const PREFIX_SEARCH_PRIORITY: &[&str] = &[
     "setup",
     "cfgmgr",
     "wdf",
+    "win32k",
     "mf",
     "dx",
     "d3d",
@@ -294,4 +299,33 @@ fn dedup_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
         out.push(dir);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{built_in_priority_names, matcher_from_lists};
+    use std::path::Path;
+
+    #[test]
+    fn win32k_family_is_builtin_priority() {
+        let names = built_in_priority_names();
+        for expected in [
+            "user32.dll",
+            "win32u.dll",
+            "win32k.sys",
+            "win32kbase.sys",
+            "win32kfull.sys",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing built-in priority image {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn win32k_prefix_is_priority_ranked() {
+        let matcher = matcher_from_lists(Vec::new(), vec!["win32k".to_owned()], Vec::new());
+        assert!(matcher.is_priority_path(Path::new("win32kbase_rs.sys")));
+    }
 }

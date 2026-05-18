@@ -12,8 +12,8 @@ use self::callmap::{
     QsiDispatcher,
 };
 use self::json::{
-    hex_bytes, to_anomaly_json, to_edr_json, to_section_json, to_startup_json, to_yara_json,
-    ApiCallJson, FuncResult, InsnJson,
+    hex_bytes, to_anomaly_json, to_data_summary_json, to_edr_json, to_section_json,
+    to_startup_json, to_yara_json, ApiCallJson, FuncResult, InsnJson,
 };
 use self::switchfmt::{format_case_summary, format_target_symbol_spaced};
 use crate::analysis::cfgview::{
@@ -23,10 +23,14 @@ use crate::analysis::cfgview::{
 use crate::analysis::disasm::{
     collect_api_calls, disassemble_at, find_string_refs, find_xrefs, ApiCall, Instruction,
 };
+use crate::analysis::discovery::discover_functions;
 use crate::analysis::edr::{check_prologue, EdrCheckResult};
 use crate::analysis::explain::explain_symbol;
+use crate::analysis::indirect::analyze_indirect_flow;
 use crate::analysis::intelli::{analyze_image, IntelliFinding};
+use crate::analysis::ir::summarize_typed_ir;
 use crate::analysis::recomp::recomp_c;
+use crate::analysis::recursive_cfg::{recover_recursive_cfg, RecursiveCfgRequest};
 use crate::analysis::symbols::SymbolIndex;
 use crate::analysis::thunk::{follow_jmp_thunk, ThunkResolution};
 use crate::analysis::yara::scan_file;
@@ -41,8 +45,9 @@ use crate::core::output::{
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
 use crate::formats::pe::{
-    find_iat_slots_by_name, find_startup_routines, parse_pe, read_exports, read_imports,
-    read_runtime_function, resolve_iat_slot, Export, PeStartupRoutine,
+    find_iat_slots_by_name, find_startup_routines, parse_pe, read_data_summary, read_exports,
+    read_imports, read_load_config, read_runtime_function, resolve_iat_slot, Export,
+    PeStartupRoutine,
 };
 
 #[derive(Debug, Clone)]
@@ -199,6 +204,20 @@ pub fn run(
     progress.tick("reading import table");
     let import_count: usize = imports.iter().map(|dll| dll.entries.len()).sum();
     let startup_routines = find_startup_routines(&pe, &raw);
+    let load_config = read_load_config(&pe, &raw);
+    let function_discovery = if cfg.json {
+        Some(discover_functions(
+            &raw,
+            &pe,
+            &exports,
+            &symbol_index,
+            &pdb_symbols,
+            &startup_routines,
+            cfg,
+        ))
+    } else {
+        None
+    };
     let yara_matches = if cfg.yara.is_empty() {
         Vec::new()
     } else {
@@ -274,6 +293,17 @@ pub fn run(
                 instructions: Vec::new(),
                 xrefs: Vec::new(),
                 strings: Vec::new(),
+                data: Some(to_data_summary_json(&read_data_summary(&pe, &raw))),
+                function_discovery,
+                recursive_cfg: None,
+                typed_ir: None,
+                indirect_flow: Some(analyze_indirect_flow(
+                    &pe,
+                    &imports,
+                    &read_data_summary(&pe, &raw),
+                    &[],
+                    load_config.as_ref(),
+                )),
                 intelli_findings: metadata_intelli,
                 recomp: String::new(),
                 cfg: String::new(),
@@ -380,6 +410,43 @@ pub fn run(
                             c.warn(&format!("Unresolved thunk: {}", res.desc()))
                         )
                         .ok();
+                    }
+                }
+                ThunkResolution::Chain {
+                    ref final_target, ..
+                } => {
+                    followed_desc = res.desc();
+                    match final_target.as_ref() {
+                        ThunkResolution::Iat { dll, func, .. } if !dll.is_empty() => {
+                            if !cfg.quiet {
+                                writeln!(w, "{}", c.info(&format!("Thunk chain: {}", res.desc())))
+                                    .ok();
+                            }
+                            let new_cfg = cfg.clone();
+                            return run(dll, func, &new_cfg, w, c);
+                        }
+                        ThunkResolution::Direct {
+                            target_rva: new_rva,
+                        } => {
+                            target_rva = *new_rva;
+                            file_off = pe.rva_to_offset(target_rva).ok_or_else(|| {
+                                format!("RVA 0x{:08X}: not in any section", target_rva)
+                            })?;
+                            if !cfg.quiet {
+                                writeln!(
+                                    w,
+                                    "{}",
+                                    c.info(&format!("Following chain: {}", res.desc()))
+                                )
+                                .ok();
+                            }
+                        }
+                        _ => {
+                            if !cfg.quiet {
+                                writeln!(w, "{}", c.info(&format!("Thunk chain: {}", res.desc())))
+                                    .ok();
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -496,9 +563,15 @@ pub fn run(
     } else {
         Vec::new()
     };
+    let data_summary = if cfg.json || cfg.show_strings {
+        Some(read_data_summary(&pe, &raw))
+    } else {
+        None
+    };
 
     let api_calls = if cfg.funcs_depth > 0 {
-        let mut calls = collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base);
+        let mut calls =
+            collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base, cfg.hostile);
 
         // Merge switch-dispatch targets.  First drop any unresolved register-indirect
         // entry at the same JMP site (they are superseded by the resolved targets).
@@ -521,6 +594,7 @@ pub fn run(
             &api_calls,
             &insns,
             &resolved_name,
+            &dll_name,
             &raw,
             &pe,
             &symbol_index,
@@ -533,8 +607,44 @@ pub fn run(
     } else {
         String::new()
     };
-    let current_syscall = synthetic_syscall_api_call(&insns, &resolved_name)
+    let current_syscall = synthetic_syscall_api_call(&insns, &resolved_name, &dll_name)
         .and_then(|call| resolve_syscall_call_details(&call, &insns, cfg));
+    let prototype = symbol_index
+        .exact(image_base + target_rva as u64)
+        .map(|sym| sym.type_name)
+        .unwrap_or_default();
+    let typed_ir_summary = if cfg.json {
+        Some(summarize_typed_ir(
+            &insns,
+            image_base,
+            Some(&symbol_index),
+            &prototype,
+        ))
+    } else {
+        None
+    };
+    let recursive_cfg = if cfg.json || want_cfg {
+        Some(recover_recursive_cfg(RecursiveCfgRequest {
+            raw: &raw,
+            pe: &pe,
+            start_rva: target_rva,
+            arch,
+            image_base,
+            exports: &exports,
+            symbols: Some(&symbol_index),
+            cfg,
+            prototype: &prototype,
+        }))
+    } else {
+        None
+    };
+    let indirect_flow = if cfg.json {
+        data_summary.as_ref().map(|data| {
+            analyze_indirect_flow(&pe, &imports, data, &api_calls, load_config.as_ref())
+        })
+    } else {
+        None
+    };
 
     let intelli_findings = if want_intelli {
         let findings = analyze_image(&raw, &imports, Some(&insns));
@@ -678,6 +788,7 @@ pub fn run(
                 &api_calls,
                 &insns,
                 &resolved_name,
+                &dll_name,
                 c,
                 &raw,
                 &pe,
@@ -816,6 +927,11 @@ pub fn run(
                 .collect(),
             xrefs,
             strings: str_refs,
+            data: data_summary.as_ref().map(to_data_summary_json),
+            function_discovery,
+            recursive_cfg,
+            typed_ir: typed_ir_summary,
+            indirect_flow,
             intelli_findings: if only_metadata {
                 metadata_intelli
             } else {

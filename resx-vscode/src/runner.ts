@@ -13,6 +13,7 @@ export interface RunOptions {
     symPaths?: string[];
     pdbFile?: string;
     funcsDepth?: number;
+    hostile?: boolean;
 }
 
 export interface RunTraceEntry {
@@ -143,7 +144,10 @@ function verifyExecutable(
     const cached = verificationCache.get(key);
     if (cached) return cached;
 
-    const pending = verifyExecutableInner(context, key, label, requireBundledHash);
+    const pending = verifyExecutableInner(context, key, label, requireBundledHash).catch(error => {
+        verificationCache.delete(key);
+        throw error;
+    });
     verificationCache.set(key, pending);
     return pending;
 }
@@ -167,16 +171,21 @@ async function verifyExecutableInner(
         return filePath;
     }
 
+    if (requireBundledHash) {
+        await verifyBundledHash(context, filePath, label);
+    }
+
     const signature = await getAuthenticodeSignature(filePath);
+    if (requireBundledHash && (!signature.thumbprint || signature.status === 'NotSigned')) {
+        return filePath;
+    }
+
     const thumbprint = (signature.thumbprint || '').replace(/\s+/g, '').toUpperCase();
     if (!trustedSignerThumbprints.has(thumbprint)) {
         throw new Error(`${label} is signed by an untrusted certificate (${thumbprint || 'unknown thumbprint'}).`);
     }
     if (!isTrustedSignatureStatus(signature)) {
         throw new Error(`${label} failed signature validation (${signature.status || 'Unknown'}).`);
-    }
-    if (requireBundledHash) {
-        await verifyBundledHash(context, filePath, label);
     }
 
     return filePath;
@@ -300,6 +309,10 @@ export function runJson(
         }
         if (opts?.pdbFile) {
             extra.push('--pdb', opts.pdbFile);
+        }
+
+        if (opts?.hostile) {
+            extra.push('--hostile');
         }
 
         const allArgs = [...args, ...extra, '--json', '--no-color', '--quiet'];

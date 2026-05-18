@@ -89,7 +89,103 @@ export function registerResxCommands(context: vscode.ExtensionContext): vscode.D
         vscode.commands.registerCommand('resx.dump', async () => {
             await openDump(context);
         }),
+        vscode.commands.registerCommand('resx.reconstructCfg', async (uri?: vscode.Uri) => {
+            await openReconstructCfgReport(context, uri);
+        }),
+        vscode.commands.registerCommand('resx.scan', async (uri?: vscode.Uri) => {
+            await openScanReport(context, uri);
+        }),
     ];
+}
+
+async function openReconstructCfgReport(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
+    const target = await pickImageUri(uri, 'Select image to reconstruct');
+    if (!target) return;
+
+    const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `RESX: reconstructing ${path.basename(target.fsPath)}`,
+        cancellable: false,
+    }, async () => runJson(context, ['reconstruct-cfg', target.fsPath], resxRunOpts()));
+
+    if (result.error) {
+        void vscode.window.showErrorMessage(result.error);
+        return;
+    }
+
+    await openJsonReport('RESX reconstruct-cfg', result.data);
+}
+
+async function openScanReport(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
+    const root = await pickScanRoot(uri);
+    if (!root) return;
+
+    const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `RESX: scanning ${path.basename(root.fsPath) || root.fsPath}`,
+        cancellable: false,
+    }, async () => runJson(context, ['scan', root.fsPath]));
+
+    if (result.error) {
+        void vscode.window.showErrorMessage(result.error);
+        return;
+    }
+
+    await openJsonReport('RESX scan', result.data);
+}
+
+async function pickImageUri(uri: vscode.Uri | undefined, title: string): Promise<vscode.Uri | undefined> {
+    if (uri?.scheme === 'file' && /\.(dll|exe|sys)$/i.test(uri.fsPath)) {
+        return uri;
+    }
+
+    const active = vscode.window.activeTextEditor?.document.uri;
+    if (active?.scheme === 'file' && /\.(dll|exe|sys)$/i.test(active.fsPath)) {
+        return active;
+    }
+
+    const picked = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        canSelectFiles: true,
+        canSelectFolders: false,
+        filters: { 'Windows binaries': ['dll', 'exe', 'sys'], 'All files': ['*'] },
+        title,
+    });
+    return picked?.[0];
+}
+
+async function pickScanRoot(uri?: vscode.Uri): Promise<vscode.Uri | undefined> {
+    if (uri?.scheme === 'file') {
+        try {
+            const stat = await fs.stat(uri.fsPath);
+            return stat.isDirectory() ? uri : vscode.Uri.file(path.dirname(uri.fsPath));
+        } catch {
+            return uri;
+        }
+    }
+
+    if (vscode.workspace.workspaceFolders?.length === 1) {
+        return vscode.workspace.workspaceFolders[0].uri;
+    }
+
+    const picked = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        canSelectFiles: false,
+        canSelectFolders: true,
+        title: 'Select folder to scan',
+    });
+    return picked?.[0];
+}
+
+async function openJsonReport(title: string, data: unknown): Promise<void> {
+    const doc = await vscode.workspace.openTextDocument({
+        language: 'json',
+        content: JSON.stringify(data ?? {}, null, 2),
+    });
+    await vscode.window.showTextDocument(doc, {
+        preview: false,
+        viewColumn: vscode.ViewColumn.Beside,
+    });
 }
 
 async function openLocate(context: vscode.ExtensionContext, kind: 'locate' | 'locate-sym'): Promise<void> {

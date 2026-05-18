@@ -9,8 +9,8 @@ use crate::core::output::StageProgress;
 use crate::core::search::find_dll_path;
 use crate::formats::metadata::{query_file_metadata, FileMetadata};
 use crate::formats::pe::{
-    find_startup_routines, parse_pe, read_clr_info, read_debug_info, read_exports, read_imports,
-    read_load_config, ImportDll, PeDebugInfo, PeLoadConfigInfo,
+    find_startup_routines, parse_pe, read_clr_info, read_data_summary, read_debug_info,
+    read_exports, read_imports, read_load_config, ImportDll, PeDebugInfo, PeLoadConfigInfo,
     IMAGE_DLLCHARACTERISTICS_APPCONTAINER, IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE,
     IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY, IMAGE_DLLCHARACTERISTICS_GUARD_CF,
     IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA, IMAGE_DLLCHARACTERISTICS_NO_SEH,
@@ -25,8 +25,8 @@ use crate::formats::pe::{
 
 use self::detect::{assess_build, detect_image_kind, machine_name, subsystem_name};
 use self::model::{
-    debug_types, safe_seh, to_anomaly_json, to_section_json, to_startup_json, AnalysisJson,
-    DebugJson, MitigationsJson, NameJson, PeInfoJson, SignerJson,
+    debug_types, safe_seh, to_anomaly_json, to_data_summary_json, to_section_json, to_startup_json,
+    AnalysisJson, DebugJson, MitigationsJson, NameJson, PeInfoJson, SignerJson,
 };
 use self::render::{blank_as_unknown, render_text, TextReport};
 
@@ -88,6 +88,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
     );
     let veh_imports = detect_veh_imports(&imports);
     let startup_routines = find_startup_routines(&pe, &raw);
+    let data_summary = read_data_summary(&pe, &raw);
 
     if cfg.json {
         let out = PeInfoJson {
@@ -129,6 +130,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
             },
             debug: to_debug_json(&pe, &debug),
             mitigations: to_mitigations_json(&pe, load_config.as_ref(), &veh_imports),
+            data: to_data_summary_json(&data_summary),
             names: NameJson {
                 product_name: metadata.product_name.clone(),
                 file_description: metadata.file_description.clone(),
