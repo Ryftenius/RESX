@@ -910,7 +910,7 @@ fn profile_image(
             .then_with(|| parse_hex32(&a.rva).cmp(&parse_hex32(&b.rva)))
     });
     discovered.truncate(max_functions);
-    discovered.sort_by(|a, b| a.rva.cmp(&b.rva));
+    discovered.sort_by_key(|item| item.rva.clone());
 
     let import_slots = import_slot_map(&imports);
     let import_names = import_name_set(&imports);
@@ -2917,7 +2917,7 @@ fn prune_nested_function_hints(
             keep.push(fp);
         }
     }
-    keep.sort_by(|a, b| a.rva.cmp(&b.rva));
+    keep.sort_by_key(|item| item.rva);
     *functions = keep;
     if suppressed > 0 {
         notes.push(format!(
