@@ -7,6 +7,7 @@ pub mod hunt;
 pub mod index;
 pub mod intelli;
 pub mod locate;
+pub mod patch;
 pub mod peinfo;
 pub mod priority;
 pub mod reconstruct_cfg;

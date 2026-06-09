@@ -34,6 +34,10 @@ pub fn dispatch(
         return commands::diff::run(&dll_arg, &func_arg, cfg, w, c);
     }
 
+    if cfg.patch || (raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("patch")) {
+        return commands::patch::run(&dll_arg, &func_arg, cfg, w, c);
+    }
+
     if !cfg.extra_diff_images.is_empty() {
         return Err(format!(
             "unexpected extra positional argument `{}`; multi-image positional inputs are supported by `resx diff`",
@@ -121,12 +125,12 @@ pub fn dispatch(
     }
     if dll_arg.is_empty() {
         return Err(
-            "Specify a command such as dump, cfg, reconstruct-cfg, intelli, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, scan, yara, update, or help".to_owned(),
+            "Specify a command such as dump, cfg, patch, reconstruct-cfg, intelli, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, scan, yara, update, or help".to_owned(),
         );
     }
 
     Err(
-        "Incomplete command. Use `resx dump <dll> <function>`, `resx reconstruct-cfg <dll>`, `resx callers <dll> <function>`, `resx scan <path>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
+        "Incomplete command. Use `resx dump <dll> <function>`, `resx patch <dll> --at <addr> --patch-bytes <hex>`, `resx reconstruct-cfg <dll>`, `resx callers <dll> <function>`, `resx scan <path>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
     )
 }
 
@@ -147,6 +151,7 @@ fn is_locate_mode(cfg: &Config, dll_arg: &str, func_arg: &str) -> bool {
             && !cfg.pechk
             && !cfg.hookchk
             && !cfg.intelli
+            && !cfg.patch
             && !cfg.reconstruct_cfg
             && !cfg.resx_diff
             && !cfg.resx_index
@@ -166,6 +171,7 @@ fn should_dump(cfg: &Config, func_arg: &str) -> bool {
         || cfg.pechk
         || cfg.hookchk
         || cfg.intelli
+        || cfg.patch
         || cfg.reconstruct_cfg
         || cfg.resx_diff
         || cfg.resx_index
