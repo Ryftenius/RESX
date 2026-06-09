@@ -131,6 +131,21 @@ impl PeFile {
         self.sections.iter().find(|s| s.contains_rva(rva))
     }
 
+    pub fn file_offset_to_rva(&self, offset: u64) -> Option<u32> {
+        for section in &self.sections {
+            if section.raw_size == 0 {
+                continue;
+            }
+            let start = section.raw_offset as u64;
+            let end = start.saturating_add(section.raw_size as u64);
+            if offset >= start && offset < end {
+                let delta = u32::try_from(offset - start).ok()?;
+                return Some(section.virtual_address.saturating_add(delta));
+            }
+        }
+        None
+    }
+
     pub fn va_to_rva(&self, va: u64) -> Option<u32> {
         let delta = va.checked_sub(self.image_base)?;
         let rva = u32::try_from(delta).ok()?;
@@ -450,5 +465,17 @@ mod tests {
     fn va_to_rva_maps_valid_section_addresses() {
         let pe = sample_pe();
         assert_eq!(pe.va_to_rva(pe.image_base + 0x1100), Some(0x1100));
+    }
+
+    #[test]
+    fn file_offset_to_rva_maps_section_file_offsets() {
+        let pe = sample_pe();
+        assert_eq!(pe.file_offset_to_rva(0x500), Some(0x1100));
+    }
+
+    #[test]
+    fn file_offset_to_rva_rejects_unmapped_offsets() {
+        let pe = sample_pe();
+        assert_eq!(pe.file_offset_to_rva(0x300), None);
     }
 }
