@@ -59,7 +59,39 @@ struct RecoveredSwitchTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_u32_literal;
+    use super::{parse_u32_literal, parse_u64_literal, resolve_address_spec, AddressSource};
+    use crate::formats::pe::{PeAnomaly, PeFile, PeSection};
+
+    fn sample_pe() -> PeFile {
+        PeFile {
+            arch: 64,
+            machine: 0x8664,
+            timestamp: 0,
+            coff_characteristics: 0,
+            major_linker_version: 0,
+            minor_linker_version: 0,
+            image_base: 0x1_8000_0000,
+            entry_point: 0x1200,
+            size_of_image: 0x3000,
+            size_of_headers: 0x400,
+            section_alignment: 0x1000,
+            file_alignment: 0x200,
+            checksum: 0,
+            subsystem: 3,
+            dll_characteristics: 0,
+            sections: vec![PeSection {
+                name: ".text".to_owned(),
+                virtual_address: 0x1000,
+                virtual_size: 0x600,
+                raw_offset: 0x400,
+                raw_size: 0x800,
+                characteristics: 0,
+                entropy: 0.0,
+            }],
+            data_dirs: vec![(0, 0); 16],
+            anomalies: Vec::<PeAnomaly>::new(),
+        }
+    }
 
     #[test]
     fn parse_u32_literal_accepts_hex_and_decimal_forms() {
@@ -72,6 +104,36 @@ mod tests {
     #[test]
     fn parse_u32_literal_rejects_negative_values() {
         assert_eq!(parse_u32_literal("-1"), None);
+    }
+
+    #[test]
+    fn parse_u64_literal_accepts_image_sized_addresses() {
+        assert_eq!(parse_u64_literal("0x180001200"), Some(0x180001200));
+    }
+
+    #[test]
+    fn resolve_address_spec_accepts_rva_va_and_file_offset() {
+        let pe = sample_pe();
+
+        let rva = resolve_address_spec("0x1200", &pe).unwrap();
+        assert_eq!(rva.rva, 0x1200);
+        assert_eq!(rva.source, AddressSource::Rva);
+
+        let va = resolve_address_spec("0x180001200", &pe).unwrap();
+        assert_eq!(va.rva, 0x1200);
+        assert_eq!(va.source, AddressSource::Va);
+
+        let file = resolve_address_spec("file:0x600", &pe).unwrap();
+        assert_eq!(file.rva, 0x1200);
+        assert_eq!(file.source, AddressSource::FileOffset);
+    }
+
+    #[test]
+    fn resolve_address_spec_falls_back_to_file_offset_when_rva_is_unmapped() {
+        let pe = sample_pe();
+        let file = resolve_address_spec("0x600", &pe).unwrap();
+        assert_eq!(file.rva, 0x1200);
+        assert_eq!(file.source, AddressSource::FileOffset);
     }
 }
 
@@ -103,6 +165,199 @@ struct SwitchSemanticInfo {
     selector_param: HeaderParam,
     selector_enum: HeaderEnum,
     params: Vec<HeaderParam>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddressSource {
+    Rva,
+    Va,
+    FileOffset,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedAddress {
+    rva: u32,
+    value: u64,
+    source: AddressSource,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTarget {
+    target_rva: u32,
+    input_rva: u32,
+    input_value: u64,
+    address_source: AddressSource,
+    name: String,
+}
+
+fn address_source_label(source: AddressSource) -> &'static str {
+    match source {
+        AddressSource::Rva => "RVA",
+        AddressSource::Va => "VA",
+        AddressSource::FileOffset => "file offset",
+    }
+}
+
+fn resolve_address_target(
+    raw_spec: &str,
+    name_hint: &str,
+    exports: &[Export],
+    pdb_symbols: &[crate::formats::pdb::PdbSymbol],
+    pe: &crate::formats::pe::PeFile,
+    raw: &[u8],
+    image_base: u64,
+) -> Result<ResolvedTarget, String> {
+    let address = resolve_address_spec(raw_spec, pe)?;
+    let target_rva = read_runtime_function(pe, raw, address.rva)
+        .map(|runtime| runtime.begin_rva)
+        .or_else(|| nearest_named_function_start(exports, pdb_symbols, pe, address.rva))
+        .unwrap_or(address.rva);
+    let name = if !name_hint.is_empty() && !looks_like_address_literal(name_hint) {
+        name_hint.to_owned()
+    } else {
+        best_function_name_for_rva(exports, pdb_symbols, image_base, target_rva, address.rva)
+    };
+
+    Ok(ResolvedTarget {
+        target_rva,
+        input_rva: address.rva,
+        input_value: address.value,
+        address_source: address.source,
+        name,
+    })
+}
+
+fn resolve_address_spec(
+    raw: &str,
+    pe: &crate::formats::pe::PeFile,
+) -> Result<ResolvedAddress, String> {
+    let (forced_source, value_text) = split_address_source_prefix(raw);
+    let value =
+        parse_u64_literal(value_text).ok_or_else(|| format!("invalid --at value: {}", raw))?;
+
+    if let Some(source) = forced_source {
+        return resolve_forced_address_source(raw, value, source, pe);
+    }
+
+    if let Some(rva) = pe.va_to_rva(value) {
+        return Ok(ResolvedAddress {
+            rva,
+            value,
+            source: AddressSource::Va,
+        });
+    }
+
+    if let Ok(rva) = u32::try_from(value) {
+        if pe.rva_to_section(rva).is_some() {
+            return Ok(ResolvedAddress {
+                rva,
+                value,
+                source: AddressSource::Rva,
+            });
+        }
+    }
+
+    if let Some(rva) = pe.file_offset_to_rva(value) {
+        return Ok(ResolvedAddress {
+            rva,
+            value,
+            source: AddressSource::FileOffset,
+        });
+    }
+
+    Err(format!(
+        "address `{raw}` did not map to a PE VA, RVA, or file offset"
+    ))
+}
+
+fn resolve_forced_address_source(
+    raw: &str,
+    value: u64,
+    source: AddressSource,
+    pe: &crate::formats::pe::PeFile,
+) -> Result<ResolvedAddress, String> {
+    let rva = match source {
+        AddressSource::Rva => {
+            let rva =
+                u32::try_from(value).map_err(|_| format!("RVA `{raw}` is larger than 32 bits"))?;
+            pe.rva_to_section(rva)
+                .is_some()
+                .then_some(rva)
+                .ok_or_else(|| format!("RVA 0x{rva:08X}: not in any section"))?
+        }
+        AddressSource::Va => pe
+            .va_to_rva(value)
+            .ok_or_else(|| format!("VA 0x{value:X}: not in this image"))?,
+        AddressSource::FileOffset => pe
+            .file_offset_to_rva(value)
+            .ok_or_else(|| format!("file offset 0x{value:X}: not in any section"))?,
+    };
+
+    Ok(ResolvedAddress { rva, value, source })
+}
+
+fn split_address_source_prefix(raw: &str) -> (Option<AddressSource>, &str) {
+    let trimmed = raw.trim();
+    let Some((prefix, value)) = trimmed.split_once(':') else {
+        return (None, trimmed);
+    };
+    let source = match prefix.to_ascii_lowercase().as_str() {
+        "rva" => AddressSource::Rva,
+        "va" => AddressSource::Va,
+        "fo" | "file" | "offset" | "fileoff" | "file-offset" => AddressSource::FileOffset,
+        _ => return (None, trimmed),
+    };
+    (Some(source), value.trim())
+}
+
+fn looks_like_address_literal(raw: &str) -> bool {
+    let (_, value) = split_address_source_prefix(raw);
+    parse_u64_literal(value).is_some()
+}
+
+fn nearest_named_function_start(
+    exports: &[Export],
+    pdb_symbols: &[crate::formats::pdb::PdbSymbol],
+    pe: &crate::formats::pe::PeFile,
+    input_rva: u32,
+) -> Option<u32> {
+    let input_section = pe.rva_to_section(input_rva)?;
+    let mut best: Option<u32> = None;
+
+    for sym in pdb_symbols {
+        if sym.kind != "function" || sym.rva == 0 || sym.rva > input_rva {
+            continue;
+        }
+        if sym.size > 0 {
+            let sym_size = sym.size.min(u32::MAX as u64) as u32;
+            let sym_end = sym.rva.saturating_add(sym_size);
+            if input_rva < sym_end {
+                return Some(sym.rva);
+            }
+        }
+        if pe
+            .rva_to_section(sym.rva)
+            .is_some_and(|section| section.name == input_section.name)
+            && best.is_none_or(|current| sym.rva > current)
+        {
+            best = Some(sym.rva);
+        }
+    }
+
+    for export in exports {
+        if export.rva > input_rva {
+            continue;
+        }
+        if pe
+            .rva_to_section(export.rva)
+            .is_some_and(|section| section.name == input_section.name)
+            && best.is_none_or(|current| export.rva > current)
+        {
+            best = Some(export.rva);
+        }
+    }
+
+    best.filter(|start| *start < input_rva)
 }
 
 pub fn run(
@@ -1359,6 +1614,10 @@ fn parse_enum_member(line: &str) -> Option<(String, u32)> {
 }
 
 fn parse_u32_literal(raw: &str) -> Option<u32> {
+    parse_u64_literal(raw).and_then(|value| u32::try_from(value).ok())
+}
+
+fn parse_u64_literal(raw: &str) -> Option<u64> {
     let value = raw.trim().trim_end_matches(',');
     if value.is_empty() || value.starts_with('-') {
         return None;
@@ -1370,9 +1629,9 @@ fn parse_u32_literal(raw: &str) -> Option<u32> {
         .or_else(|| value.strip_suffix('h'))
         .or_else(|| value.strip_suffix('H'));
     if let Some(hex) = hex {
-        u32::from_str_radix(hex, 16).ok()
+        u64::from_str_radix(hex, 16).ok()
     } else {
-        value.parse::<u32>().ok()
+        value.parse::<u64>().ok()
     }
 }
 
@@ -1410,14 +1669,19 @@ pub(crate) fn resolve_function(
     c: &Colors,
 ) -> Result<(u32, String, bool), String> {
     if !cfg.at_rva.is_empty() {
-        let rva = parse_u32_literal(&cfg.at_rva)
-            .ok_or_else(|| format!("invalid --at value: {}", cfg.at_rva))?;
-        let name = if func_arg.is_empty() {
-            format!("fn_0x{:08X}", rva)
-        } else {
-            func_arg.to_owned()
-        };
-        return Ok((rva, name, false));
+        let target = resolve_address_target(
+            &cfg.at_rva,
+            func_arg,
+            exports,
+            pdb_symbols,
+            pe,
+            raw,
+            image_base,
+        )?;
+        if !cfg.quiet {
+            print_address_resolution(w, c, &target);
+        }
+        return Ok((target.target_rva, target.name, false));
     }
 
     if cfg.ordinal > 0 {
@@ -1450,6 +1714,15 @@ pub(crate) fn resolve_function(
             }
             return Ok((e.rva, e.name.clone(), false));
         }
+    }
+
+    if looks_like_address_literal(func_arg) {
+        let target =
+            resolve_address_target(func_arg, "", exports, pdb_symbols, pe, raw, image_base)?;
+        if !cfg.quiet {
+            print_address_resolution(w, c, &target);
+        }
+        return Ok((target.target_rva, target.name, false));
     }
 
     if !cfg.no_pdb {
@@ -1542,6 +1815,79 @@ pub(crate) fn resolve_function(
     )
     .ok();
     Err(format!("function '{}' not found", func_arg))
+}
+
+fn print_address_resolution(w: &mut dyn Write, c: &Colors, target: &ResolvedTarget) {
+    let source = address_source_label(target.address_source);
+    if target.input_rva == target.target_rva {
+        writeln!(
+            w,
+            "{}",
+            c.ok(&format!(
+                "{source} 0x{:X} -> RVA 0x{:08X}",
+                target.input_value, target.target_rva
+            ))
+        )
+        .ok();
+    } else {
+        writeln!(
+            w,
+            "{}",
+            c.ok(&format!(
+                "{source} 0x{:X} -> RVA 0x{:08X}; using containing function 0x{:08X} (+0x{:X})",
+                target.input_value,
+                target.input_rva,
+                target.target_rva,
+                target.input_rva.saturating_sub(target.target_rva)
+            ))
+        )
+        .ok();
+    }
+}
+
+fn best_function_name_for_rva(
+    exports: &[Export],
+    pdb_symbols: &[crate::formats::pdb::PdbSymbol],
+    image_base: u64,
+    function_rva: u32,
+    input_rva: u32,
+) -> String {
+    for e in exports {
+        if e.rva == function_rva {
+            return e.name.clone();
+        }
+    }
+
+    for sym in pdb_symbols {
+        if sym.rva == function_rva {
+            return sym.name.clone();
+        }
+    }
+
+    for sym in pdb_symbols {
+        if sym.kind != "function" || sym.size == 0 || sym.rva == 0 {
+            continue;
+        }
+        let sym_size = sym.size.min(u32::MAX as u64) as u32;
+        let sym_end = sym.rva.saturating_add(sym_size);
+        if input_rva >= sym.rva && input_rva < sym_end {
+            let disp = input_rva.saturating_sub(sym.rva);
+            return if disp == 0 {
+                sym.name.clone()
+            } else {
+                format!("{}+0x{disp:X}", sym.name)
+            };
+        }
+    }
+
+    let va = image_base + function_rva as u64;
+    for sym in pdb_symbols {
+        if sym.va == va {
+            return sym.name.clone();
+        }
+    }
+
+    format!("fn_0x{function_rva:08X}")
 }
 
 fn find_cached_pdb_symbol<'a>(
