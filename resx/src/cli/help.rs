@@ -28,13 +28,14 @@ switch-map recovery, hook checks, caller tracing, Intelli triage, and rapid anal
 
 USAGE
   resx dump <dll> <function> [options]
-  resx dump <dll> --at <rva> [options]
+  resx dump <dll> --at <addr> [options]
   resx dump <dll> --ordinal <n> [options]
   resx cfg <dll> <function> [options]
-  resx cfg <dll> --at <rva> [options]
+  resx cfg <dll> --at <addr> [options]
   resx cfg <dll> --ordinal <n> [options]
   resx reconstruct-cfg <dll> [flow options]
   resx intelli <dll> [function] [options]
+  resx patch <dll> --at <addr> --patch-bytes <hex> [patch options]
   resx diff <image-a> <image-b> [image-c ...] [diff options]
   resx index <dir-or-image> --db <file> [corpus options]
   resx hunt <sample> --db <file> [corpus options]
@@ -65,6 +66,7 @@ COMMANDS
   reconstruct-cfg
               Rebuild a best-effort startup-to-exit flow waterfall for one image.
   intelli     Run heuristic triage over a target image or function.
+  patch       Apply guarded byte patches to a PE image copy or explicit in-place target.
   diff        Compare normalized function and control-flow structure between images.
   index       Build a reusable structural fingerprint corpus.
   hunt        Rank corpus images related to one sample by code structure.
@@ -86,7 +88,7 @@ COMMANDS
   help        Show this help text.
 
 DUMP / INTELLI OPTIONS
-  --at <rva>                 dump by RVA instead of by function name
+  --at <addr>                dump by RVA, PE VA, or file offset instead of by function name
   --ordinal <n>              dump by export ordinal
   --recomp                   show C-like reconstruction
   --c-out <file>             write reconstruction to a C file
@@ -169,6 +171,16 @@ CORPUS OPTIONS
   --max-file-mb <mb>          skip images above this size
   --max-candidates <n>        cap hunt candidates printed
 
+PATCH OPTIONS
+  --at <addr>                 patch by RVA, PE VA, or file offset
+  --patch-bytes <hex>         replacement bytes, e.g. 90 90, 9090, or 0x90,0x90
+  --expect <hex>              require original bytes before patching
+  --patch-out <file>          write patched copy to this path
+  --dry-run                   validate and report without writing
+  --in-place                  patch the source image itself
+  --overwrite                 allow replacing an existing --patch-out/default copy
+  --update-checksum           recalculate and write the PE optional-header checksum
+
 GLOBAL OPTIONS
   --arch <auto|x86|x64>
   --path <dir>
@@ -190,6 +202,7 @@ EXAMPLES
   resx dump kernel32.dll CreateFileW --funcs --xrefs
   resx intelli suspicious.dll
   resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
+  resx patch .\sample.dll --at 0x1200 --patch-bytes "90 90" --expect "55 48" --patch-out .\sample.patched.dll
   resx peinfo .\blackbird.sys
   resx sections ntdll.dll
   resx eat kernel32.dll
@@ -230,6 +243,7 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "cfg",
         "reconstruct-cfg",
         "intelli",
+        "patch",
         "peinfo",
         "sections",
         "eat",
@@ -298,6 +312,7 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--intelli".to_string());
         }
+        "patch" => return rewrite_patch_command(raw_args),
         "peinfo" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--peinfo".to_string());
@@ -383,6 +398,40 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
     rewritten
 }
 
+fn rewrite_patch_command(raw_args: &[String]) -> Vec<String> {
+    let mut rewritten = vec![raw_args[0].clone()];
+    let Some(image) = raw_args.get(2) else {
+        rewritten.push("--patch".to_string());
+        return rewritten;
+    };
+    if image.starts_with('-') {
+        rewritten.extend(raw_args.iter().skip(2).cloned());
+        rewritten.push("--patch".to_string());
+        return rewritten;
+    }
+
+    rewritten.push(image.clone());
+    let mut idx = 3;
+    if raw_args.get(idx).is_some_and(|arg| !arg.starts_with('-')) {
+        rewritten.push("--at".to_string());
+        rewritten.push(raw_args[idx].clone());
+        idx += 1;
+    }
+    if raw_args.get(idx).is_some_and(|arg| !arg.starts_with('-')) {
+        let mut bytes = Vec::new();
+        while raw_args.get(idx).is_some_and(|arg| !arg.starts_with('-')) {
+            bytes.push(raw_args[idx].clone());
+            idx += 1;
+        }
+        rewritten.push("--patch-bytes".to_string());
+        rewritten.push(bytes.join(" "));
+    }
+
+    rewritten.extend(raw_args.iter().skip(idx).cloned());
+    rewritten.push("--patch".to_string());
+    rewritten
+}
+
 pub fn print_examples(topic: &str) {
     let topic = topic.to_ascii_lowercase();
     let body = match topic.as_str() {
@@ -408,6 +457,19 @@ INTELLI EXAMPLES
 NOTES
   `intelli` is a first-class command alias for dump-driven heuristic triage.
   It is useful when you want imports, strings, hooks, and signal tags quickly.
+"#
+        }
+        "patch" => {
+            r#"
+PATCH EXAMPLES
+  resx patch .\sample.dll --at 0x1200 --patch-bytes "90 90" --dry-run
+  resx patch .\sample.dll file:0x600 "90 90" --expect "55 48" --patch-out .\sample.patched.dll
+  resx patch .\driver.sys va:0x140001000 CC --patch-out .\driver.patched.sys --update-checksum
+  resx patch .\sample.dll 0x1200 90 90 --in-place --expect "55 48"
+
+NOTES
+  Patches bytes only. It does not assemble instructions, grow sections, search
+  code caves, rewrite relocations, or preserve Authenticode signatures.
 "#
         }
         "dump" | "recomp" | "c" => {

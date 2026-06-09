@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -104,6 +105,40 @@ fn array_contains_name(items: &Value, name: &str) -> bool {
         .is_some_and(|values| values.iter().any(|item| item["name"] == name))
 }
 
+fn nearest_export_at_or_before(items: &Value, rva: u64) -> (String, String) {
+    let mut best: Option<(u64, String)> = None;
+    for item in items.as_array().expect("exports should be an array") {
+        let Some(name) = item["name"].as_str() else {
+            continue;
+        };
+        let Some(export_rva) = item["rva"].as_str().map(parse_hex_text_u64) else {
+            continue;
+        };
+        if export_rva <= rva
+            && best
+                .as_ref()
+                .is_none_or(|(current, _)| export_rva > *current)
+        {
+            best = Some((export_rva, name.to_owned()));
+        }
+    }
+    let (export_rva, name) = best.expect("expected export at or before RVA");
+    (name, format!("0x{export_rva:08X}"))
+}
+
+fn parse_hex_u64(value: &Value) -> u64 {
+    let text = value.as_str().expect("expected hex string");
+    parse_hex_text_u64(text)
+}
+
+fn parse_hex_text_u64(text: &str) -> u64 {
+    u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("valid hex string")
+}
+
+fn hex_byte(value: u8) -> String {
+    format!("{value:02X}")
+}
+
 #[test]
 fn resx_palace_samples_exercise_binary_analysis_commands() {
     let Some((dll, variant, exe)) = ensure_samples() else {
@@ -139,6 +174,149 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
             .as_array()
             .is_some_and(|instructions| !instructions.is_empty()));
     }
+
+    let image_base = parse_hex_u64(&peinfo["peinfo"]["image_base"]);
+    let (expected_inner_name, expected_inner_rva) =
+        nearest_export_at_or_before(&eat["exports"], 0x1205);
+    let inner_export_va = format!("0x{:X}", image_base + 0x1205);
+    for args in [
+        vec![
+            "dump",
+            dll,
+            "--at",
+            inner_export_va.as_str(),
+            "--json",
+            "--no-color",
+            "--quiet",
+            "--no-pdb",
+        ],
+        vec![
+            "dump",
+            dll,
+            "--at",
+            "file:0x600",
+            "--json",
+            "--no-color",
+            "--quiet",
+            "--no-pdb",
+        ],
+        vec![
+            "dump",
+            dll,
+            "0x1205",
+            "--json",
+            "--no-color",
+            "--quiet",
+            "--no-pdb",
+        ],
+    ] {
+        let dump_at = run_json(&args);
+        assert_eq!(dump_at["dump"]["function"], expected_inner_name);
+        assert_eq!(dump_at["dump"]["rva"], expected_inner_rva);
+        assert_eq!(
+            dump_at["dump"]["instructions"][0]["rva"],
+            expected_inner_rva
+        );
+    }
+
+    let patch_out = build_dir().join("resx_palace.patch-test.dll");
+    let _ = fs::remove_file(&patch_out);
+    let patch_out = patch_out.to_str().unwrap();
+    let original_raw = fs::read(dll).expect("read resx-palace dll");
+    let patch_file_offset = 0x600usize;
+    let original_byte = original_raw[patch_file_offset];
+    let replacement_byte = if original_byte == 0x90 { 0xCC } else { 0x90 };
+    let original_hex = hex_byte(original_byte);
+    let replacement_hex = hex_byte(replacement_byte);
+
+    let patch_dry_run = run_json(&[
+        "patch",
+        dll,
+        "--at",
+        "file:0x600",
+        "--patch-bytes",
+        replacement_hex.as_str(),
+        "--expect",
+        original_hex.as_str(),
+        "--dry-run",
+        "--json",
+        "--no-color",
+        "--quiet",
+    ]);
+    assert_eq!(patch_dry_run["schema_version"], 1);
+    assert_eq!(patch_dry_run["patch"]["write"]["performed"], false);
+    assert_eq!(patch_dry_run["patch"]["address"]["rva"], "0x00001200");
+    assert_eq!(
+        patch_dry_run["patch"]["bytes"]["replacement"],
+        replacement_hex
+    );
+
+    let second_replacement_byte = if original_raw[patch_file_offset + 1] == 0x90 {
+        0xCC
+    } else {
+        0x90
+    };
+    let original_pair_hex = format!(
+        "{} {}",
+        hex_byte(original_raw[patch_file_offset]),
+        hex_byte(original_raw[patch_file_offset + 1])
+    );
+    let second_replacement_hex = hex_byte(second_replacement_byte);
+    let replacement_pair_hex = format!("{} {}", replacement_hex, second_replacement_hex);
+    let patch_unquoted_bytes = run_json(&[
+        "patch",
+        dll,
+        "--at",
+        "file:0x600",
+        "--patch-bytes",
+        replacement_hex.as_str(),
+        second_replacement_hex.as_str(),
+        "--expect",
+        original_pair_hex.as_str(),
+        "--dry-run",
+        "--json",
+        "--no-color",
+        "--quiet",
+    ]);
+    assert_eq!(patch_unquoted_bytes["patch"]["bytes"]["length"], 2);
+    assert_eq!(
+        patch_unquoted_bytes["patch"]["bytes"]["replacement"],
+        replacement_pair_hex
+    );
+
+    let patch = run_json(&[
+        "patch",
+        dll,
+        "file:0x600",
+        replacement_hex.as_str(),
+        "--expect",
+        original_hex.as_str(),
+        "--patch-out",
+        patch_out,
+        "--update-checksum",
+        "--json",
+        "--no-color",
+        "--quiet",
+    ]);
+    assert_eq!(patch["schema_version"], 1);
+    assert_eq!(patch["patch"]["image"], "resx_palace.dll");
+    assert_eq!(patch["patch"]["address"]["file_offset"], "0x00000600");
+    assert_eq!(patch["patch"]["bytes"]["original"], original_hex);
+    assert_eq!(patch["patch"]["bytes"]["replacement"], replacement_hex);
+    assert_eq!(patch["patch"]["write"]["performed"], true);
+    assert_eq!(patch["patch"]["checksum"]["updated"], true);
+    assert!(patch["patch"]["checksum"]["new"].as_str().is_some());
+
+    let source_after_patch = fs::read(dll).expect("read original after patch copy");
+    let patched_raw = fs::read(patch_out).expect("read patched copy");
+    assert_eq!(source_after_patch, original_raw);
+    assert_eq!(patched_raw.len(), original_raw.len());
+    assert_eq!(patched_raw[patch_file_offset], replacement_byte);
+    assert_ne!(
+        patched_raw[patch_file_offset],
+        original_raw[patch_file_offset]
+    );
+    let _ = fs::remove_file(patch_out);
 
     let cfg = run_resx(&[
         "cfg",

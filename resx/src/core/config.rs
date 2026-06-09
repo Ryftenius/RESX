@@ -77,6 +77,30 @@ pub struct Cli {
     #[arg(long = "intelli")]
     pub intelli: bool,
 
+    #[arg(long = "patch", hide = true)]
+    pub patch: bool,
+
+    #[arg(long = "patch-bytes", value_name = "HEX")]
+    pub patch_bytes: Option<String>,
+
+    #[arg(long = "expect", alias = "expected", value_name = "HEX")]
+    pub patch_expect: Option<String>,
+
+    #[arg(long = "patch-out", value_name = "FILE")]
+    pub patch_out: Option<String>,
+
+    #[arg(long = "dry-run")]
+    pub patch_dry_run: bool,
+
+    #[arg(long = "in-place")]
+    pub patch_in_place: bool,
+
+    #[arg(long = "overwrite")]
+    pub patch_overwrite: bool,
+
+    #[arg(long = "update-checksum")]
+    pub patch_update_checksum: bool,
+
     #[arg(long = "reconstruct-cfg")]
     pub reconstruct_cfg: bool,
 
@@ -358,6 +382,14 @@ pub struct Config {
     pub unsafe_map_image: bool,
     pub hookchk: bool,
     pub intelli: bool,
+    pub patch: bool,
+    pub patch_bytes: String,
+    pub patch_expect: String,
+    pub patch_out: String,
+    pub patch_dry_run: bool,
+    pub patch_in_place: bool,
+    pub patch_overwrite: bool,
+    pub patch_update_checksum: bool,
     pub reconstruct_cfg: bool,
     pub reconstruct_thread_filter: String,
     pub reconstruct_api_filter: String,
@@ -467,6 +499,14 @@ impl Config {
             unsafe_map_image: cli.unsafe_map_image,
             hookchk: cli.hookchk,
             intelli: cli.intelli,
+            patch: cli.patch,
+            patch_bytes: cli.patch_bytes.clone().unwrap_or_default(),
+            patch_expect: cli.patch_expect.clone().unwrap_or_default(),
+            patch_out: cli.patch_out.clone().unwrap_or_default(),
+            patch_dry_run: cli.patch_dry_run,
+            patch_in_place: cli.patch_in_place,
+            patch_overwrite: cli.patch_overwrite,
+            patch_update_checksum: cli.patch_update_checksum,
             reconstruct_cfg: cli.reconstruct_cfg,
             reconstruct_thread_filter: cli.reconstruct_thread_filter.clone(),
             reconstruct_api_filter: cli.reconstruct_api_filter.clone(),
