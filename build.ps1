@@ -39,9 +39,9 @@ function Require-Tool {
                     continue
                 }
 
-                $candidates = Get-ChildItem -Path $kitRoot -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+                $candidates = @(Get-ChildItem -Path $kitRoot -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
                     Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-                    Sort-Object -Property FullName -Descending
+                    Sort-Object -Property FullName -Descending)
                 if ($candidates.Count -gt 0) {
                     return $candidates[0].FullName
                 }
