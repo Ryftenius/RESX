@@ -27,6 +27,33 @@ function Require-Tool {
 
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
     if (-not $cmd) {
+        if ($Name -ieq "signtool.exe") {
+            $kitRoots = @()
+            if (${env:ProgramFiles(x86)}) {
+                $kitRoots += Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+                $kitRoots += Join-Path ${env:ProgramFiles(x86)} "Windows Kits\8.1\bin"
+            }
+
+            foreach ($kitRoot in $kitRoots) {
+                if (-not (Test-Path $kitRoot)) {
+                    continue
+                }
+
+                $candidates = Get-ChildItem -Path $kitRoot -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                    Sort-Object -Property FullName -Descending
+                if ($candidates.Count -gt 0) {
+                    return $candidates[0].FullName
+                }
+
+                $fallback = Get-ChildItem -Path $kitRoot -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
+                    Sort-Object -Property FullName -Descending |
+                    Select-Object -First 1
+                if ($fallback) {
+                    return $fallback.FullName
+                }
+            }
+        }
         throw "Required tool not found: $Name"
     }
     return $cmd.Source
