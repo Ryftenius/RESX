@@ -9,6 +9,7 @@ param(
     [string]$PfxPath,
     [string]$PfxPassword,
     [switch]$SkipNpmCi,
+    [switch]$AllowUnsignedFallback,
     [switch]$NoSign
 )
 
@@ -320,8 +321,17 @@ if (-not $SkipNpmCi) {
 Copy-Item -LiteralPath $CargoExe -Destination $BundledExe -Force
 
 if (-not $NoSign) {
-    Sign-File -SignTool $SignTool -FilePath $CargoExe -Timestamp $TimestampServer -CertificatePath $ResolvedPfx -CertificatePassword $ResolvedPfxPassword -StoreName $CertificateStoreName -CertSubject $SubjectName -CertThumbprint $ResolvedStoreThumbprint
-    Sign-File -SignTool $SignTool -FilePath $BundledExe -Timestamp $TimestampServer -CertificatePath $ResolvedPfx -CertificatePassword $ResolvedPfxPassword -StoreName $CertificateStoreName -CertSubject $SubjectName -CertThumbprint $ResolvedStoreThumbprint
+    try {
+        Sign-File -SignTool $SignTool -FilePath $CargoExe -Timestamp $TimestampServer -CertificatePath $ResolvedPfx -CertificatePassword $ResolvedPfxPassword -StoreName $CertificateStoreName -CertSubject $SubjectName -CertThumbprint $ResolvedStoreThumbprint
+        Sign-File -SignTool $SignTool -FilePath $BundledExe -Timestamp $TimestampServer -CertificatePath $ResolvedPfx -CertificatePassword $ResolvedPfxPassword -StoreName $CertificateStoreName -CertSubject $SubjectName -CertThumbprint $ResolvedStoreThumbprint
+    }
+    catch {
+        if (-not $AllowUnsignedFallback) {
+            throw
+        }
+        Write-Warning "Signing failed; continuing with unsigned release artifacts because -AllowUnsignedFallback was set. $($_.Exception.Message)"
+        $ResolvedStoreThumbprint = $null
+    }
 }
 
 Write-TrustManifest -OutputPath $TrustManifestPath -BundledExePath $BundledExe -SignerThumbprint $ResolvedStoreThumbprint
