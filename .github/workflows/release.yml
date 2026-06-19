@@ -105,14 +105,15 @@ jobs:
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.RESX_SIGNING_PFX_BASE64 }}"))
           "pfx_path=$pfxPath" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Build signed CLI and VSIX
+      - name: Build CLI and VSIX
         shell: powershell
         run: |
           ./build.ps1 `
             -Configuration release `
             -OutputRoot "${{ steps.version.outputs.publish_root }}" `
             -PfxPath "${{ steps.signing.outputs.pfx_path }}" `
-            -PfxPassword "${{ secrets.RESX_PFX_PASSWORD }}"
+            -PfxPassword "${{ secrets.RESX_PFX_PASSWORD }}" `
+            -AllowUnsignedFallback
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
