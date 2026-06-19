@@ -220,11 +220,10 @@ fn render_progress_bar(width: usize, done: usize, total: usize, color: bool) -> 
 }
 
 fn progress_percent(done: usize, total: usize) -> usize {
-    if total == 0 {
-        100
-    } else {
-        (done.min(total) * 100) / total
-    }
+    done.min(total)
+        .checked_mul(100)
+        .and_then(|value| value.checked_div(total))
+        .unwrap_or(100)
 }
 
 pub struct StageProgress {
