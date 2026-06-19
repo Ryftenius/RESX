@@ -47,6 +47,21 @@ fn run_json(args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("invalid json")
 }
 
+fn run_json_in(cwd: &Path, args: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_resx"))
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("failed to run resx");
+    assert!(
+        output.status.success(),
+        "resx failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("invalid json")
+}
+
 #[test]
 fn peinfo_dump_and_metadata_commands_use_versioned_json() {
     let Some(j58) = require_fixture("J58.dll") else {
@@ -93,6 +108,18 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
         .as_array()
         .is_some_and(|v| !v.is_empty()));
 
+    let xrefs = run_json(&[
+        "xrefs",
+        j58.to_str().unwrap(),
+        first_export,
+        "--json",
+        "--no-color",
+        "--quiet",
+    ]);
+    assert_eq!(xrefs["schema_version"], 1);
+    assert_eq!(xrefs["dump"]["function"], first_export);
+    assert!(xrefs["dump"]["xrefs"].as_array().is_some());
+
     let imports = run_json(&[
         "iat",
         j58.to_str().unwrap(),
@@ -115,6 +142,37 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
     assert_eq!(diff["schema_version"], 1);
     assert_eq!(diff["diff"]["summary"]["similarity_score"], 100);
     assert!(diff["diff"]["matches"]
+        .as_array()
+        .is_some_and(|v| !v.is_empty()));
+}
+
+#[test]
+fn dump_command_resolves_explicit_relative_image_from_current_directory() {
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_resx"));
+    let exe_dir = exe
+        .parent()
+        .expect("resx test binary should have a parent directory");
+    let exe_name = exe
+        .file_name()
+        .expect("resx test binary should have a file name")
+        .to_string_lossy()
+        .to_string();
+    let relative = format!(".\\{exe_name}");
+
+    let dump = run_json_in(
+        exe_dir,
+        &[
+            "dump",
+            relative.as_str(),
+            "--json",
+            "--no-color",
+            "--quiet",
+            "--no-pdb",
+        ],
+    );
+    assert_eq!(dump["schema_version"], 1);
+    assert_eq!(dump["dump"]["dll"], exe_name);
+    assert!(dump["dump"]["sections"]
         .as_array()
         .is_some_and(|v| !v.is_empty()));
 }

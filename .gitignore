@@ -16,3 +16,4 @@
 /resx-demo/
 *.dll
 *.sys
+/resx-palace/target-resx-tests/

@@ -16,6 +16,9 @@
 - `resx cfg <dll> --ordinal <n>`
 - `resx reconstruct-cfg <dll>`
 - `resx intelli <dll> [function]`
+- `resx behavior <dll>`
+- `resx unpack <dll>`
+- `resx entropy <dll>`
 - `resx diff <image-a> <image-b> [image-c ...]`
 - `resx index <dir-or-image> --db <file>`
 - `resx hunt <sample> --db <file>`
@@ -65,6 +68,30 @@
 - `resx intelli <dll>` runs triage against an image quickly.
 - `resx intelli <dll> <function>` narrows the triage to a specific target while still allowing dump-side options like `--hookchk`, `--cfg text`, `--strings`, and `--json`.
 - `intelli` is a command alias for the dump pipeline with `--intelli` enabled.
+
+## Behavior
+
+- `resx behavior <dll>` scans the image for static anti-analysis, loader, syscall, TLS, and executable-memory/JIT signals.
+- `--json` emits a versioned `behavior` report with category, rule, severity, confidence, source, RVA, detail, and evidence fields.
+- Findings are triage evidence, not proof of runtime execution.
+
+## Unpack
+
+- `resx unpack <dll>` performs static protected-file unpacking and VM-lifting triage.
+- It reports packer/protector markers, high-entropy or writable executable sections, sparse imports, CPUID/timing checks, OEP/handoff candidates, import-rebuild hints, and possible VM dispatcher/handler sites.
+- Layer 2 adds bounded OEP disassembly windows, import rebuild plan entries, and VM handler sketches with registers, mnemonics, and local instructions.
+- `--json` emits a versioned `unpack` report with `protector_hints`, `oep_candidates`, `import_rebuild_hints`, `vm_candidates`, `layer2`, and `next_steps`.
+- The command emits leads for malware-analysis unpacking workflows; it does not currently write a rebuilt unpacked binary.
+
+## Entropy
+
+- `resx entropy <dll>` renders an overlaid terminal plot over executable sections by default.
+- The plot uses the 0.0-8.0 entropy scale on the y-axis and code RVA order on the x-axis. Symbols are `*` entropy, `a` ASCII ratio, `z` zero-byte ratio, `u` unique-byte ratio, and `#` overlap.
+- The detail table below the plot reports each RVA window, Shannon entropy, ASCII ratio, zero-byte ratio, unique-byte pressure, and flags such as `high-entropy`, `low-entropy`, `zero-heavy`, `ascii-heavy`, and `byte-diverse`.
+- `--entropy-window <bytes>` controls window size; default is `1024`.
+- `--entropy-stride <bytes>` controls the step between windows; default is `512`.
+- `--entropy-all` includes non-executable sections.
+- `--json` emits a versioned `entropy` report with summary and per-window records.
 
 ## Explain
 

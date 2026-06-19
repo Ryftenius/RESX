@@ -6,8 +6,8 @@ use clap::Parser;
 use rayon::ThreadPoolBuilder;
 
 use resx::cli::help::{
-    example_topic, is_help_request, is_version_request, preprocess_args, print_examples,
-    print_usage, version_string,
+    example_topic, help_topic, is_help_request, is_version_request, preprocess_args,
+    print_examples, print_usage, version_string,
 };
 use resx::cli::router::dispatch;
 use resx::core::color::{enable_windows_ansi, is_terminal, Colors};
@@ -18,7 +18,11 @@ fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
 
     if is_help_request(&raw_args) {
-        print_usage();
+        if let Some(topic) = help_topic(&raw_args) {
+            print_examples(topic);
+        } else {
+            print_usage();
+        }
         return;
     }
     if is_version_request(&raw_args) {

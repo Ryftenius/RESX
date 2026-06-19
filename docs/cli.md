@@ -35,6 +35,9 @@ resx dump <image> --ordinal <n>
 resx cfg <image> <function>
 resx reconstruct-cfg <image>
 resx intelli <image> [function]
+resx behavior <image>
+resx entropy <image>
+resx unpack <image>
 resx peinfo <image>
 resx scan <path>
 resx diff <old-image> <new-image>
@@ -50,6 +53,9 @@ resx diff <old-image> <new-image>
 | `cfg` | Render a control-flow graph view for one function. |
 | `reconstruct-cfg` | Rebuild a best-effort startup/TLS/thread/workpool flow waterfall for one image. |
 | `intelli` | Run heuristic triage over an image or one function. |
+| `behavior` | Run static anti-analysis, loader, syscall, TLS, and JIT/generator triage over one image. |
+| `entropy` | Render an entropy and byte-factor graph over executable code. |
+| `unpack` | Run static protected-file unpacking and VM-lifting triage over one image. |
 | `types` | Browse PDB-backed type names and symbol references. |
 | `peinfo` | Emit PE headers, data directories, imports/exports summary, TLS/startup evidence, debug info, load config, resources, and anomaly data. |
 | `sections` | Show section layout, entropy, protection, and expectation notes. |
@@ -76,6 +82,9 @@ Most analysis commands support JSON:
 ```powershell
 resx peinfo .\sample.dll --json
 resx dump .\sample.dll DllMain --json
+resx behavior .\sample.dll --json
+resx entropy .\sample.dll --json
+resx unpack .\sample.dll --json
 resx reconstruct-cfg .\sample.dll --json
 resx scan .\samples --json
 ```

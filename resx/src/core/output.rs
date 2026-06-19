@@ -78,28 +78,29 @@ impl AsyncProgress {
         let _g = self.render_lock.lock().unwrap();
         eprint!("\x1b[{}A", self.lanes.len() + 1);
         let done = self.done.load(Ordering::Relaxed).min(self.total);
-        let beam = render_beam(30, done, self.color);
+        let bar = render_progress_bar(28, done, self.total, self.color);
+        let pct = progress_percent(done, self.total);
         if self.color {
             eprint!(
-                "\r\x1b[2K  {}  {:>6}/{:<6}  \x1b[2mtotal jobs\x1b[0m\n",
-                beam, done, self.total
+                "\r\x1b[2K  {}  \x1b[96m{:>3}%\x1b[0m  {:>6}/{:<6}  \x1b[2mtotal jobs\x1b[0m\n",
+                bar, pct, done, self.total
             );
         } else {
             eprint!(
-                "\r\x1b[2K  {}  {:>6}/{:<6}  total jobs\n",
-                beam, done, self.total
+                "\r\x1b[2K  {}  {:>3}%  {:>6}/{:<6}  total jobs\n",
+                bar, pct, done, self.total
             );
         }
 
         for (idx, lane) in self.lanes.iter().enumerate() {
             let lane_done = lane.done.load(Ordering::Relaxed);
-            let lane_beam = render_beam(18, lane_done, self.color);
+            let lane_bar = render_activity_bar(14, lane_done, self.color);
             let label = lane.label.lock().unwrap().clone();
             let label = trunc_label(&label, 42);
             if self.color {
                 eprint!(
                     "\r\x1b[2K  {}  \x1b[2mworker {:>2}\x1b[0m  {:>6}  \x1b[2m{:<42}\x1b[0m\n",
-                    lane_beam,
+                    lane_bar,
                     idx + 1,
                     lane_done,
                     label
@@ -107,7 +108,7 @@ impl AsyncProgress {
             } else {
                 eprint!(
                     "\r\x1b[2K  {}  worker {:>2}  {:>6}  {:<42}\n",
-                    lane_beam,
+                    lane_bar,
                     idx + 1,
                     lane_done,
                     label
@@ -146,9 +147,21 @@ impl ProgressBar {
             return;
         }
         let n = self.done.fetch_add(1, Ordering::Relaxed) + 1;
-        let beam = render_beam(30, n, self.color);
+        let done = n.min(self.total);
+        let bar = render_progress_bar(28, done, self.total, self.color);
+        let pct = progress_percent(done, self.total);
         let label = trunc_label(label, 38);
-        eprint!("\r  {}  {:>5}/{:<5}  {:<38}", beam, n, self.total, label);
+        if self.color {
+            eprint!(
+                "\r  {}  \x1b[96m{:>3}%\x1b[0m  {:>5}/{:<5}  {:<38}",
+                bar, pct, done, self.total, label
+            );
+        } else {
+            eprint!(
+                "\r  {}  {:>3}%  {:>5}/{:<5}  {:<38}",
+                bar, pct, done, self.total, label
+            );
+        }
     }
 
     pub fn finish(&self) {
@@ -169,7 +182,7 @@ fn trunc_label(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn render_beam(width: usize, n: usize, color: bool) -> String {
+fn render_activity_bar(width: usize, n: usize, color: bool) -> String {
     let cycle = if width > 1 { 2 * (width - 1) } else { 1 };
     let p = n % cycle;
     let pos = if p < width { p } else { cycle - p };
@@ -183,6 +196,34 @@ fn render_beam(width: usize, n: usize, color: bool) -> String {
         (0..width)
             .map(|i| if i == pos { '●' } else { '·' })
             .collect()
+    }
+}
+
+fn render_progress_bar(width: usize, done: usize, total: usize, color: bool) -> String {
+    let width = width.max(1);
+    let total = total.max(1);
+    let done = done.min(total);
+    let filled = (done * width).div_ceil(total);
+    if color {
+        format!(
+            "\x1b[2m[\x1b[0m\x1b[96m{}\x1b[0m\x1b[2m{}\x1b[0m\x1b[2m]\x1b[0m",
+            "█".repeat(filled),
+            "░".repeat(width.saturating_sub(filled))
+        )
+    } else {
+        format!(
+            "[{}{}]",
+            "#".repeat(filled),
+            "-".repeat(width.saturating_sub(filled))
+        )
+    }
+}
+
+fn progress_percent(done: usize, total: usize) -> usize {
+    if total == 0 {
+        100
+    } else {
+        (done.min(total) * 100) / total
     }
 }
 
@@ -208,12 +249,20 @@ impl StageProgress {
             return;
         }
         self.done = (self.done + 1).min(self.total);
-        let beam = render_beam(30, self.done, self.color);
+        let bar = render_progress_bar(28, self.done, self.total, self.color);
+        let pct = progress_percent(self.done, self.total);
         let label = trunc_label(label, 38);
-        eprint!(
-            "\r  {}  {:>2}/{:<2}  {:<38}",
-            beam, self.done, self.total, label
-        );
+        if self.color {
+            eprint!(
+                "\r  {}  \x1b[96m{:>3}%\x1b[0m  {:>2}/{:<2}  {:<38}",
+                bar, pct, self.done, self.total, label
+            );
+        } else {
+            eprint!(
+                "\r  {}  {:>3}%  {:>2}/{:<2}  {:<38}",
+                bar, pct, self.done, self.total, label
+            );
+        }
         let _ = std::io::stderr().flush();
     }
 

@@ -119,6 +119,41 @@ pub fn disassemble_at(
     symbols: Option<&SymbolIndex>,
     cfg: &Config,
 ) -> Result<Vec<Instruction>, String> {
+    disassemble_at_inner(
+        raw, pe, file_off, start_rva, arch, image_base, exports, symbols, cfg, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn disassemble_at_unbounded(
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    file_off: usize,
+    start_rva: u32,
+    arch: u32,
+    image_base: u64,
+    exports: &[Export],
+    symbols: Option<&SymbolIndex>,
+    cfg: &Config,
+) -> Result<Vec<Instruction>, String> {
+    disassemble_at_inner(
+        raw, pe, file_off, start_rva, arch, image_base, exports, symbols, cfg, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn disassemble_at_inner(
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    file_off: usize,
+    start_rva: u32,
+    arch: u32,
+    image_base: u64,
+    exports: &[Export],
+    symbols: Option<&SymbolIndex>,
+    cfg: &Config,
+    honor_runtime_bounds: bool,
+) -> Result<Vec<Instruction>, String> {
     if file_off >= raw.len() {
         return Err(format!(
             "file offset 0x{:X} out of bounds (file size {})",
@@ -127,12 +162,18 @@ pub fn disassemble_at(
         ));
     }
 
-    let runtime_function = crate::formats::pe::read_runtime_function(pe, raw, start_rva);
-    let runtime_size = runtime_function
-        .as_ref()
-        .and_then(|func| func.end_rva.checked_sub(start_rva))
-        .map(|size| size as usize)
-        .filter(|&size| size > 0);
+    let runtime_function = honor_runtime_bounds
+        .then(|| crate::formats::pe::read_runtime_function(pe, raw, start_rva))
+        .flatten();
+    let runtime_size = if honor_runtime_bounds {
+        runtime_function
+            .as_ref()
+            .and_then(|func| func.end_rva.checked_sub(start_rva))
+            .map(|size| size as usize)
+            .filter(|&size| size > 0)
+    } else {
+        None
+    };
 
     let section_limit = pe
         .rva_to_section(start_rva)
@@ -755,6 +796,38 @@ pub fn find_xrefs(
             }
 
             if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
+                if let Some(symbol_index) = symbols {
+                    if is_guard_dispatch_call(insn, symbol_index) {
+                        if let Some(src) =
+                            track_wdf_table_register(&insns, idx, Register::RAX, symbols, pe)
+                                .or_else(|| {
+                                    track_indirect_register(
+                                        &insns,
+                                        idx,
+                                        Register::RAX,
+                                        image_base,
+                                        pe,
+                                        raw,
+                                        Some(symbol_index),
+                                    )
+                                })
+                        {
+                            if src.dll.eq_ignore_ascii_case("WDF")
+                                && src.label.eq_ignore_ascii_case(target_name)
+                            {
+                                let kind = if insn.is_call { "CALL" } else { "JMP" };
+                                let line = format!(
+                                    "{} {} [site 0x{:08X}] -> {}!{} via {}",
+                                    kind, owner, site_rva, src.dll, src.label, src.method
+                                );
+                                if seen.insert(line.clone()) {
+                                    results.push(line);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let slot_va = if insn.iced.memory_base() == Register::RIP
                     || insn.iced.memory_base() == Register::EIP
                 {
@@ -793,13 +866,33 @@ pub fn find_xrefs(
 
             if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Register {
                 let reg = insn.iced.op0_register();
-                if let Some(src) = track_indirect_register(&insns, idx, reg, image_base, pe, raw) {
-                    if src.iat_slot_rva == target_rva {
+                if let Some(src) =
+                    track_wdf_table_register(&insns, idx, reg, symbols, pe).or_else(|| {
+                        track_indirect_register(&insns, idx, reg, image_base, pe, raw, symbols)
+                    })
+                {
+                    let matches_target = (src.iat_slot_rva != 0 && src.iat_slot_rva == target_rva)
+                        || (src.dll.eq_ignore_ascii_case("WDF")
+                            && src.label.eq_ignore_ascii_case(target_name));
+                    if matches_target {
                         let kind = if insn.is_call { "CALL" } else { "JMP" };
-                        let line = format!(
-                            "{} {} [site 0x{:08X}] -> {}!{} [IAT 0x{:08X}] via {}",
-                            kind, owner, site_rva, src.dll, src.label, src.iat_slot_rva, src.method
-                        );
+                        let line = if src.dll.eq_ignore_ascii_case("WDF") {
+                            format!(
+                                "{} {} [site 0x{:08X}] -> {}!{} via {}",
+                                kind, owner, site_rva, src.dll, src.label, src.method
+                            )
+                        } else {
+                            format!(
+                                "{} {} [site 0x{:08X}] -> {}!{} [IAT 0x{:08X}] via {}",
+                                kind,
+                                owner,
+                                site_rva,
+                                src.dll,
+                                src.label,
+                                src.iat_slot_rva,
+                                src.method
+                            )
+                        };
                         if seen.insert(line.clone()) {
                             results.push(line);
                         }
@@ -857,6 +950,11 @@ enum RegExpr {
         func: String,
         slot_rva: u32,
     },
+    WdfFunction {
+        func: String,
+        table: String,
+        offset: u64,
+    },
     Derived(String),
 }
 
@@ -871,6 +969,11 @@ fn combine_add(base: RegExpr, rhs: u64) -> RegExpr {
         } => RegExpr::Derived(format!(
             "{dll}!{func} @IAT+0x{rhs:X} [slot 0x{slot_rva:08X}]"
         )),
+        RegExpr::WdfFunction {
+            func,
+            table,
+            offset,
+        } => RegExpr::Derived(format!("{table}[0x{offset:X}]/{func} + 0x{rhs:X}")),
         RegExpr::Derived(s) => RegExpr::Derived(format!("({s}) + 0x{rhs:X}")),
         RegExpr::Unknown => RegExpr::Unknown,
     }
@@ -887,6 +990,11 @@ fn combine_sub(base: RegExpr, rhs: u64) -> RegExpr {
         } => RegExpr::Derived(format!(
             "{dll}!{func} @IAT-0x{rhs:X} [slot 0x{slot_rva:08X}]"
         )),
+        RegExpr::WdfFunction {
+            func,
+            table,
+            offset,
+        } => RegExpr::Derived(format!("{table}[0x{offset:X}]/{func} - 0x{rhs:X}")),
         RegExpr::Derived(s) => RegExpr::Derived(format!("({s}) - 0x{rhs:X}")),
         RegExpr::Unknown => RegExpr::Unknown,
     }
@@ -906,6 +1014,18 @@ fn expr_to_regsource(expr: RegExpr, reg: Register) -> RegSource {
             method: format!("{reg_name} ← IAT slot 0x{slot_rva:08X}"),
             target_rva: 0,
             iat_slot_rva: slot_rva,
+        },
+        RegExpr::WdfFunction {
+            func,
+            table,
+            offset,
+        } => RegSource {
+            label: func,
+            dll: "WDF".to_owned(),
+            is_import: true,
+            method: format!("{reg_name} ← {table}[0x{offset:X}]"),
+            target_rva: 0,
+            iat_slot_rva: 0,
         },
         RegExpr::Va(va) => RegSource {
             label: format!("0x{va:016X}"),
@@ -942,6 +1062,7 @@ fn expr_to_regsource(expr: RegExpr, reg: Register) -> RegSource {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_reg_expr(
     insns: &[Instruction],
     until_idx: usize,
@@ -949,6 +1070,7 @@ fn resolve_reg_expr(
     image_base: u64,
     pe: &PeFile,
     raw: &[u8],
+    symbols: Option<&SymbolIndex>,
     depth: usize,
 ) -> RegExpr {
     use iced_x86::Mnemonic;
@@ -979,7 +1101,16 @@ fn resolve_reg_expr(
             Mnemonic::Mov => match insn.iced.op1_kind() {
                 OpKind::Register => {
                     let src = insn.iced.op1_register().full_register();
-                    resolve_reg_expr(insns, insn_pos, src, image_base, pe, raw, depth + 1)
+                    resolve_reg_expr(
+                        insns,
+                        insn_pos,
+                        src,
+                        image_base,
+                        pe,
+                        raw,
+                        symbols,
+                        depth + 1,
+                    )
                 }
                 OpKind::Immediate8 => RegExpr::Imm(insn.iced.immediate8() as u64),
                 OpKind::Immediate16 => RegExpr::Imm(insn.iced.immediate16() as u64),
@@ -988,6 +1119,40 @@ fn resolve_reg_expr(
                 }
                 OpKind::Immediate64 => RegExpr::Imm(insn.iced.immediate64()),
                 OpKind::Memory => {
+                    let mem_base = insn.iced.memory_base().full_register();
+                    if mem_base == full_reg && insn.iced.memory_index() == Register::None {
+                        let base = resolve_reg_expr(
+                            insns,
+                            insn_pos,
+                            full_reg,
+                            image_base,
+                            pe,
+                            raw,
+                            symbols,
+                            depth + 1,
+                        );
+                        if let RegExpr::Va(table_va) = base {
+                            let Some(table_name) = symbols
+                                .and_then(|si| si.lookup(table_va))
+                                .map(|hit| hit.symbol.name)
+                                .filter(|name| crate::analysis::wdf::is_wdf_table_symbol(name))
+                            else {
+                                return RegExpr::Unknown;
+                            };
+                            let offset = insn.iced.memory_displacement64();
+                            if let Some(func) = crate::analysis::wdf::function_from_offset(
+                                offset,
+                                if pe.arch == 64 { 8 } else { 4 },
+                            ) {
+                                return RegExpr::WdfFunction {
+                                    func: func.name.to_owned(),
+                                    table: table_name,
+                                    offset,
+                                };
+                            }
+                        }
+                    }
+
                     let slot_va =
                         if matches!(insn.iced.memory_base(), Register::RIP | Register::EIP) {
                             insn.iced.ip_rel_memory_address()
@@ -1032,8 +1197,16 @@ fn resolve_reg_expr(
             }
 
             Mnemonic::Add => {
-                let base =
-                    resolve_reg_expr(insns, insn_pos, full_reg, image_base, pe, raw, depth + 1);
+                let base = resolve_reg_expr(
+                    insns,
+                    insn_pos,
+                    full_reg,
+                    image_base,
+                    pe,
+                    raw,
+                    symbols,
+                    depth + 1,
+                );
                 match insn.iced.op1_kind() {
                     OpKind::Immediate8 => combine_add(base, insn.iced.immediate8() as u64),
                     OpKind::Immediate16 => combine_add(base, insn.iced.immediate16() as u64),
@@ -1050,8 +1223,16 @@ fn resolve_reg_expr(
             }
 
             Mnemonic::Sub => {
-                let base =
-                    resolve_reg_expr(insns, insn_pos, full_reg, image_base, pe, raw, depth + 1);
+                let base = resolve_reg_expr(
+                    insns,
+                    insn_pos,
+                    full_reg,
+                    image_base,
+                    pe,
+                    raw,
+                    symbols,
+                    depth + 1,
+                );
                 match insn.iced.op1_kind() {
                     OpKind::Immediate8 => combine_sub(base, insn.iced.immediate8() as u64),
                     OpKind::Immediate16 => combine_sub(base, insn.iced.immediate16() as u64),
@@ -1100,11 +1281,98 @@ fn track_indirect_register(
     image_base: u64,
     pe: &PeFile,
     raw: &[u8],
+    symbols: Option<&SymbolIndex>,
 ) -> Option<RegSource> {
     Some(expr_to_regsource(
-        resolve_reg_expr(insns, call_idx, target_reg, image_base, pe, raw, 0),
+        resolve_reg_expr(insns, call_idx, target_reg, image_base, pe, raw, symbols, 0),
         target_reg,
     ))
+}
+
+fn track_wdf_table_register(
+    insns: &[Instruction],
+    call_idx: usize,
+    target_reg: Register,
+    symbols: Option<&SymbolIndex>,
+    pe: &PeFile,
+) -> Option<RegSource> {
+    let full_reg = target_reg.full_register();
+    let scan_start = call_idx.saturating_sub(96);
+    let has_wdf_globals_arg = insns[scan_start..call_idx]
+        .iter()
+        .rev()
+        .take(16)
+        .any(|insn| {
+            insn.comment.contains("WdfDriverGlobals")
+                || (insn.iced.mnemonic() == Mnemonic::Mov
+                    && insn.iced.op_count() >= 2
+                    && insn.iced.op0_kind() == OpKind::Register
+                    && insn.iced.op0_register().full_register() == Register::RCX
+                    && insn.iced.op1_kind() == OpKind::Memory)
+        });
+    for table_idx in (scan_start..call_idx).rev() {
+        let insn = &insns[table_idx];
+        if insn.iced.mnemonic() != Mnemonic::Mov
+            || insn.iced.op_count() < 2
+            || insn.iced.op0_kind() != OpKind::Register
+            || insn.iced.op0_register().full_register() != full_reg
+            || insn.iced.op1_kind() != OpKind::Memory
+            || insn.iced.memory_base().full_register() != full_reg
+            || insn.iced.memory_index() != Register::None
+        {
+            continue;
+        }
+
+        let offset = insn.iced.memory_displacement64();
+        let Some(func) =
+            crate::analysis::wdf::function_from_offset(offset, if pe.arch == 64 { 8 } else { 4 })
+        else {
+            continue;
+        };
+
+        for root in insns[scan_start..table_idx].iter().rev().take(32) {
+            if root.iced.mnemonic() != Mnemonic::Mov
+                || root.iced.op_count() < 2
+                || root.iced.op0_kind() != OpKind::Register
+                || root.iced.op0_register().full_register() != full_reg
+                || root.iced.op1_kind() != OpKind::Memory
+                || !matches!(root.iced.memory_base(), Register::RIP | Register::EIP)
+            {
+                continue;
+            }
+
+            let table_va = root.iced.ip_rel_memory_address();
+            let table_name = root
+                .comment
+                .split_whitespace()
+                .find(|part| crate::analysis::wdf::is_wdf_table_symbol(part))
+                .map(|part| part.trim_end_matches("(data)").to_owned())
+                .or_else(|| {
+                    symbols
+                        .and_then(|si| si.lookup(table_va))
+                        .map(|hit| hit.symbol.name)
+                        .filter(|name| crate::analysis::wdf::is_wdf_table_symbol(name))
+                })
+                .or_else(|| has_wdf_globals_arg.then(|| "WdfFunctions".to_owned()))?;
+            if !crate::analysis::wdf::is_wdf_table_symbol(&table_name) {
+                return None;
+            }
+            return Some(RegSource {
+                label: func.name.to_owned(),
+                dll: "WDF".to_owned(),
+                is_import: true,
+                method: format!(
+                    "{} ← {}[0x{:X}]",
+                    register_short_name(target_reg),
+                    table_name,
+                    offset
+                ),
+                target_rva: 0,
+                iat_slot_rva: 0,
+            });
+        }
+    }
+    None
 }
 
 /// Flag suspicious indirect control-flow for annotation in the disasm listing.
@@ -1175,6 +1443,39 @@ pub fn collect_api_calls(
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
             // Indirect call/jmp — most commonly `call [rip+rel32]` through the IAT.
+            if is_guard_dispatch_call(insn, symbol_index) {
+                if let Some(src) =
+                    track_wdf_table_register(insns, idx, Register::RAX, Some(symbol_index), pe)
+                        .or_else(|| {
+                            track_indirect_register(
+                                insns,
+                                idx,
+                                Register::RAX,
+                                image_base,
+                                pe,
+                                raw,
+                                Some(symbol_index),
+                            )
+                        })
+                {
+                    results.push(ApiCall {
+                        rva: insn.rva,
+                        kind,
+                        target_rva: src.target_rva,
+                        label: src.label,
+                        dll: src.dll,
+                        is_import: src.is_import,
+                        is_indirect: true,
+                        indirect_method: Some(format!(
+                            "{} via {}",
+                            src.method, "__guard_dispatch_icall_fptr"
+                        )),
+                        switch_cases: Vec::new(),
+                    });
+                    continue;
+                }
+            }
+
             let slot_va = if insn.iced.memory_base() == Register::RIP
                 || insn.iced.memory_base() == Register::EIP
             {
@@ -1242,7 +1543,18 @@ pub fn collect_api_calls(
             let reg = insn.iced.op0_register();
             let reg_name = register_short_name(reg);
 
-            let src = track_indirect_register(insns, idx, reg, image_base, pe, raw);
+            let src =
+                track_wdf_table_register(insns, idx, reg, Some(symbol_index), pe).or_else(|| {
+                    track_indirect_register(
+                        insns,
+                        idx,
+                        reg,
+                        image_base,
+                        pe,
+                        raw,
+                        Some(symbol_index),
+                    )
+                });
             let is_unresolved = src
                 .as_ref()
                 .map(|s| !s.is_import && s.target_rva == 0 && s.iat_slot_rva == 0)
@@ -1284,6 +1596,26 @@ pub fn collect_api_calls(
     }
 
     results
+}
+
+fn is_guard_dispatch_call(insn: &Instruction, symbol_index: &SymbolIndex) -> bool {
+    if !insn.is_call || insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Memory {
+        return false;
+    }
+    let slot_va = if matches!(insn.iced.memory_base(), Register::RIP | Register::EIP) {
+        insn.iced.ip_rel_memory_address()
+    } else if insn.iced.memory_base() == Register::None
+        && insn.iced.memory_index() == Register::None
+    {
+        insn.iced.memory_displacement64()
+    } else {
+        0
+    };
+    slot_va != 0
+        && symbol_index
+            .describe(slot_va)
+            .map(|desc| desc.contains("__guard_dispatch_icall"))
+            .unwrap_or(false)
 }
 
 fn collect_data_refs(instr: &iced_x86::Instruction) -> Vec<u64> {

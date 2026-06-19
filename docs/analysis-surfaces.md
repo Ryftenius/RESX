@@ -114,6 +114,68 @@ Triage surfaces include:
 
 Findings are static signals. They are meant to prioritise review, not to prove maliciousness.
 
+## Behavior Triage
+
+Command:
+
+```powershell
+resx behavior <image>
+```
+
+Behavior triage scans the whole image statically for anti-analysis, loader, direct-syscall, TLS, and generated-code signals.
+
+Findings may include:
+
+- Direct syscall or syscall-stub-like instruction windows.
+- CPUID, timing, descriptor-table, breakpoint, and trap-flag related instructions.
+- TEB/PEB segment accesses that may indicate loader walking or anti-debug checks.
+- TLS callbacks and early loader-invoked code.
+- Dynamic loader APIs such as `LoadLibrary`, `GetProcAddress`, and `Ldr*` imports/callsites.
+- Executable-memory APIs, writable executable sections, and nearby memory-write or indirect-flow clusters.
+
+This is a static evidence surface. It can identify suspicious ingredients and code neighborhoods, but runtime-generated code still requires dynamic tracing or sandbox evidence to prove execution.
+
+## Unpack And VM Triage
+
+Command:
+
+```powershell
+resx unpack <image>
+```
+
+Unpack triage scans the image for protected-file signals and emits practical follow-on targets for malware-analysis workflows.
+
+Findings may include:
+
+- Known packer/protector section names and strings such as UPX or VMProtect/Themida markers.
+- High-entropy executable sections, writable executable sections, and sparse import surfaces.
+- CPUID and timing instructions often used around anti-analysis checks.
+- OEP and unpacking handoff candidates, including PE entry point context and indirect branch sites.
+- Runtime import-rebuild hints from loader/protection/allocation imports and embedded DLL/API strings.
+- VM lifting candidates such as possible dispatch edges and stack-machine-like push/pop windows.
+- Layer 2 artifacts: bounded OEP instruction windows, import rebuild plan entries, and VM sketches with register/mnemonic summaries.
+
+This is a static lead generator. It does not dump a mapped process image or automatically devirtualize handlers; pair the reported RVAs with `resx dump`, `resx cfg`, and sandbox/debugger snapshots.
+
+## Entropy Maps
+
+Command:
+
+```powershell
+resx entropy <image>
+```
+
+Entropy maps render an overlaid terminal plot over sliding windows in executable sections by default. They are useful for spotting packed code, encrypted/compressed regions, zero padding, embedded text, and abrupt byte-distribution changes inside code-bearing sections.
+
+Each row includes:
+
+- RVA range and section name.
+- A 0.0-8.0 y-axis plot where `*` is entropy, `a` is ASCII ratio, `z` is zero-byte ratio, `u` is unique-byte ratio, and `#` means curves overlap.
+- ASCII ratio, zero-byte ratio, and unique-byte ratio.
+- Flags such as `high-entropy`, `low-entropy`, `zero-heavy`, `ascii-heavy`, and `byte-diverse`.
+
+Use `--entropy-window <bytes>` and `--entropy-stride <bytes>` to tune resolution. Use `--entropy-all` to include data/resource sections.
+
 ## Caller and Locate Workflows
 
 Commands:
@@ -168,6 +230,9 @@ Prefer JSON for automation:
 ```powershell
 resx peinfo <image> --json
 resx dump <image> <function> --json
+resx behavior <image> --json
+resx entropy <image> --json
+resx unpack <image> --json
 resx scan <path> --json
 ```
 

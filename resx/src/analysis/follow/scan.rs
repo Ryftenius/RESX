@@ -1,4 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -11,8 +12,11 @@ use crate::core::config::Config;
 use crate::core::priority::{default_priority_dirs, matcher_from_lists};
 use crate::core::search::image_name_candidates;
 use crate::formats::pe::{
-    attribute_to_func, parse_pe, read_cstr, read_exports, read_u32, read_u64,
+    attribute_to_func, import_slot_map_by_va, parse_pe, read_exports, read_runtime_functions,
+    PeRuntimeFunctionInfo,
 };
+
+const REVERSE_CALL_INDEX_VERSION: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct FollowScanConfig {
@@ -114,6 +118,8 @@ pub enum WrapperTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReverseCallIndex {
+    #[serde(default)]
+    pub index_version: u32,
     pub source_path: String,
     pub file_len: u64,
     pub modified_secs: u64,
@@ -139,6 +145,8 @@ struct ScanImageData {
     raw: Vec<u8>,
     pe: crate::formats::pe::PeFile,
     exports: Vec<crate::formats::pe::Export>,
+    runtime_functions: Vec<PeRuntimeFunctionInfo>,
+    instruction_boundaries: HashSet<u32>,
     dll_name: String,
     dll_base_lower: String,
     dll_path_str: String,
@@ -169,89 +177,37 @@ fn normalize_dll_base(path_or_name: &str) -> String {
         .to_lowercase()
 }
 
-fn read_import_slots(
-    pe: &crate::formats::pe::PeFile,
-    raw: &[u8],
-) -> std::collections::HashMap<u64, (String, String)> {
-    let mut slots = std::collections::HashMap::new();
-    let (dir_rva, _) = pe.data_dir(1);
-    if dir_rva == 0 {
-        return slots;
-    }
-    let Some(mut off) = pe.rva_to_offset(dir_rva) else {
-        return slots;
-    };
-    let ptr_size = if pe.arch == 64 { 8u32 } else { 4u32 };
-    let ord_flag_64 = 1u64 << 63;
-    let ord_flag_32 = 1u64 << 31;
-    let name_mask = if pe.arch == 64 {
-        ord_flag_64 - 1
-    } else {
-        ord_flag_32 - 1
-    };
-
-    loop {
-        if off + 20 > raw.len() {
-            break;
-        }
-        let ilt_rva = read_u32(raw, off);
-        let name_rva = read_u32(raw, off + 12);
-        let iat_rva = read_u32(raw, off + 16);
-        off += 20;
-        if name_rva == 0 && ilt_rva == 0 {
-            break;
-        }
-
-        let Some(name_off) = pe.rva_to_offset(name_rva) else {
-            continue;
-        };
-        let dll_name = read_cstr(raw, name_off);
-        let dll_base = normalize_dll_base(&dll_name);
-        let thunk_rva = if ilt_rva != 0 { ilt_rva } else { iat_rva };
-        let Some(mut ilt_off) = pe.rva_to_offset(thunk_rva) else {
-            continue;
-        };
-
-        let mut slot_idx = 0u32;
-        loop {
-            let thunk = if pe.arch == 64 {
-                let v = read_u64(raw, ilt_off);
-                ilt_off += 8;
-                v
-            } else {
-                let v = read_u32(raw, ilt_off) as u64;
-                ilt_off += 4;
-                v
-            };
-            if thunk == 0 {
-                break;
-            }
-
-            let is_ord = (pe.arch == 64 && thunk & ord_flag_64 != 0)
-                || (pe.arch == 32 && thunk & ord_flag_32 != 0);
-            let func_name = if is_ord {
-                format!("#{}", thunk & 0xFFFF)
-            } else {
-                let hint_rva = (thunk & name_mask) as u32;
-                match pe.rva_to_offset(hint_rva) {
-                    Some(ho) => read_cstr(raw, ho + 2),
-                    None => format!("ord_{}", thunk & 0xFFFF),
-                }
-            };
-
-            let slot_va = pe.image_base + (iat_rva + slot_idx * ptr_size) as u64;
-            slots.insert(slot_va, (dll_base.clone(), func_name));
-            slot_idx += 1;
-        }
-    }
-
-    slots
-}
-
 fn owner_func_for_site(
     site_rva: u32,
     data: &ScanImageData,
 ) -> (u32, crate::analysis::follow::trace::FuncRef) {
+    if let Some(runtime) = runtime_for_site(data, site_rva) {
+        let export = data
+            .exports
+            .iter()
+            .find(|e| e.rva == runtime.begin_rva)
+            .or_else(|| {
+                data.exports
+                    .iter()
+                    .filter(|e| e.rva >= runtime.begin_rva && e.rva < runtime.end_rva)
+                    .min_by_key(|e| e.rva)
+            });
+        let (name, is_internal) = export
+            .map(|e| (e.name.clone(), false))
+            .unwrap_or_else(|| (format!("sub_{:08X}", runtime.begin_rva), true));
+        return (
+            runtime.begin_rva,
+            crate::analysis::follow::trace::FuncRef::new(
+                data.dll_name.clone(),
+                data.dll_path_str.clone(),
+                name,
+                runtime.begin_rva,
+                data.pe.image_base + runtime.begin_rva as u64,
+                is_internal,
+            ),
+        );
+    }
+
     if let Some(e) = attribute_to_func(site_rva, &data.exports) {
         (
             e.rva,
@@ -277,6 +233,24 @@ fn owner_func_for_site(
             ),
         )
     }
+}
+
+fn runtime_for_site(data: &ScanImageData, site_rva: u32) -> Option<&PeRuntimeFunctionInfo> {
+    let idx = data
+        .runtime_functions
+        .partition_point(|runtime| runtime.begin_rva <= site_rva);
+    if idx == 0 {
+        return None;
+    }
+    let runtime = &data.runtime_functions[idx - 1];
+    (site_rva < runtime.end_rva).then_some(runtime)
+}
+
+fn is_decoded_instruction_boundary(data: &ScanImageData, site_rva: u32) -> bool {
+    if data.pe.arch != 64 {
+        return true;
+    }
+    data.instruction_boundaries.contains(&site_rva)
 }
 
 fn push_indexed_site(
@@ -305,7 +279,10 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         std::collections::HashMap::new();
     let mut imports: std::collections::HashMap<String, std::collections::HashMap<u32, Caller>> =
         std::collections::HashMap::new();
-    let import_slots = read_import_slots(&data.pe, &data.raw);
+    let import_slots = import_slot_map_by_va(&data.pe, &data.raw);
+    let has_wdf_runtime = import_slots
+        .values()
+        .any(|(dll_base, func)| dll_base.contains("wdf") || func.starts_with("Wdf"));
 
     for s in &data.pe.sections {
         if s.characteristics & (SCN_CODE | SCN_EXEC) == 0 {
@@ -322,151 +299,103 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         let sec = &data.raw[start..end];
         let sec_va_base = data.pe.image_base + s.virtual_address as u64;
 
-        if hostile {
-            use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
-            let mut decoder =
-                Decoder::with_ip(data.pe.arch, sec, sec_va_base, DecoderOptions::NONE);
-            let mut instr = iced_x86::Instruction::default();
-
-            while decoder.can_decode() {
-                decoder.decode_out(&mut instr);
-                let len = instr.len();
-                if len == 0 {
-                    break;
-                }
-
-                let site_rva = (instr.ip().wrapping_sub(data.pe.image_base)) as u32;
-                let m = instr.mnemonic();
-                let is_call = m == Mnemonic::Call;
-                let is_jmp = m == Mnemonic::Jmp;
-                if !is_call && !is_jmp {
+        // Fast scan for common call/jmp encodings, validated against decoded
+        // x64 runtime-function boundaries to avoid matching bytes inside
+        // immediates, padding, or data mixed into executable sections.
+        for i in 0..sec.len().saturating_sub(5) {
+            let site_rva = s.virtual_address + i as u32;
+            let b0 = sec[i];
+            let b1 = sec.get(i + 1).copied().unwrap_or(0);
+            if (b0 == 0xFF && (b1 == 0x15 || b1 == 0x25)) && i + 6 <= sec.len() {
+                if !is_decoded_instruction_boundary(data, site_rva) {
                     continue;
                 }
-
-                match instr.op0_kind() {
-                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-                        let target_va = instr.near_branch_target();
-                        if let Some(target_rva) = direct_target_rva(&data.pe, target_va) {
-                            push_indexed_site(
-                                direct.entry(target_rva).or_default(),
-                                CallSite {
-                                    rva: site_rva,
-                                    pattern: if is_call {
-                                        "CALL rel".to_owned()
-                                    } else {
-                                        "JMP rel".to_owned()
-                                    },
-                                },
-                                data,
-                            );
-                        }
-                    }
-
-                    OpKind::Memory => {
-                        let slot_va =
-                            if matches!(instr.memory_base(), Register::RIP | Register::EIP) {
-                                instr.ip_rel_memory_address()
-                            } else if instr.memory_base() == Register::None
-                                && instr.memory_index() == Register::None
-                            {
-                                instr.memory_displacement64()
-                            } else {
-                                0
-                            };
-
-                        if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
-                            push_indexed_site(
-                                imports
-                                    .entry(import_lookup_key(dll_base, func_name))
-                                    .or_default(),
-                                CallSite {
-                                    rva: site_rva,
-                                    pattern: if is_call {
-                                        "CALL [IAT]".to_owned()
-                                    } else {
-                                        "JMP [IAT]".to_owned()
-                                    },
-                                },
-                                data,
-                            );
-                        }
-                    }
-
-                    // Register-indirect: keep visible by site, even if unresolved.
-                    OpKind::Register => {
-                        let reg =
-                            format!("{:?}", instr.op0_register().full_register()).to_lowercase();
-                        push_indexed_site(
-                            direct.entry(site_rva).or_default(),
-                            CallSite {
-                                rva: site_rva,
-                                pattern: if is_call {
-                                    format!("CALL {reg}")
-                                } else {
-                                    format!("JMP {reg}")
-                                },
-                            },
-                            data,
-                        );
-                    }
-
-                    _ => {}
-                }
-            }
-        } else {
-            // Fast raw-byte scan for the common E8/E9 and FF 15/25 patterns.
-            for i in 0..sec.len().saturating_sub(5) {
-                let b0 = sec[i];
-                let b1 = sec.get(i + 1).copied().unwrap_or(0);
-                if (b0 == 0xFF && (b1 == 0x15 || b1 == 0x25)) && i + 6 <= sec.len() {
-                    let slot_va = if data.pe.arch == 64 {
-                        let rel32 = i32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap());
-                        let instr_va = sec_va_base + i as u64;
-                        (instr_va as i64 + 6 + rel32 as i64) as u64
-                    } else {
-                        u32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap()) as u64
-                    };
-                    if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
-                        push_indexed_site(
-                            imports
-                                .entry(import_lookup_key(dll_base, func_name))
-                                .or_default(),
-                            CallSite {
-                                rva: s.virtual_address + i as u32,
-                                pattern: if b1 == 0x15 {
-                                    "CALL [IAT]"
-                                } else {
-                                    "JMP [IAT]"
-                                }
-                                .to_owned(),
-                            },
-                            data,
-                        );
-                    }
-                    continue;
-                }
-
-                if (b0 == 0xE8 || b0 == 0xE9) && i + 5 <= sec.len() {
-                    let rel32 = i32::from_le_bytes(sec[i + 1..i + 5].try_into().unwrap());
+                let slot_va = if data.pe.arch == 64 {
+                    let rel32 = i32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap());
                     let instr_va = sec_va_base + i as u64;
-                    let target_va = (instr_va as i64 + 5 + rel32 as i64) as u64;
-                    let Some(target_rva) = direct_target_rva(&data.pe, target_va) else {
-                        continue;
-                    };
+                    (instr_va as i64 + 6 + rel32 as i64) as u64
+                } else {
+                    u32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap()) as u64
+                };
+                if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
                     push_indexed_site(
-                        direct.entry(target_rva).or_default(),
+                        imports
+                            .entry(import_lookup_key(dll_base, func_name))
+                            .or_default(),
                         CallSite {
-                            rva: s.virtual_address + i as u32,
-                            pattern: if b0 == 0xE8 {
-                                "CALL rel32"
+                            rva: site_rva,
+                            pattern: if b1 == 0x15 {
+                                "CALL [IAT]"
                             } else {
-                                "JMP rel32 (tail)"
+                                "JMP [IAT]"
                             }
                             .to_owned(),
                         },
                         data,
                     );
                 }
+                continue;
+            }
+
+            if (b0 == 0xE8 || b0 == 0xE9) && i + 5 <= sec.len() {
+                if !is_decoded_instruction_boundary(data, site_rva) {
+                    continue;
+                }
+                let rel32 = i32::from_le_bytes(sec[i + 1..i + 5].try_into().unwrap());
+                let instr_va = sec_va_base + i as u64;
+                let target_va = (instr_va as i64 + 5 + rel32 as i64) as u64;
+                let Some(target_rva) = direct_target_rva(&data.pe, target_va) else {
+                    continue;
+                };
+                push_indexed_site(
+                    direct.entry(target_rva).or_default(),
+                    CallSite {
+                        rva: site_rva,
+                        pattern: if b0 == 0xE8 {
+                            "CALL rel32"
+                        } else {
+                            "JMP rel32 (tail)"
+                        }
+                        .to_owned(),
+                    },
+                    data,
+                );
+            }
+        }
+
+        if has_wdf_runtime && data.pe.arch == 64 {
+            index_wdf_table_calls(sec, sec_va_base, data, &mut imports);
+        }
+
+        if hostile {
+            use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
+            let mut decoder =
+                Decoder::with_ip(data.pe.arch, sec, sec_va_base, DecoderOptions::NONE);
+            while decoder.can_decode() {
+                let instr = decoder.decode();
+                if instr.len() == 0 {
+                    break;
+                }
+                let m = instr.mnemonic();
+                if !matches!(m, Mnemonic::Call | Mnemonic::Jmp)
+                    || instr.op0_kind() != OpKind::Register
+                {
+                    continue;
+                }
+                let site_rva = instr.ip().wrapping_sub(data.pe.image_base) as u32;
+                let reg = format!("{:?}", instr.op0_register().full_register()).to_lowercase();
+                push_indexed_site(
+                    direct.entry(site_rva).or_default(),
+                    CallSite {
+                        rva: site_rva,
+                        pattern: if m == Mnemonic::Call {
+                            format!("CALL {reg}")
+                        } else {
+                            format!("JMP {reg}")
+                        },
+                    },
+                    data,
+                );
             }
         }
     } // end for s in &data.pe.sections
@@ -540,6 +469,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
     }
 
     ReverseCallIndex {
+        index_version: REVERSE_CALL_INDEX_VERSION,
         source_path: meta.path.clone(),
         file_len: meta.file_len,
         modified_secs: meta.modified_secs,
@@ -552,6 +482,97 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         direct,
         imports,
         wrappers,
+    }
+}
+
+fn index_wdf_table_calls(
+    sec: &[u8],
+    sec_va_base: u64,
+    data: &ScanImageData,
+    imports: &mut std::collections::HashMap<String, std::collections::HashMap<u32, Caller>>,
+) {
+    use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+
+    let mut decoder = Decoder::with_ip(data.pe.arch, sec, sec_va_base, DecoderOptions::NONE);
+    let mut insns = Vec::new();
+    while decoder.can_decode() {
+        let instr = decoder.decode();
+        if instr.len() == 0 {
+            break;
+        }
+        insns.push(instr);
+    }
+
+    for (idx, instr) in insns.iter().enumerate() {
+        if instr.mnemonic() != Mnemonic::Call {
+            continue;
+        }
+        let reg = if instr.op0_kind() == OpKind::Register {
+            instr.op0_register()
+        } else if instr.op0_kind() == OpKind::Memory {
+            // MSVC CFG/XFG guarded indirect calls dispatch through this helper after
+            // loading the real target into RAX.
+            Register::RAX
+        } else {
+            continue;
+        };
+        let Some((func_name, offset)) = resolve_wdf_table_register_call(&insns, idx, reg) else {
+            continue;
+        };
+        let site_rva = instr.ip().wrapping_sub(data.pe.image_base) as u32;
+        push_indexed_site(
+            imports
+                .entry(import_lookup_key("wdf", func_name))
+                .or_default(),
+            CallSite {
+                rva: site_rva,
+                pattern: format!("CALL WDF[0x{offset:X}]"),
+            },
+            data,
+        );
+    }
+
+    fn resolve_wdf_table_register_call(
+        insns: &[Instruction],
+        call_idx: usize,
+        reg: Register,
+    ) -> Option<(&'static str, u64)> {
+        let full = reg.full_register();
+        let scan_start = call_idx.saturating_sub(96);
+        for table_idx in (scan_start..call_idx).rev() {
+            let table_load = &insns[table_idx];
+            if table_load.mnemonic() != Mnemonic::Mov
+                || table_load.op_count() < 2
+                || table_load.op0_kind() != OpKind::Register
+                || table_load.op0_register().full_register() != full
+                || table_load.op1_kind() != OpKind::Memory
+                || table_load.memory_base().full_register() != full
+                || table_load.memory_index() != Register::None
+            {
+                continue;
+            }
+
+            let offset = table_load.memory_displacement64();
+            let Some(func) = crate::analysis::wdf::function_from_offset(offset, 8) else {
+                continue;
+            };
+            let found_table_root = insns[scan_start..table_idx]
+                .iter()
+                .rev()
+                .take(24)
+                .any(|insn| {
+                    insn.mnemonic() == Mnemonic::Mov
+                        && insn.op_count() >= 2
+                        && insn.op0_kind() == OpKind::Register
+                        && insn.op0_register().full_register() == full
+                        && insn.op1_kind() == OpKind::Memory
+                        && matches!(insn.memory_base(), Register::RIP | Register::EIP)
+                });
+            if found_table_root {
+                return Some((func.name, offset));
+            }
+        }
+        None
     }
 }
 
@@ -774,6 +795,8 @@ fn load_scan_data(path: &Path) -> Option<ScanImageData> {
     let raw = std::fs::read(path).ok()?;
     let pe = parse_pe(&raw).ok()?;
     let exports = read_exports(&pe, &raw);
+    let runtime_functions = read_runtime_functions(&pe, &raw);
+    let instruction_boundaries = collect_instruction_boundaries(&pe, &raw, &runtime_functions);
     let dll_name = path.file_name()?.to_string_lossy().to_string();
     let dll_base_lower = normalize_dll_base(&dll_name);
     let dll_path_str = path.to_string_lossy().to_string();
@@ -781,10 +804,54 @@ fn load_scan_data(path: &Path) -> Option<ScanImageData> {
         raw,
         pe,
         exports,
+        runtime_functions,
+        instruction_boundaries,
         dll_name,
         dll_base_lower,
         dll_path_str,
     })
+}
+
+fn collect_instruction_boundaries(
+    pe: &crate::formats::pe::PeFile,
+    raw: &[u8],
+    runtime_functions: &[PeRuntimeFunctionInfo],
+) -> HashSet<u32> {
+    let mut out = HashSet::new();
+    if pe.arch != 64 {
+        return out;
+    }
+
+    use iced_x86::{Decoder, DecoderOptions};
+    for runtime in runtime_functions {
+        let Some(start) = pe.rva_to_offset(runtime.begin_rva) else {
+            continue;
+        };
+        let Some(end) = pe
+            .rva_to_offset(runtime.end_rva.saturating_sub(1))
+            .map(|off| off + 1)
+        else {
+            continue;
+        };
+        if start >= end || end > raw.len() {
+            continue;
+        }
+
+        let mut decoder = Decoder::with_ip(
+            pe.arch,
+            &raw[start..end],
+            pe.image_base + runtime.begin_rva as u64,
+            DecoderOptions::NONE,
+        );
+        while decoder.can_decode() {
+            let instr = decoder.decode();
+            if instr.len() == 0 {
+                break;
+            }
+            out.insert(instr.ip().wrapping_sub(pe.image_base) as u32);
+        }
+    }
+    out
 }
 
 fn load_or_build_index(path: &Path, cfg: &FollowScanConfig) -> Option<ReverseCallIndex> {
@@ -807,7 +874,8 @@ fn load_index_from_cache(path: &Path, meta: &SourceMeta) -> Option<ReverseCallIn
     let cache_path = cache_path_for_image(path);
     let bytes = std::fs::read(cache_path).ok()?;
     let cached: ReverseCallIndex = serde_json::from_slice(&bytes).ok()?;
-    if cached.source_path.eq_ignore_ascii_case(&meta.path)
+    if cached.index_version == REVERSE_CALL_INDEX_VERSION
+        && cached.source_path.eq_ignore_ascii_case(&meta.path)
         && cached.file_len == meta.file_len
         && cached.modified_secs == meta.modified_secs
         && cached.modified_nanos == meta.modified_nanos
