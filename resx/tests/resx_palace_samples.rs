@@ -12,6 +12,7 @@ const EXPORTS: &[&str] = &[
     "ResxThreadCallbackEntry",
     "ResxSwitchJumpTableDispatch",
     "ResxIndirectCallMessage",
+    "ResxBehaviorSignals",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -26,13 +27,24 @@ fn corpus_root() -> PathBuf {
 }
 
 fn build_dir() -> PathBuf {
-    workspace_root()
-        .join("target-resx-tests")
-        .join("resx-palace-test")
+    let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
+    let target = PathBuf::from(target);
+    if target.is_absolute() {
+        target.join("resx-palace-test")
+    } else {
+        workspace_root().join(target).join("resx-palace-test")
+    }
 }
 
 fn build_out_dir_arg() -> String {
-    r"..\target-resx-tests\resx-palace-test".to_owned()
+    let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
+    let target = PathBuf::from(target);
+    let out = if target.is_absolute() {
+        target.join("resx-palace-test")
+    } else {
+        PathBuf::from("..").join(target).join("resx-palace-test")
+    };
+    out.to_string_lossy().to_string()
 }
 
 fn sample_path(name: &str) -> PathBuf {
@@ -43,9 +55,6 @@ fn ensure_samples() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let dll = sample_path("resx_palace.dll");
     let variant = sample_path("resx_palace_variant.dll");
     let exe = sample_path("resx_palace_probe.exe");
-    if dll.exists() && variant.exists() && exe.exists() {
-        return Some((dll, variant, exe));
-    }
 
     let script = corpus_root().join("scripts").join("build.ps1");
     let out_dir_arg = build_out_dir_arg();
@@ -105,33 +114,8 @@ fn array_contains_name(items: &Value, name: &str) -> bool {
         .is_some_and(|values| values.iter().any(|item| item["name"] == name))
 }
 
-fn nearest_export_at_or_before(items: &Value, rva: u64) -> (String, String) {
-    let mut best: Option<(u64, String)> = None;
-    for item in items.as_array().expect("exports should be an array") {
-        let Some(name) = item["name"].as_str() else {
-            continue;
-        };
-        let Some(export_rva) = item["rva"].as_str().map(parse_hex_text_u64) else {
-            continue;
-        };
-        if export_rva <= rva
-            && best
-                .as_ref()
-                .is_none_or(|(current, _)| export_rva > *current)
-        {
-            best = Some((export_rva, name.to_owned()));
-        }
-    }
-    let (export_rva, name) = best.expect("expected export at or before RVA");
-    (name, format!("0x{export_rva:08X}"))
-}
-
 fn parse_hex_u64(value: &Value) -> u64 {
     let text = value.as_str().expect("expected hex string");
-    parse_hex_text_u64(text)
-}
-
-fn parse_hex_text_u64(text: &str) -> u64 {
     u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("valid hex string")
 }
 
@@ -175,16 +159,37 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
             .is_some_and(|instructions| !instructions.is_empty()));
     }
 
+    let import_xrefs = run_json(&[
+        "xrefs",
+        dll,
+        "CreateFileW",
+        "--json",
+        "--no-color",
+        "--quiet",
+    ]);
+    assert_eq!(import_xrefs["schema_version"], 1);
+    assert_eq!(import_xrefs["dump"]["function"], "CreateFileW");
+    assert_eq!(import_xrefs["dump"]["is_import_slot"], true);
+    assert_eq!(import_xrefs["dump"]["import_target_dll"], "KERNEL32.dll");
+    assert_eq!(import_xrefs["dump"]["import_target_name"], "CreateFileW");
+    assert!(
+        import_xrefs["dump"]["instructions"].is_null()
+            || import_xrefs["dump"]["instructions"]
+                .as_array()
+                .is_some_and(|instructions| instructions.is_empty())
+    );
+    assert!(import_xrefs["dump"]["xrefs"]
+        .as_array()
+        .is_some_and(|xrefs| !xrefs.is_empty()));
+
     let image_base = parse_hex_u64(&peinfo["peinfo"]["image_base"]);
-    let (expected_inner_name, expected_inner_rva) =
-        nearest_export_at_or_before(&eat["exports"], 0x1205);
-    let inner_export_va = format!("0x{:X}", image_base + 0x1205);
+    let inner_parse_packet_va = format!("0x{:X}", image_base + 0x1205);
     for args in [
         vec![
             "dump",
             dll,
             "--at",
-            inner_export_va.as_str(),
+            inner_parse_packet_va.as_str(),
             "--json",
             "--no-color",
             "--quiet",
@@ -211,12 +216,9 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         ],
     ] {
         let dump_at = run_json(&args);
-        assert_eq!(dump_at["dump"]["function"], expected_inner_name);
-        assert_eq!(dump_at["dump"]["rva"], expected_inner_rva);
-        assert_eq!(
-            dump_at["dump"]["instructions"][0]["rva"],
-            expected_inner_rva
-        );
+        assert_eq!(dump_at["dump"]["function"], "ResxParsePacket");
+        assert_eq!(dump_at["dump"]["rva"], "0x00001200");
+        assert_eq!(dump_at["dump"]["instructions"][0]["rva"], "0x00001200");
     }
 
     let patch_out = build_dir().join("resx_palace.patch-test.dll");
@@ -351,6 +353,81 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
     assert!(reconstruct["reconstruct_cfg"]["roots"]
         .as_array()
         .is_some_and(|roots| !roots.is_empty()));
+
+    let behavior = run_json(&["behavior", dll, "--json", "--no-color", "--quiet"]);
+    assert_eq!(behavior["schema_version"], 1);
+    assert_eq!(behavior["behavior"]["image"], "resx_palace.dll");
+    let behavior_findings = behavior["behavior"]["findings"]
+        .as_array()
+        .expect("behavior findings should be an array");
+    for expected_rule in [
+        "tls-callback",
+        "cpuid-check",
+        "int3-breakpoint",
+        "syscall-stub-pattern",
+        "executable-memory-api",
+        "dynamic-loader-api",
+    ] {
+        assert!(
+            behavior_findings
+                .iter()
+                .any(|item| item["rule"] == expected_rule),
+            "missing behavior rule {expected_rule} in {behavior:#}"
+        );
+    }
+
+    let unpack = run_json(&["unpack", dll, "--json", "--no-color", "--quiet"]);
+    assert_eq!(unpack["schema_version"], 1);
+    assert_eq!(unpack["unpack"]["image"], "resx_palace.dll");
+    let protector_hints = unpack["unpack"]["protector_hints"]
+        .as_array()
+        .expect("unpack protector_hints should be an array");
+    for expected_rule in ["upx-marker", "vmprotect-themida-marker"] {
+        assert!(
+            protector_hints
+                .iter()
+                .any(|item| item["rule"] == expected_rule),
+            "missing unpack protector rule {expected_rule} in {unpack:#}"
+        );
+    }
+    assert!(unpack["unpack"]["oep_candidates"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(unpack["unpack"]["import_rebuild_hints"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(unpack["unpack"]["vm_candidates"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(unpack["unpack"]["layer2"]["oep_windows"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(unpack["unpack"]["layer2"]["import_plan"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(unpack["unpack"]["layer2"]["vm_sketches"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+
+    let entropy = run_json(&[
+        "entropy",
+        dll,
+        "--json",
+        "--no-color",
+        "--quiet",
+        "--entropy-window",
+        "512",
+        "--entropy-stride",
+        "512",
+    ]);
+    assert_eq!(entropy["schema_version"], 1);
+    assert_eq!(entropy["entropy"]["image"], "resx_palace.dll");
+    assert!(entropy["entropy"]["windows"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(entropy["entropy"]["summary"]["window_count"]
+        .as_u64()
+        .is_some_and(|count| count > 0));
 
     let diff = run_json(&[
         "diff",

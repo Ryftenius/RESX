@@ -1,6 +1,6 @@
 # RESX VS Code Extension
 
-The RESX VS Code extension provides a custom binary viewer for Windows PE images (`.exe`, `.dll`, and `.sys`) and command-palette workflows backed by the bundled `resx.exe`.
+The RESX VS Code extension provides a custom binary viewer for Windows PE images (`.exe`, `.dll`, and `.sys`), plus opt-in support for PE-formatted `.bin` samples, all backed by the bundled `resx.exe`.
 
 It is built for repeated reversing work: open a binary, inspect PE metadata, jump from exports/imports/symbols into disassembly, run targeted dumps, review startup flow, and scan folders without leaving VS Code.
 
@@ -84,7 +84,7 @@ Symbol loading can be slow against large stores. Leave `resx.loadSymbolsOnOpen` 
 
 ## Opening Binaries
 
-The extension contributes a custom editor for:
+The extension opens these file types by default:
 
 ```text
 *.exe
@@ -92,10 +92,23 @@ The extension contributes a custom editor for:
 *.sys
 ```
 
-Open one of those files normally, or use:
+For PE samples stored as `.bin`, the extension exposes RESX as an explicit editor option:
+
+```text
+*.bin
+```
+
+Open `.exe`, `.dll`, or `.sys` files normally, or use:
 
 ```text
 Open With... -> RESX Binary Viewer
+```
+
+For `.bin` PE samples, use either:
+
+```text
+Open With... -> RESX Binary Viewer
+RESX: Open Binary File
 ```
 
 On load, the viewer runs the baseline analysis:
@@ -189,6 +202,7 @@ The tab summarises discovered images, anomaly signals, and ranked fuzz target ca
 
 | Command | ID | Behaviour |
 | --- | --- | --- |
+| Open Binary File | `resx.openBinaryFile` | Opens a selected PE image in the RESX viewer, including `.bin` samples. |
 | Refresh Binary Analysis | `resx.refreshBinary` | Re-runs analysis in the active RESX binary viewer. |
 | Locate | `resx.locate` | Searches export-backed priority modules, then opens the selected result. |
 | Locate Symbol | `resx.locateSymbol` | Searches exports and PDB symbols, then opens the selected result. |

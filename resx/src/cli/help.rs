@@ -12,6 +12,19 @@ pub fn is_help_request(raw_args: &[String]) -> bool {
         || raw_args.iter().any(|arg| arg == "--help" || arg == "-h")
 }
 
+pub fn help_topic(raw_args: &[String]) -> Option<&str> {
+    if raw_args.len() >= 3 && raw_args[1].eq_ignore_ascii_case("help") {
+        return raw_args.get(2).map(String::as_str);
+    }
+    if raw_args.len() >= 3 && raw_args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        let candidate = raw_args[1].as_str();
+        if !candidate.starts_with('-') {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 pub fn is_version_request(raw_args: &[String]) -> bool {
     raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("version")
         || raw_args.iter().any(|arg| arg == "--version" || arg == "-V")
@@ -30,11 +43,15 @@ USAGE
   resx dump <dll> <function> [options]
   resx dump <dll> --at <addr> [options]
   resx dump <dll> --ordinal <n> [options]
+  resx xrefs <dll> <function-or-import> [options]
   resx cfg <dll> <function> [options]
   resx cfg <dll> --at <addr> [options]
   resx cfg <dll> --ordinal <n> [options]
   resx reconstruct-cfg <dll> [flow options]
   resx intelli <dll> [function] [options]
+  resx behavior <dll> [options]
+  resx unpack <dll> [options]
+  resx entropy <dll> [options]
   resx patch <dll> --at <addr> --patch-bytes <hex> [patch options]
   resx diff <image-a> <image-b> [image-c ...] [diff options]
   resx index <dir-or-image> --db <file> [corpus options]
@@ -59,13 +76,18 @@ USAGE
   resx yara <dll> <rule.yar> [options]
   resx update [options]
   resx help
+  resx help <command>
 
 COMMANDS
   dump        Disassemble or reconstruct one target by name, RVA, or ordinal.
+  xrefs       Show incoming intra-image CALL/JMP references to one target.
   cfg         Show a control-flow graph view for one target by name, RVA, or ordinal.
   reconstruct-cfg
               Rebuild a best-effort startup-to-exit flow waterfall for one image.
   intelli     Run heuristic triage over a target image or function.
+  behavior    Static anti-analysis, loader, syscall, TLS, and JIT triage.
+  unpack      Static protected-file unpacking and VM-lifting triage.
+  entropy     Render an entropy and byte-factor graph over executable code.
   patch       Apply guarded byte patches to a PE image copy or explicit in-place target.
   diff        Compare normalized function and control-flow structure between images.
   index       Build a reusable structural fingerprint corpus.
@@ -85,7 +107,7 @@ COMMANDS
   scan        Inventory EXE/DLL/SYS files and rank fuzz target candidates.
   yara        Scan a PE image with one or more YARA rules.
   update      Pull the latest version from the current git remote/branch.
-  help        Show this help text.
+  help        Show this help text, or command-focused help with `resx help <command>`.
 
 DUMP / INTELLI OPTIONS
   --at <addr>                dump by RVA, PE VA, or file offset instead of by function name
@@ -188,7 +210,7 @@ GLOBAL OPTIONS
   --no-system
   --no-cwd
   --no-path
-  --bytes / --no-bytes
+  --bytes[=n] / --no-bytes  show instruction bytes; optional n also sets --max-bytes
   --show-offsets
   --intel / --att
   --json
@@ -196,12 +218,18 @@ GLOBAL OPTIONS
   --color / --no-color
   --verbose / --quiet
   --version
+  --help / -h
 
 EXAMPLES
   resx dump kernel32.dll CreateFileW --recomp --bytes
   resx dump kernel32.dll CreateFileW --funcs --xrefs
+  resx xrefs .\driver.sys WdfDeviceCreate
   resx intelli suspicious.dll
   resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
+  resx behavior suspicious.dll --json
+  resx unpack suspicious.dll
+  resx unpack .\packed.dll --json
+  resx entropy suspicious.dll --entropy-window 2048 --entropy-stride 1024
   resx patch .\sample.dll --at 0x1200 --patch-bytes "90 90" --expect "55 48" --patch-out .\sample.patched.dll
   resx peinfo .\blackbird.sys
   resx sections ntdll.dll
@@ -230,6 +258,10 @@ EXAMPLES
   resx yara suspicious.dll .\rules\triage.yar
   resx update
   resx peinfo --example
+  resx help behavior
+  resx help unpack
+  resx help entropy
+  resx dump --help
 "#,
         name = APP_NAME,
         version = env!("CARGO_PKG_VERSION"),
@@ -240,10 +272,15 @@ EXAMPLES
 pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
     const KNOWN: &[&str] = &[
         "dump",
+        "xrefs",
         "cfg",
         "reconstruct-cfg",
         "intelli",
+        "behavior",
+        "unpack",
+        "entropy",
         "patch",
+        "types",
         "peinfo",
         "sections",
         "eat",
@@ -265,6 +302,7 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "recomp",
         "symbols",
         "funcs",
+        "refs",
         "update",
     ];
     if raw_args.len() >= 2 {
@@ -298,6 +336,10 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
     let mut rewritten = vec![raw_args[0].clone()];
     match cmd.as_str() {
         "dump" => rewritten.extend(raw_args.iter().skip(2).cloned()),
+        "xrefs" | "refs" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--xrefs".to_string());
+        }
         "types" => rewritten.extend(raw_args.iter().skip(2).cloned()),
         "cfg" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
@@ -311,6 +353,18 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
         "intelli" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--intelli".to_string());
+        }
+        "behavior" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--behavior".to_string());
+        }
+        "unpack" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--unpack".to_string());
+        }
+        "entropy" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--entropy".to_string());
         }
         "patch" => return rewrite_patch_command(raw_args),
         "peinfo" => {
@@ -437,7 +491,11 @@ pub fn print_examples(topic: &str) {
     let body = match topic.as_str() {
         "update" => {
             r#"
-UPDATE EXAMPLES
+UPDATE HELP
+Usage:
+  resx update [--quiet]
+
+Examples:
   resx update
   resx update --quiet
 
@@ -448,58 +506,167 @@ NOTES
         }
         "intelli" => {
             r#"
-INTELLI EXAMPLES
+INTELLI HELP
+Usage:
+  resx intelli <image> [function] [dump options]
+
+Examples:
   resx intelli suspicious.dll
   resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
   resx dump suspicious.dll --intelli
   resx dump suspicious.dll WinMain --intelli --json
+  resx intelli .\packed.dll --funcs --funcs-depth 2 --hostile --no-pdb
 
 NOTES
   `intelli` is a first-class command alias for dump-driven heuristic triage.
   It is useful when you want imports, strings, hooks, and signal tags quickly.
 "#
         }
+        "behavior" => {
+            r#"
+BEHAVIOR HELP
+Usage:
+  resx behavior <image> [--json]
+
+Examples:
+  resx behavior suspicious.dll
+  resx behavior suspicious.dll --json
+  resx behavior .\packed-loader.dll --json --out .\packed-loader.behavior.json
+  resx behavior .\driver.sys --no-pdb --path C:\Windows\System32\drivers
+
+NOTES
+  Static triage for syscall stubs, CPUID/timing/descriptor-table checks,
+  trap/debug instructions, TLS callbacks, executable-memory APIs, dynamic
+  loader APIs, PEB/TEB segment probes, and simple generated-code clusters.
+"#
+        }
+        "unpack" => {
+            r#"
+UNPACK HELP
+Usage:
+  resx unpack <image> [--json]
+
+Examples:
+  resx unpack suspicious.dll
+  resx unpack .\packed-loader.exe --json
+  resx unpack .\protected.dll --no-pdb --hostile
+  resx unpack .\vmprotected.exe --json --out .\vmprotected.unpack.json
+  resx dump .\protected.dll --at 0x401000 --hostile --funcs --strings
+  resx cfg .\protected.dll --at 0x402A10 --hostile --max-insns 1200
+
+NOTES
+  Static protected-file triage for packer/protector markers, high-entropy and
+  writable executable sections, sparse imports, CPUID/timing checks, OEP/handoff
+  candidates, runtime import-rebuild leads, and possible VM dispatcher/handler sites.
+  Layer 2 adds bounded disassembly windows, import rebuild plans, and VM handler
+  sketches for follow-up lifting work.
+  It emits leads for malware-analysis unpacking and VM lifting workflows; it does
+  not currently produce a rebuilt unpacked binary.
+"#
+        }
+        "entropy" => {
+            r#"
+ENTROPY HELP
+Usage:
+  resx entropy <image> [--entropy-window <bytes>] [--entropy-stride <bytes>] [--entropy-all] [--json]
+
+Examples:
+  resx entropy suspicious.dll
+  resx entropy .\packed.exe --entropy-window 2048 --entropy-stride 1024
+  resx entropy .\sample.dll --entropy-all
+  resx entropy .\sample.dll --json --out .\sample.entropy.json
+
+NOTES
+  Renders an overlaid terminal plot over executable sections by default.
+  The y-axis is the 0.0-8.0 entropy scale; the x-axis follows code RVA order.
+  Plot symbols: * entropy, a ASCII ratio, z zero-byte ratio, u unique-byte ratio,
+  # overlap. The detail table below the plot keeps per-window flags.
+  Use --entropy-all to include non-executable sections.
+"#
+        }
         "patch" => {
             r#"
-PATCH EXAMPLES
+PATCH HELP
+Usage:
+  resx patch <image> --at <addr> --patch-bytes <hex> [patch options]
+  resx patch <image> <addr> <hex> [patch options]
+
+Examples:
   resx patch .\sample.dll --at 0x1200 --patch-bytes "90 90" --dry-run
   resx patch .\sample.dll file:0x600 "90 90" --expect "55 48" --patch-out .\sample.patched.dll
   resx patch .\driver.sys va:0x140001000 CC --patch-out .\driver.patched.sys --update-checksum
   resx patch .\sample.dll 0x1200 90 90 --in-place --expect "55 48"
 
+Options:
+  --at <addr>           RVA, PE VA, or file offset. Prefix with rva:, va:, or file: to force interpretation.
+  --patch-bytes <hex>   Replacement bytes. Separators are optional for even-length hex strings.
+  --expect <hex>        Require the current bytes to match before writing.
+  --patch-out <file>    Patched copy path. Defaults to <name>.patched.<ext>.
+  --dry-run             Validate and report without writing.
+  --in-place            Modify the source image itself.
+  --overwrite           Allow replacing an existing output copy.
+  --update-checksum     Recalculate the PE optional-header checksum before writing.
+
 NOTES
-  Patches bytes only. It does not assemble instructions, grow sections, search
-  code caves, rewrite relocations, or preserve Authenticode signatures.
+  This command patches bytes only. It does not assemble instructions, grow sections,
+  search code caves, rewrite relocations, or preserve Authenticode signatures.
 "#
         }
-        "dump" | "recomp" | "c" => {
+        "dump" | "xrefs" | "refs" | "recomp" | "c" => {
             r#"
-DUMP EXAMPLES
+DUMP HELP
+Usage:
+  resx dump <image> <function> [options]
+  resx dump <image> --at <addr> [options]
+  resx dump <image> --ordinal <n> [options]
+  resx xrefs <image> <function-or-import> [options]
+
+Examples:
   resx dump ntdll.dll NtOpenProcess
   resx dump ntdll.dll --at 0x161F40
   resx dump ntdll.dll --ordinal 451
   resx dump kernel32.dll CreateFileW --recomp --c-out CreateFileW.c
+  resx xrefs .\driver.sys WdfDeviceCreate
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
+  resx dump .\sample.dll DllMain --hostile --funcs --funcs-depth 3 --xrefs --strings
+  resx dump .\sample.dll --at 0x401000 --json --no-pdb --max-insns 250
+
+Useful options:
+  --hostile, --funcs, --funcs-depth <n>, --cfg text, --recomp,
+  --xrefs, --strings, --edrchk, --hookchk, --pdb <file>, --no-pdb
 "#
         }
         "cfg" => {
             r#"
-CFG EXAMPLES
+CFG HELP
+Usage:
+  resx cfg <image> <function>
+  resx cfg <image> --at <addr>
+  resx cfg <image> --ordinal <n>
+
+Examples:
   resx cfg ntdll.dll NtOpenProcess
   resx cfg ntoskrnl.exe NtQuerySystemInformation
   resx cfg ntdll.dll --at 0x161F40
   resx cfg user32.dll --ordinal 650
+  resx cfg .\packed.dll --at 0x402A10 --hostile --max-insns 900 --no-pdb
 "#
         }
         "reconstruct-cfg" => {
             r#"
-RECONSTRUCT-CFG EXAMPLES
+RECONSTRUCT-CFG HELP
+Usage:
+  resx reconstruct-cfg <image> [flow options]
+
+Examples:
   resx reconstruct-cfg suspicious.dll
   resx suspicious.dll --reconstruct-cfg --depth 8 --max-total 500
   resx reconstruct-cfg suspicious.dll --thread-filter spawned
   resx reconstruct-cfg suspicious.dll --thread-filter api --api-filter GetThreadContext
   resx reconstruct-cfg .\sample.exe --json
+  resx reconstruct-cfg .\packed.exe --depth 10 --max-callers 64 --max-total 800 --hostile
+  resx reconstruct-cfg .\svc.dll --api-filter LoadLibrary --json --out .\svc.flow.json
 
 NOTES
   Starts at PE entry/TLS/startup handoff candidates, follows intra-image CALL/JMP
@@ -513,10 +680,15 @@ NOTES
         }
         "peinfo" => {
             r#"
-PEINFO EXAMPLES
+PEINFO HELP
+Usage:
+  resx peinfo <image> [--json]
+
+Examples:
   resx peinfo .\blackbird.sys
   resx peinfo ntdll.dll
   resx peinfo .\sample.exe --json
+  resx peinfo .\packed.dll --no-pdb --json --out .\packed.peinfo.json
 
 NOTES
   Reports PE layout, subsystem, image kind, debug info, symbols, signer state,
@@ -525,31 +697,63 @@ NOTES
         }
         "sections" => {
             r#"
-SECTIONS EXAMPLES
+SECTIONS HELP
+Usage:
+  resx sections <image> [--json]
+
+Examples:
   resx sections ntdll.dll
   resx sections .\blackbird.sys
   resx sections .\sample.dll --json
+  resx sections .\packed.dll --no-color --quiet
+
+NOTES
+  Shows section ranges, entropy, raw/virtual sizes, protections, and expected
+  protection notes such as writable .text or executable data sections.
 "#
         }
         "eat" => {
             r#"
-EAT EXAMPLES
+EAT HELP
+Usage:
+  resx eat <image> [--json]
+
+Examples:
   resx eat kernel32.dll
   resx eat ntdll.dll --json
+  resx eat .\plugin.dll --json --out .\plugin.exports.json
+
+NOTES
+  Dumps export names, ordinals, RVAs, and forwarders when present.
 "#
         }
         "iat" => {
             r#"
-IAT EXAMPLES
+IAT HELP
+Usage:
+  resx iat <image> [--json]
+
+Examples:
   resx iat kernel32.dll
   resx iat suspicious.dll --json
+  resx iat .\packed.dll --json --out .\packed.imports.json
+
+NOTES
+  Dumps import DLLs, imported names/ordinals, hints, and IAT slot RVAs.
 "#
         }
         "yara" => {
             r#"
-YARA EXAMPLES
+YARA HELP
+Usage:
+  resx yara <image> <rule.yar> [--json]
+  resx <image> --yara <rule.yar> [--yara <more.yar>]
+
+Examples:
   resx yara suspicious.dll .\rules\triage.yar
   resx yara ntdll.dll .\rules\exports.yar --json
+  resx .\sample.exe --yara .\rules\packer.yar --yara .\rules\anti-debug.yar --json
+  resx yara .\samples\loader.dll .\rules\loader.yar --no-color --quiet
 
 NOTES
   Accepts one or more rule files through the `yara` shorthand command or `--yara`.
@@ -557,10 +761,16 @@ NOTES
         }
         "scan" => {
             r#"
-SCAN EXAMPLES
+SCAN HELP
+Usage:
+  resx scan <path> [scan options]
+
+Examples:
   resx scan C:\Windows\System32\drivers --jsonl --max-files 200
   resx scan .\samples --extensions exe,dll,sys --max-candidates 16
   resx scan .\samples --max-file-mb 100 --json
+  resx scan .\corpus --extensions exe,dll --max-files 500 --max-candidates 32 --json
+  resx scan C:\Windows\System32\drivers --extensions sys --jsonl --max-file-mb 50
 
 NOTES
   Inventories PE images and ranks fuzz-target candidates using image kind,
@@ -569,7 +779,11 @@ NOTES
         }
         "diff" => {
             r#"
-DIFF EXAMPLES
+DIFF HELP
+Usage:
+  resx diff <image-a> <image-b> [image-c ...] [diff options]
+
+Examples:
   resx diff .\old.dll .\new.dll
   resx diff .\old.dll .\new.dll --json
   resx diff .\old.dll .\new.dll .\canary.dll --diff-graph
@@ -578,6 +792,8 @@ DIFF EXAMPLES
   resx diff .\old.dll .\new.dll --diff-graph --diff-graph-format dot --diff-graph-out heatmap.dot
   resx diff .\old.dll .\new.dll --show-cfg-diff auto
   resx diff .\old.dll .\new.dll --show-cfg-diff TargetFunc --cfg-diff-format dot --cfg-diff-out cfg.dot
+  resx diff .\v1.sys .\v2.sys --diff-mode deep --max-functions 6000 --include-weak --json
+  resx diff .\left.dll .\right.dll --show-cfg-diff auto --cfg-diff-format json --no-pdb
 
 NOTES
   Compares normalized function code, basic-block shape, calls/imports, constants,
@@ -591,11 +807,18 @@ NOTES
         }
         "index" | "hunt" => {
             r#"
-CORPUS EXAMPLES
+CORPUS HELP
+Usage:
+  resx index <dir-or-image> --db <file> [corpus options]
+  resx hunt <sample> --db <file> [corpus options]
+
+Examples:
   resx index .\samples --db .\samples.resxdb --no-pdb
   resx index C:\Windows\System32\drivers --db drivers.resxdb --extensions sys --max-files 500
   resx hunt .\unknown.dll --db .\samples.resxdb
   resx hunt .\unknown.dll --db .\samples.resxdb --diff-threshold 75 --include-weak
+  resx index .\malware-family --db .\family.resxdb --extensions exe,dll --max-functions 5000 --json
+  resx hunt .\new-sample.exe --db .\family.resxdb --diff-threshold 60 --max-candidates 20 --json
 
 NOTES
   `index` stores normalized function/CFG/API fingerprints for many PE images.
@@ -605,32 +828,59 @@ NOTES
         }
         "follow" | "callers" => {
             r#"
-CALLERS EXAMPLES
+CALLERS HELP
+Usage:
+  resx callers <image> <function> [follow options]
+
+Examples:
   resx callers kernel32.dll CreateFileW
   resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
   resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
   resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
   resx callers user32.dll MessageBoxW --scan-exe --show-site --json
+  resx callers ntdll.dll NtProtectVirtualMemory --include-dir .\samples --scan-exe --depth 4 --max-total 1000
+  resx callers ntoskrnl.exe MmMapIoSpace --include-dir C:\Windows\System32\drivers --scope-file *.sys --format list
+
+NOTES
+  Reverse-traces callsites across the priority set plus optional include dirs/images.
+  Use --show-site to print callsite RVAs and --filter-dll to narrow noisy graphs.
 "#
         }
         "locate" | "locate-sym" => {
             r#"
-LOCATE EXAMPLES
+LOCATE HELP
+Usage:
+  resx locate <name> [search options]
+  resx locate-sym <name> [search options]
+
+Examples:
   resx locate OpenProcess
   resx locate NtOpenProcess
   resx locate NtOpenProcess --include-dir C:\Work\Drivers
   resx locate-sym RtlpHeapHandleError
   resx locate-sym NtOpenProcess --include-image .\mydriver.sys
+  resx locate VirtualProtect --include-dir .\samples --scan-exe --json
+  resx locate-sym KiDispatch --include-dir C:\Symbols\private --filter-dll ntoskrnl
+
+NOTES
+  `locate` uses exports. `locate-sym` also loads available PDB symbols and can
+  find private/internal names when symbols are present.
 "#
         }
         "explain" => {
             r#"
-EXPLAIN EXAMPLES
+EXPLAIN HELP
+Usage:
+  resx explain <name> [--prefix|--api] [--json]
+
+Examples:
   resx explain Nt
   resx explain Zw
   resx explain NtQuerySystemInformation
   resx explain NtQuerySystemInformation --api --json
   resx dump ntoskrnl.exe NtOpenProcess --explain
+  resx explain RtlpHeapHandleError --api
+  resx explain Ki --prefix
 
 NOTES
   `explain` autodetects bare prefixes versus API-style symbols by default.
@@ -639,7 +889,11 @@ NOTES
         }
         "priority" => {
             r#"
-PRIORITY EXAMPLES
+PRIORITY HELP
+Usage:
+  resx priority
+
+Examples:
   resx priority
 
 NOTES
@@ -649,18 +903,85 @@ NOTES
         }
         "symbols" | "pdb" | "syms" => {
             r#"
-SYMBOL EXAMPLES
+SYMBOL HELP
+Usage:
+  resx syms <image> [symbol options]
+  resx types <image> [query] [symbol options]
+
+Examples:
   resx dump ntdll.dll RtlpHeapHandleError --verbose
   resx dump ntdll.dll RtlpHeapHandleError --sym-path "C:\Symbols"
   resx syms ntoskrnl.exe --verbose
   resx syms .\J58.dll --pdb .\J58.pdb
+  resx types ntoskrnl.exe _EPROCESS --sym-path "srv*C:\Symbols*https://msdl.microsoft.com/download/symbols"
+  resx syms .\driver.sys --pdb .\driver.pdb --json
+"#
+        }
+        "types" => {
+            r#"
+TYPES HELP
+Usage:
+  resx types <image> [query] [symbol options]
+
+Examples:
+  resx types ntoskrnl.exe
+  resx types ntoskrnl.exe _EPROCESS
+  resx types .\driver.sys DEVICE_OBJECT --pdb .\driver.pdb
+  resx types .\module.dll vtable --sym-path "C:\Symbols" --json
+
+NOTES
+  Browses PDB-backed type names and symbol references. Results depend on symbol
+  availability; use --pdb, --sym-path, --sym-server, or --reload when needed.
+"#
+        }
+        "pechk" => {
+            r#"
+PECHK HELP
+Usage:
+  resx pechk <image> [--json]
+
+Examples:
+  resx pechk .\sample.dll
+  resx pechk .\packed.exe --json
+  resx pechk C:\Windows\System32\drivers\ndis.sys --no-pdb --quiet
+
+NOTES
+  Runs PE header/layout anomaly checks such as invalid directories, suspicious
+  section layout, odd alignment, and malformed or inconsistent metadata.
+"#
+        }
+        "edrchk" | "hookchk" => {
+            r#"
+HOOK / EDR CHECK HELP
+Usage:
+  resx dump <image> <function> --hookchk
+  resx dump <image> <function> --edrchk [--unsafe-map-image]
+
+Examples:
+  resx dump ntdll.dll NtOpenProcess --hookchk
+  resx dump ntdll.dll NtAllocateVirtualMemory --edrchk
+  resx dump C:\Windows\System32\ntdll.dll NtProtectVirtualMemory --edrchk --unsafe-map-image --json
+
+NOTES
+  --hookchk is static entry/thunk triage. --edrchk compares disk bytes with an
+  already-loaded module prologue; --unsafe-map-image allows mapping a target image
+  only when explicit memory comparison needs it.
 "#
         }
         _ => {
             r#"
-GENERAL EXAMPLES
+GENERAL HELP
+Usage:
+  resx <command> [arguments] [options]
+  resx help <command>
+  resx <command> --help
+
+Examples:
   resx dump ntdll.dll NtCreateFile
   resx intelli suspicious.dll
+  resx behavior suspicious.dll --json
+  resx unpack suspicious.dll
+  resx entropy suspicious.dll
   resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
   resx reconstruct-cfg suspicious.dll --depth 6
   resx diff .\old.dll .\new.dll
@@ -670,6 +991,14 @@ GENERAL EXAMPLES
   resx scan C:\Windows\System32\drivers --jsonl --max-files 200
   resx locate-sym NtOpenProcess
   resx update
+
+Command help:
+  resx help dump
+  resx help behavior
+  resx help unpack
+  resx help entropy
+  resx help reconstruct-cfg
+  resx help diff
 "#
         }
     };

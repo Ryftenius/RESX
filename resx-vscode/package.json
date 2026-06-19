@@ -1,8 +1,8 @@
 {
   "name": "resx-vscode",
   "displayName": "RESX Binary Viewer",
-  "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, and SYS files powered by RESX",
-  "version": "1.4.0",
+  "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, SYS, and PE-style BIN files powered by RESX",
+  "version": "1.10.0",
   "publisher": "titan-softwork-solutions",
   "license": "UNLICENSED",
   "repository": {
@@ -13,8 +13,14 @@
   "bugs": {
     "url": "https://github.com/TITAN-Softwork-Solutions/RESX/issues"
   },
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other", "Debuggers", "Visualization"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Debuggers",
+    "Visualization"
+  ],
   "keywords": [
     "resx",
     "pe",
@@ -37,11 +43,27 @@
         "viewType": "resx.binaryViewer",
         "displayName": "RESX Binary Viewer",
         "selector": [
-          { "filenamePattern": "*.exe" },
-          { "filenamePattern": "*.dll" },
-          { "filenamePattern": "*.sys" }
+          {
+            "filenamePattern": "*.exe"
+          },
+          {
+            "filenamePattern": "*.dll"
+          },
+          {
+            "filenamePattern": "*.sys"
+          }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "resx.binaryViewer.bin",
+        "displayName": "RESX Binary Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.bin"
+          }
+        ],
+        "priority": "option"
       }
     ],
     "configuration": {
@@ -66,7 +88,9 @@
         },
         "resx.symbolPaths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Additional symbol search paths passed to --sym-path."
         },
@@ -78,6 +102,11 @@
       }
     },
     "commands": [
+      {
+        "command": "resx.openBinaryFile",
+        "category": "RESX",
+        "title": "Open Binary File"
+      },
       {
         "command": "resx.refreshBinary",
         "category": "RESX",
@@ -109,7 +138,16 @@
         "category": "RESX",
         "title": "Scan Folder"
       }
-    ]
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "resx.openBinaryFile",
+          "when": "resourceScheme == file && resourceExtname == .bin",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

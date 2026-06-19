@@ -1,6 +1,8 @@
+pub mod behavior;
 pub mod cfg;
 pub mod diff;
 pub mod dump;
+pub mod entropy;
 pub mod explain;
 pub mod follow;
 pub mod hunt;
@@ -16,4 +18,5 @@ pub mod show_eat;
 pub mod show_iat;
 pub mod show_syms;
 pub mod types;
+pub mod unpack;
 pub mod update;

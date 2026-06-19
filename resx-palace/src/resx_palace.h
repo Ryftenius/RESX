@@ -17,6 +17,7 @@ RESX_PALACE_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, uns
 RESX_PALACE_API unsigned long __stdcall ResxThreadCallbackEntry(void *ctx);
 RESX_PALACE_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value);
 RESX_PALACE_API int ResxIndirectCallMessage(ResxPalaceCallback callback, int value);
+RESX_PALACE_API int ResxBehaviorSignals(unsigned int selector);
 
 #ifdef __cplusplus
 }

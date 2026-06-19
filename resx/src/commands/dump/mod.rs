@@ -21,7 +21,8 @@ use crate::analysis::cfgview::{
     RecoveredIndirectEdge,
 };
 use crate::analysis::disasm::{
-    collect_api_calls, disassemble_at, find_string_refs, find_xrefs, ApiCall, Instruction,
+    collect_api_calls, disassemble_at, disassemble_at_unbounded, find_string_refs, find_xrefs,
+    is_ret, ApiCall, Instruction,
 };
 use crate::analysis::discovery::discover_functions;
 use crate::analysis::edr::{check_prologue, EdrCheckResult};
@@ -31,7 +32,7 @@ use crate::analysis::intelli::{analyze_image, IntelliFinding};
 use crate::analysis::ir::summarize_typed_ir;
 use crate::analysis::recomp::recomp_c;
 use crate::analysis::recursive_cfg::{recover_recursive_cfg, RecursiveCfgRequest};
-use crate::analysis::symbols::SymbolIndex;
+use crate::analysis::symbols::{display_symbol_name, SymbolIndex};
 use crate::analysis::thunk::{follow_jmp_thunk, ThunkResolution};
 use crate::analysis::yara::scan_file;
 use crate::commands::explain::{config_mode as explain_mode, print_explain_text};
@@ -45,9 +46,9 @@ use crate::core::output::{
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
 use crate::formats::pe::{
-    find_iat_slots_by_name, find_startup_routines, parse_pe, read_data_summary, read_exports,
-    read_imports, read_load_config, read_runtime_function, resolve_iat_slot, Export,
-    PeStartupRoutine,
+    find_iat_slots_by_name, find_startup_routines, parse_pe, read_clr_info, read_data_summary,
+    read_exports, read_imports, read_load_config, read_runtime_function, resolve_iat_slot, Export,
+    PeFile, PeStartupRoutine, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
 };
 
 #[derive(Debug, Clone)]
@@ -57,10 +58,33 @@ struct RecoveredSwitchTarget {
     classes: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddressSource {
+    Rva,
+    Va,
+    FileOffset,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAddress {
+    rva: u32,
+    value: u64,
+    source: AddressSource,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTarget {
+    target_rva: u32,
+    input_rva: u32,
+    input_value: u64,
+    address_source: AddressSource,
+    name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_u32_literal, parse_u64_literal, resolve_address_spec, AddressSource};
-    use crate::formats::pe::{PeAnomaly, PeFile, PeSection};
+    use crate::formats::pe::{PeFile, PeSection, IMAGE_SCN_MEM_EXECUTE};
 
     fn sample_pe() -> PeFile {
         PeFile {
@@ -71,25 +95,25 @@ mod tests {
             major_linker_version: 0,
             minor_linker_version: 0,
             image_base: 0x1_8000_0000,
-            entry_point: 0x1200,
-            size_of_image: 0x3000,
+            entry_point: 0x1000,
+            size_of_image: 0x5000,
             size_of_headers: 0x400,
             section_alignment: 0x1000,
             file_alignment: 0x200,
             checksum: 0,
-            subsystem: 3,
+            subsystem: 0,
             dll_characteristics: 0,
             sections: vec![PeSection {
                 name: ".text".to_owned(),
                 virtual_address: 0x1000,
-                virtual_size: 0x600,
+                virtual_size: 0x1000,
                 raw_offset: 0x400,
-                raw_size: 0x800,
-                characteristics: 0,
+                raw_size: 0x1000,
+                characteristics: IMAGE_SCN_MEM_EXECUTE,
                 entropy: 0.0,
             }],
             data_dirs: vec![(0, 0); 16],
-            anomalies: Vec::<PeAnomaly>::new(),
+            anomalies: Vec::new(),
         }
     }
 
@@ -126,6 +150,19 @@ mod tests {
         let file = resolve_address_spec("file:0x600", &pe).unwrap();
         assert_eq!(file.rva, 0x1200);
         assert_eq!(file.source, AddressSource::FileOffset);
+    }
+
+    #[test]
+    fn resolve_address_spec_accepts_synthetic_sub_labels_as_rvas() {
+        let pe = sample_pe();
+
+        let sub = resolve_address_spec("sub_00001200", &pe).unwrap();
+        assert_eq!(sub.rva, 0x1200);
+        assert_eq!(sub.source, AddressSource::Rva);
+
+        let func = resolve_address_spec("fn_0x00001200", &pe).unwrap();
+        assert_eq!(func.rva, 0x1200);
+        assert_eq!(func.source, AddressSource::Rva);
     }
 
     #[test]
@@ -167,27 +204,34 @@ struct SwitchSemanticInfo {
     params: Vec<HeaderParam>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AddressSource {
-    Rva,
-    Va,
-    FileOffset,
+const COMIMAGE_FLAGS_ILONLY: u32 = 0x0000_0001;
+
+fn managed_metadata_disassembly_note(pe: &PeFile, raw: &[u8], target_rva: u32) -> Option<String> {
+    let clr = read_clr_info(pe, raw)?;
+    if pe.entry_point != 0 && (clr.flags & COMIMAGE_FLAGS_ILONLY) == 0 {
+        return None;
+    }
+
+    let (clr_rva, clr_size) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR);
+    let in_clr_header = rva_in_range(target_rva, clr_rva, clr_size);
+    let in_metadata = rva_in_range(target_rva, clr.metadata_rva, clr.metadata_size);
+    if !in_clr_header && !in_metadata {
+        return None;
+    }
+
+    let region = if in_clr_header {
+        "CLR header"
+    } else {
+        "CLR metadata"
+    };
+    Some(format!(
+        "RVA 0x{target_rva:08X} is inside the {region} of an IL-only CLR image; native x64 disassembly here is metadata bytes, not executable code (CLR entry token/RVA 0x{:08X}).",
+        clr.entry_point_token_or_rva
+    ))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ResolvedAddress {
-    rva: u32,
-    value: u64,
-    source: AddressSource,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedTarget {
-    target_rva: u32,
-    input_rva: u32,
-    input_value: u64,
-    address_source: AddressSource,
-    name: String,
+fn rva_in_range(rva: u32, start: u32, size: u32) -> bool {
+    size != 0 && rva >= start && rva < start.saturating_add(size)
 }
 
 fn address_source_label(source: AddressSource) -> &'static str {
@@ -203,16 +247,17 @@ fn resolve_address_target(
     name_hint: &str,
     exports: &[Export],
     pdb_symbols: &[crate::formats::pdb::PdbSymbol],
-    pe: &crate::formats::pe::PeFile,
+    pe: &PeFile,
     raw: &[u8],
     image_base: u64,
 ) -> Result<ResolvedTarget, String> {
     let address = resolve_address_spec(raw_spec, pe)?;
     let target_rva = read_runtime_function(pe, raw, address.rva)
         .map(|runtime| runtime.begin_rva)
-        .or_else(|| nearest_named_function_start(exports, pdb_symbols, pe, address.rva))
         .unwrap_or(address.rva);
-    let name = if !name_hint.is_empty() && !looks_like_address_literal(name_hint) {
+    let name = if !name_hint.is_empty()
+        && (synthetic_rva_literal(name_hint).is_some() || !looks_like_address_literal(name_hint))
+    {
         name_hint.to_owned()
     } else {
         best_function_name_for_rva(exports, pdb_symbols, image_base, target_rva, address.rva)
@@ -227,11 +272,10 @@ fn resolve_address_target(
     })
 }
 
-fn resolve_address_spec(
-    raw: &str,
-    pe: &crate::formats::pe::PeFile,
-) -> Result<ResolvedAddress, String> {
-    let (forced_source, value_text) = split_address_source_prefix(raw);
+fn resolve_address_spec(raw: &str, pe: &PeFile) -> Result<ResolvedAddress, String> {
+    let synthetic = synthetic_rva_literal(raw);
+    let spec = synthetic.as_deref().unwrap_or(raw);
+    let (forced_source, value_text) = split_address_source_prefix(spec);
     let value =
         parse_u64_literal(value_text).ok_or_else(|| format!("invalid --at value: {}", raw))?;
 
@@ -274,7 +318,7 @@ fn resolve_forced_address_source(
     raw: &str,
     value: u64,
     source: AddressSource,
-    pe: &crate::formats::pe::PeFile,
+    pe: &PeFile,
 ) -> Result<ResolvedAddress, String> {
     let rva = match source {
         AddressSource::Rva => {
@@ -311,53 +355,168 @@ fn split_address_source_prefix(raw: &str) -> (Option<AddressSource>, &str) {
 }
 
 fn looks_like_address_literal(raw: &str) -> bool {
+    if synthetic_rva_literal(raw).is_some() {
+        return true;
+    }
     let (_, value) = split_address_source_prefix(raw);
     parse_u64_literal(value).is_some()
 }
 
-fn nearest_named_function_start(
-    exports: &[Export],
-    pdb_symbols: &[crate::formats::pdb::PdbSymbol],
-    pe: &crate::formats::pe::PeFile,
-    input_rva: u32,
-) -> Option<u32> {
-    let input_section = pe.rva_to_section(input_rva)?;
-    let mut best: Option<u32> = None;
-
-    for sym in pdb_symbols {
-        if sym.kind != "function" || sym.rva == 0 || sym.rva > input_rva {
-            continue;
-        }
-        if sym.size > 0 {
-            let sym_size = sym.size.min(u32::MAX as u64) as u32;
-            let sym_end = sym.rva.saturating_add(sym_size);
-            if input_rva < sym_end {
-                return Some(sym.rva);
+fn synthetic_rva_literal(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    for prefix in ["sub_", "loc_", "fn_0x", "fn_"] {
+        if let Some(rest) = strip_prefix_ascii_case(trimmed, prefix) {
+            let hex = rest.trim();
+            if !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Some(format!("rva:0x{hex}"));
             }
         }
-        if pe
-            .rva_to_section(sym.rva)
-            .is_some_and(|section| section.name == input_section.name)
-            && best.is_none_or(|current| sym.rva > current)
-        {
-            best = Some(sym.rva);
-        }
     }
+    None
+}
 
-    for export in exports {
-        if export.rva > input_rva {
+fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = value.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &value[prefix.len()..])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_reachable_function_insns(
+    raw: &[u8],
+    pe: &PeFile,
+    start_rva: u32,
+    arch: u32,
+    image_base: u64,
+    exports: &[Export],
+    symbols: Option<&SymbolIndex>,
+    cfg: &Config,
+) -> Option<Vec<Instruction>> {
+    let section_end = pe
+        .rva_to_section(start_rva)
+        .map(|section| {
+            section
+                .virtual_address
+                .saturating_add(section.virtual_size.max(section.raw_size))
+        })
+        .unwrap_or_else(|| start_rva.saturating_add(cfg.max_bytes.max(512) as u32));
+    let function_end = start_rva
+        .saturating_add(cfg.max_bytes.max(512) as u32)
+        .min(section_end)
+        .max(start_rva.saturating_add(1));
+
+    let mut queue = std::collections::VecDeque::from([start_rva]);
+    let mut seen_blocks = std::collections::BTreeSet::new();
+    let mut insn_by_rva = std::collections::BTreeMap::new();
+    let max_blocks = cfg.max_total.max(64);
+
+    while let Some(block_start) = queue.pop_front() {
+        if seen_blocks.len() >= max_blocks {
+            break;
+        }
+        if !seen_blocks.insert(block_start)
+            || !rva_in_function_window(block_start, start_rva, function_end)
+        {
             continue;
         }
-        if pe
-            .rva_to_section(export.rva)
-            .is_some_and(|section| section.name == input_section.name)
-            && best.is_none_or(|current| export.rva > current)
-        {
-            best = Some(export.rva);
+        let Some(file_off) = pe.rva_to_offset(block_start) else {
+            continue;
+        };
+
+        let mut local_cfg = cfg.clone();
+        local_cfg.max_bytes = function_end
+            .saturating_sub(block_start)
+            .max(1)
+            .min(cfg.max_bytes.max(512) as u32) as usize;
+        local_cfg.max_insns = cfg.max_insns.clamp(64, 4096);
+
+        let Ok(linear) = disassemble_at_unbounded(
+            raw,
+            pe,
+            file_off,
+            block_start,
+            arch,
+            image_base,
+            exports,
+            symbols,
+            &local_cfg,
+        ) else {
+            continue;
+        };
+
+        let mut block = Vec::new();
+        for insn in linear {
+            if !rva_in_function_window(insn.rva, start_rva, function_end) {
+                break;
+            }
+            let stop = block_terminator(&insn);
+            block.push(insn);
+            if stop {
+                break;
+            }
+        }
+
+        if block.is_empty() {
+            continue;
+        }
+
+        enqueue_block_successors(&block, image_base, start_rva, function_end, &mut queue);
+        for insn in block {
+            insn_by_rva.entry(insn.rva).or_insert(insn);
         }
     }
 
-    best.filter(|start| *start < input_rva)
+    (insn_by_rva.len() > 1).then(|| insn_by_rva.into_values().collect())
+}
+
+fn rva_in_function_window(rva: u32, start_rva: u32, function_end: u32) -> bool {
+    rva >= start_rva && rva < function_end
+}
+
+fn block_terminator(insn: &Instruction) -> bool {
+    insn.is_jcc || insn.is_jmp || is_ret(insn.iced.mnemonic())
+}
+
+fn enqueue_block_successors(
+    block: &[Instruction],
+    image_base: u64,
+    start_rva: u32,
+    function_end: u32,
+    queue: &mut std::collections::VecDeque<u32>,
+) {
+    let Some(last) = block.last() else {
+        return;
+    };
+
+    if last.is_jcc {
+        if let Some(target) = direct_branch_rva(last, image_base) {
+            if rva_in_function_window(target, start_rva, function_end) {
+                queue.push_back(target);
+            }
+        }
+        if let Some(fallthrough) = next_insn_rva(last) {
+            if rva_in_function_window(fallthrough, start_rva, function_end) {
+                queue.push_back(fallthrough);
+            }
+        }
+        return;
+    }
+
+    if last.is_jmp {
+        if let Some(target) = direct_branch_rva(last, image_base) {
+            if rva_in_function_window(target, start_rva, function_end) {
+                queue.push_back(target);
+            }
+        }
+    }
+}
+
+fn direct_branch_rva(insn: &Instruction, image_base: u64) -> Option<u32> {
+    (insn.call_target >= image_base).then(|| insn.call_target.wrapping_sub(image_base) as u32)
+}
+
+fn next_insn_rva(insn: &Instruction) -> Option<u32> {
+    insn.rva.checked_add(insn.bytes.len() as u32)
 }
 
 pub fn run(
@@ -596,14 +755,154 @@ pub fn run(
     };
     progress.tick("resolving target");
 
+    if cfg.show_xrefs
+        && target_rva == 0
+        && crate::analysis::wdf::function_by_name(&resolved_name).is_some()
+    {
+        let mut xrefs = find_xrefs(
+            &raw,
+            &pe,
+            &exports,
+            Some(&symbol_index),
+            target_rva,
+            &resolved_name,
+        );
+        let exact_wdf = format!("WDF!{resolved_name}");
+        xrefs.retain(|line| line.contains(&exact_wdf));
+        xrefs.sort();
+        xrefs.dedup();
+        progress.tick("collecting cross references");
+        progress.finish();
+        if cfg.json {
+            writeln!(
+                w,
+                "{}",
+                serde_json::json!({
+                    "schema": "resx.dump",
+                    "version": 1,
+                    "target": resolved_name,
+                    "xrefs": xrefs,
+                })
+            )
+            .ok();
+        } else {
+            writeln!(w, "{}", c.bold("\nCross References:")).ok();
+            if xrefs.is_empty() {
+                writeln!(w, "{}", c.dim("  (none)")).ok();
+            }
+            for r in &xrefs {
+                writeln!(w, "  {}", c.cyan(r)).ok();
+            }
+        }
+        return Ok(());
+    }
+
+    let import_slot_target = resolve_iat_slot(&pe, &raw, target_rva);
+    if cfg.show_xrefs {
+        if let Some((import_dll, import_name)) = import_slot_target.as_ref() {
+            let mut xrefs = find_xrefs(
+                &raw,
+                &pe,
+                &exports,
+                Some(&symbol_index),
+                target_rva,
+                &resolved_name,
+            );
+            xrefs.sort();
+            xrefs.dedup();
+            progress.tick("collecting cross references");
+            progress.finish();
+
+            if cfg.json {
+                let result = FuncResult {
+                    dll: dll_name,
+                    dll_path: dll_path_str,
+                    function: resolved_name,
+                    rva: format!("0x{:08X}", target_rva),
+                    va: format!("0x{:016X}", image_base + target_rva as u64),
+                    rebased_va: rebase
+                        .map(|base| format!("0x{:016X}", base + target_rva as u64))
+                        .unwrap_or_default(),
+                    image_base: format!("0x{:016X}", image_base),
+                    arch: arch_str,
+                    entry_point: format!("0x{:08X}", pe.entry_point),
+                    size_of_image: format!("0x{:08X}", pe.size_of_image),
+                    size_of_headers: format!("0x{:08X}", pe.size_of_headers),
+                    section_alignment: format!("0x{:08X}", pe.section_alignment),
+                    file_alignment: format!("0x{:08X}", pe.file_alignment),
+                    checksum: format!("0x{:08X}", pe.checksum),
+                    subsystem: format!("0x{:04X}", pe.subsystem),
+                    dll_characteristics: format!("0x{:04X}", pe.dll_characteristics),
+                    header_corrupt: pe.header_corruption_detected(),
+                    pe_anomalies: pe.anomalies.iter().map(to_anomaly_json).collect(),
+                    startup_routines: startup_routines.iter().map(to_startup_json).collect(),
+                    sections: pe.sections.iter().map(to_section_json).collect(),
+                    yara_matches: yara_matches.iter().map(to_yara_json).collect(),
+                    size_bytes: 0,
+                    insn_count: 0,
+                    pdb_loaded,
+                    followed_jmp: String::new(),
+                    is_import_slot: true,
+                    import_target_dll: import_dll.clone(),
+                    import_target_name: import_name.clone(),
+                    instructions: Vec::new(),
+                    xrefs,
+                    strings: Vec::new(),
+                    data: None,
+                    function_discovery,
+                    recursive_cfg: None,
+                    typed_ir: None,
+                    indirect_flow: None,
+                    intelli_findings: Vec::new(),
+                    recomp: String::new(),
+                    cfg: String::new(),
+                    hook_indicators: Vec::new(),
+                    edrchk: None,
+                    api_calls: Vec::new(),
+                    api_call_tree: String::new(),
+                    current_syscall: None,
+                    explain: None,
+                };
+                let json = serde_json::to_string_pretty(&versioned_object("dump", &result))
+                    .unwrap_or_default();
+                writeln!(w, "{}", json).ok();
+            } else {
+                writeln!(
+                    w,
+                    "\n{}",
+                    c.bold(&format!(
+                        "{}!{}  [IAT RVA 0x{:08X}, VA 0x{:X}]",
+                        import_dll,
+                        import_name,
+                        target_rva,
+                        image_base + target_rva as u64
+                    ))
+                )
+                .ok();
+                writeln!(w, "{}", c.bold("\nCross References:")).ok();
+                if xrefs.is_empty() {
+                    writeln!(w, "{}", c.dim("  (none)")).ok();
+                }
+                for r in &xrefs {
+                    writeln!(w, "  {}", c.cyan(r)).ok();
+                }
+            }
+            return Ok(());
+        }
+    }
+
     let mut file_off = pe
         .rva_to_offset(target_rva)
         .ok_or_else(|| format!("RVA 0x{:08X}: not in any section", target_rva))?;
     let mut target_rva = target_rva;
 
-    let mut followed_desc = String::new();
-    let import_slot_target = resolve_iat_slot(&pe, &raw, target_rva);
+    if !cfg.quiet && !cfg.json {
+        if let Some(note) = managed_metadata_disassembly_note(&pe, &raw, target_rva) {
+            writeln!(w, "{}", c.warn(&note)).ok();
+        }
+    }
 
+    let mut followed_desc = String::new();
     let entry_thunk = follow_jmp_thunk(&raw, &pe, target_rva);
 
     if cfg.follow_jmp {
@@ -709,7 +1008,7 @@ pub fn run(
         }
     }
 
-    let insns = disassemble_at(
+    let linear_insns = disassemble_at(
         &raw,
         &pe,
         file_off,
@@ -721,6 +1020,18 @@ pub fn run(
         cfg,
     )
     .map_err(|e| format!("disassembly: {}", e))?;
+    let insns = recover_reachable_function_insns(
+        &raw,
+        &pe,
+        target_rva,
+        arch,
+        image_base,
+        &exports,
+        Some(&symbol_index),
+        cfg,
+    )
+    .filter(|recovered| recovered.len() > linear_insns.len())
+    .unwrap_or(linear_insns);
     progress.tick("disassembling function");
 
     if !cfg.at_rva.is_empty() {
@@ -1717,8 +2028,20 @@ pub(crate) fn resolve_function(
     }
 
     if looks_like_address_literal(func_arg) {
-        let target =
-            resolve_address_target(func_arg, "", exports, pdb_symbols, pe, raw, image_base)?;
+        let name_hint = if synthetic_rva_literal(func_arg).is_some() {
+            func_arg
+        } else {
+            ""
+        };
+        let target = resolve_address_target(
+            func_arg,
+            name_hint,
+            exports,
+            pdb_symbols,
+            pe,
+            raw,
+            image_base,
+        )?;
         if !cfg.quiet {
             print_address_resolution(w, c, &target);
         }
@@ -1781,11 +2104,35 @@ pub(crate) fn resolve_function(
         return Ok((*slot_rva, import_name.clone(), false));
     }
 
+    if cfg.show_xrefs {
+        if let Some(func) = crate::analysis::wdf::function_by_name(func_arg) {
+            if !cfg.quiet {
+                writeln!(
+                    w,
+                    "{}",
+                    c.ok(&format!(
+                        "WDF!{} @ WdfFunctions[0x{:X}]  (KMDF function table)",
+                        func.name,
+                        func.offset(if pe.arch == 64 { 8 } else { 4 })
+                    ))
+                )
+                .ok();
+            }
+            return Ok((0, func.name.to_owned(), false));
+        }
+    }
+
+    let search_scope = if cfg.show_xrefs {
+        "exports, PDB symbols, address literals, and import/IAT slots"
+    } else {
+        "exports or PDB symbols"
+    };
     writeln!(
         w,
-        "\n{} '{}' not found in EAT or PDB symbols",
+        "\n{} '{}' not found in {}",
         c.err_msg(""),
-        func_arg
+        func_arg,
+        search_scope
     )
     .ok();
     let lf = func_arg.to_lowercase();
@@ -1811,10 +2158,21 @@ pub(crate) fn resolve_function(
     writeln!(
         w,
         "{}",
-        c.dim("  Tip: use --show-eat to list all exports, --ordinal N, or --at <rva>")
+        if cfg.show_xrefs {
+            c.dim("  Tip: `resx iat <image>` shows imported API names; `resx syms <image>` shows PDB names; `resx dump <image> <rva> --xrefs` works for address targets.")
+        } else {
+            c.dim("  Tip: use --show-eat to list all exports, --ordinal N, or --at <rva>")
+        }
     )
     .ok();
-    Err(format!("function '{}' not found", func_arg))
+    if cfg.show_xrefs {
+        Err(format!(
+            "ERESOLVE001: target `{}` was not found in exports, PDB symbols, address literals, import/IAT slots, or known KMDF WDF table names\n  Try:\n    resx iat <image> | findstr /i {}\n    resx syms <image> | findstr /i {}\n    resx dump <image> <rva> --xrefs\n  Note: dynamically resolved APIs will not appear as import xrefs unless the resolver callsite is targeted.",
+            func_arg, func_arg, func_arg
+        ))
+    } else {
+        Err(format!("function '{}' not found", func_arg))
+    }
 }
 
 fn print_address_resolution(w: &mut dyn Write, c: &Colors, target: &ResolvedTarget) {
@@ -1860,7 +2218,7 @@ fn best_function_name_for_rva(
 
     for sym in pdb_symbols {
         if sym.rva == function_rva {
-            return sym.name.clone();
+            return display_symbol_name(&sym.name);
         }
     }
 
@@ -1871,11 +2229,12 @@ fn best_function_name_for_rva(
         let sym_size = sym.size.min(u32::MAX as u64) as u32;
         let sym_end = sym.rva.saturating_add(sym_size);
         if input_rva >= sym.rva && input_rva < sym_end {
+            let name = display_symbol_name(&sym.name);
             let disp = input_rva.saturating_sub(sym.rva);
             return if disp == 0 {
-                sym.name.clone()
+                name
             } else {
-                format!("{}+0x{disp:X}", sym.name)
+                format!("{name}+0x{disp:X}")
             };
         }
     }
@@ -1883,7 +2242,7 @@ fn best_function_name_for_rva(
     let va = image_base + function_rva as u64;
     for sym in pdb_symbols {
         if sym.va == va {
-            return sym.name.clone();
+            return display_symbol_name(&sym.name);
         }
     }
 

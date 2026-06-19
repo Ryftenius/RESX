@@ -25,7 +25,7 @@ The DLL/FFI API wraps command output in a standard envelope:
   "status_code": 0,
   "command": "peinfo",
   "args": ["sample.dll", "--json", "--no-color", "--quiet"],
-  "resx_version": "1.4.0",
+  "resx_version": "1.10.0",
   "payload": {}
 }
 ```
@@ -43,7 +43,7 @@ FFI errors use:
   "status": "error",
   "status_code": 5,
   "error": "message",
-  "resx_version": "1.4.0"
+  "resx_version": "1.10.0"
 }
 ```
 
@@ -100,6 +100,111 @@ Common fields:
 ```
 
 Startup routines are conservative evidence. CFG chains are represented by CFG/reconstruct output, not by flooding `startup_routines`.
+
+## Behavior
+
+Command:
+
+```powershell
+resx behavior <image> --json
+```
+
+Common shape:
+
+```json
+{
+  "schema_version": 1,
+  "behavior": {
+    "image": "sample.dll",
+    "finding_count": 3,
+    "findings": [
+      {
+        "category": "syscall",
+        "rule": "syscall-stub-pattern",
+        "severity": "high",
+        "confidence": "high",
+        "source": "instruction-window",
+        "rva": "0x00001234",
+        "detail": "direct syscall-like instruction sequence found in executable code",
+        "evidence": ["0x00001234: syscall"]
+      }
+    ]
+  }
+}
+```
+
+Findings are static evidence records. `category`, `rule`, `severity`, `confidence`, `source`, and `rva` are intended for filtering; `detail` and `evidence` are human-facing context.
+
+## Entropy
+
+Command:
+
+```powershell
+resx entropy <image> --json
+```
+
+Common shape:
+
+```json
+{
+  "schema_version": 1,
+  "entropy": {
+    "image": "sample.dll",
+    "scope": "executable-sections",
+    "window_size": 1024,
+    "stride": 512,
+    "summary": {
+      "window_count": 12,
+      "avg_entropy": 6.12,
+      "min_entropy": 3.21,
+      "max_entropy": 7.82,
+      "high_entropy_windows": 2,
+      "low_entropy_windows": 0,
+      "zero_heavy_windows": 1,
+      "ascii_heavy_windows": 0
+    },
+    "windows": []
+  }
+}
+```
+
+Window records include `rva`, `end_rva`, `file_offset`, `section`, `size`, `entropy`, `ascii_ratio`, `zero_ratio`, `unique_ratio`, and `flags`.
+
+## Unpack
+
+Command:
+
+```powershell
+resx unpack <image> --json
+```
+
+Common shape:
+
+```json
+{
+  "schema_version": 1,
+  "unpack": {
+    "image": "sample.dll",
+    "mode": "static-unpack-triage",
+    "summary": "2 protector hint(s), 3 OEP candidate(s), 1 import-rebuild hint(s), 4 VM candidate(s)",
+    "protector_hints": [],
+    "oep_candidates": [],
+    "import_rebuild_hints": [],
+    "vm_candidates": [],
+    "layer2": {
+      "oep_windows": [],
+      "import_plan": [],
+      "vm_sketches": [],
+      "notes": []
+    },
+    "next_steps": []
+  }
+}
+```
+
+`protector_hints` and `import_rebuild_hints` entries include `rule`, `confidence`, `detail`, and `evidence`. `oep_candidates` include `rva`, `confidence`, `reason`, and `evidence`. `vm_candidates` include `rva`, `confidence`, `kind`, `reason`, and `evidence`.
+
+`layer2.oep_windows` entries include `rva`, `section`, `bytes_hex`, `instructions`, `control_flow`, and `data_refs`. `layer2.import_plan` entries include `dll`, `api`, `source`, `confidence`, and `evidence`. `layer2.vm_sketches` entries include `rva`, `kind`, `score`, `registers`, `mnemonics`, `instructions`, and `next_action`.
 
 ## Dump
 

@@ -11,7 +11,7 @@ use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::json::versioned_object;
 use crate::formats::pdb::load_pdb_symbol;
-use crate::formats::pe::{parse_pe, read_exports};
+use crate::formats::pe::{parse_pe, read_exports, read_imports};
 
 pub fn run(
     dll_arg: &str,
@@ -52,8 +52,10 @@ pub fn run(
         .to_string_lossy()
         .to_string();
     let dll_path_str = dll_path.to_string_lossy().to_string();
-    let (target_name, target_rva, is_internal) = resolve_target(
+    let target = resolve_target(
         &exports,
+        &raw,
+        &pe,
         &dll_path_str,
         &dll_name,
         func_arg,
@@ -62,14 +64,6 @@ pub fn run(
         w,
         c,
     )?;
-    let target = FuncRef::new(
-        dll_name.clone(),
-        dll_path_str.clone(),
-        target_name.clone(),
-        target_rva,
-        pe.image_base + target_rva as u64,
-        is_internal,
-    );
 
     if !cfg.quiet {
         writeln!(
@@ -197,6 +191,8 @@ fn find_export<'a>(
 #[allow(clippy::too_many_arguments)]
 fn resolve_target(
     exports: &[crate::formats::pe::Export],
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
     dll_path: &str,
     dll_name: &str,
     func_arg: &str,
@@ -204,9 +200,16 @@ fn resolve_target(
     cfg: &Config,
     w: &mut dyn Write,
     c: &Colors,
-) -> Result<(String, u32, bool), String> {
+) -> Result<FuncRef, String> {
     if let Some(export) = find_export(exports, func_arg) {
-        return Ok((export.name.clone(), export.rva, false));
+        return Ok(FuncRef::new(
+            dll_name.to_owned(),
+            dll_path.to_owned(),
+            export.name.clone(),
+            export.rva,
+            image_base + export.rva as u64,
+            false,
+        ));
     }
 
     if !cfg.no_pdb {
@@ -231,8 +234,64 @@ fn resolve_target(
                 )
                 .ok();
             }
-            return Ok((func_arg.to_string(), rva, true));
+            return Ok(FuncRef::new(
+                dll_name.to_owned(),
+                dll_path.to_owned(),
+                func_arg.to_string(),
+                rva,
+                image_base + rva as u64,
+                true,
+            ));
         }
+    }
+
+    for import_dll in read_imports(pe, raw) {
+        for entry in import_dll.entries {
+            if normalize_symbol_name(&entry.name) == normalize_symbol_name(func_arg) {
+                if !cfg.quiet {
+                    writeln!(
+                        w,
+                        "{}",
+                        c.ok(&format!(
+                            "{}!{} @ IAT RVA 0x{:08X}  (from current image imports)",
+                            import_dll.dll, entry.name, entry.slot_rva
+                        ))
+                    )
+                    .ok();
+                }
+                return Ok(FuncRef::new(
+                    import_dll.dll,
+                    String::new(),
+                    entry.name,
+                    0,
+                    0,
+                    false,
+                ));
+            }
+        }
+    }
+
+    if let Some(func) = crate::analysis::wdf::function_by_name(func_arg) {
+        if !cfg.quiet {
+            writeln!(
+                w,
+                "{}",
+                c.ok(&format!(
+                    "WDF!{} @ WdfFunctions[0x{:X}]  (KMDF function table)",
+                    func.name,
+                    func.offset(if pe.arch == 64 { 8 } else { 4 })
+                ))
+            )
+            .ok();
+        }
+        return Ok(FuncRef::new(
+            "WDF".to_owned(),
+            String::new(),
+            func.name.to_owned(),
+            0,
+            0,
+            false,
+        ));
     }
 
     let lf = func_arg.to_ascii_lowercase();
@@ -251,7 +310,17 @@ fn resolve_target(
     }
 
     Err(format!(
-        "'{}' not found in exports or PDB symbols for {}",
+        "'{}' not found in exports, PDB symbols, imports, or known KMDF WDF table names for {}",
         func_arg, dll_name
     ))
+}
+
+fn normalize_symbol_name(name: &str) -> String {
+    let tail = name.rsplit('!').next().unwrap_or(name);
+    let trimmed = tail.trim_start_matches('_');
+    let core = match trimmed.rsplit_once('@') {
+        Some((base, suffix)) if suffix.chars().all(|ch| ch.is_ascii_digit()) => base,
+        _ => trimmed,
+    };
+    core.to_ascii_lowercase()
 }

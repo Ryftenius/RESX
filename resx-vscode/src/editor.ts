@@ -136,19 +136,34 @@ async function runSymsWithProgress(
 
 export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
     public static readonly viewType = 'resx.binaryViewer';
+    public static readonly binViewType = 'resx.binaryViewer.bin';
     private static readonly panelByPath = new Map<string, vscode.WebviewPanel>();
     private static readonly pendingNavigation = new Map<string, PendingNavigation>();
     private static activePathKey: string | undefined;
 
     public static register(context: vscode.ExtensionContext): vscode.Disposable {
-        return vscode.window.registerCustomEditorProvider(
-            ResxEditorProvider.viewType,
-            new ResxEditorProvider(context),
-            {
-                supportsMultipleEditorsPerDocument: false,
-                webviewOptions: { retainContextWhenHidden: true },
-            }
+        const options = {
+            supportsMultipleEditorsPerDocument: false,
+            webviewOptions: { retainContextWhenHidden: true },
+        };
+        return vscode.Disposable.from(
+            vscode.window.registerCustomEditorProvider(
+                ResxEditorProvider.viewType,
+                new ResxEditorProvider(context),
+                options,
+            ),
+            vscode.window.registerCustomEditorProvider(
+                ResxEditorProvider.binViewType,
+                new ResxEditorProvider(context),
+                options,
+            ),
         );
+    }
+
+    public static viewTypeForUri(uri: vscode.Uri): string {
+        return /\.bin$/i.test(uri.fsPath)
+            ? ResxEditorProvider.binViewType
+            : ResxEditorProvider.viewType;
     }
 
     public static async navigateTo(uri: vscode.Uri, target: PendingNavigation): Promise<void> {

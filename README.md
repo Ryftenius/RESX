@@ -16,7 +16,7 @@ RESX is a Windows binary analysis toolkit for PE inspection, export/import analy
 It ships as:
 
 - A Rust CLI (`resx.exe`) for terminal and automation workflows.
-- A VS Code binary viewer for `.exe`, `.dll`, and `.sys` files.
+- A VS Code binary viewer for `.exe`, `.dll`, and `.sys` files, plus opt-in support for PE-formatted `.bin` samples.
 - A native DLL/FFI surface for host applications that want RESX analysis in-process.
 
 ## Documentation
@@ -37,6 +37,9 @@ It ships as:
 - Basic CFG rendering for selected targets.
 - Startup flow reconstruction from entry point, TLS callbacks, thread/workpool callbacks, import calls, indirect edges, and x64 unwind/exception-handler evidence.
 - Static triage with hook/thunk indicators, string references, API call maps, and suspicious control-flow hints.
+- Static behavior triage for syscall stubs, anti-analysis instructions, TLS callbacks, loader APIs, and executable-memory/JIT setup.
+- Protected-file triage for packer markers, OEP handoff candidates, import rebuild leads, VM dispatcher/handler candidates, and layer-2 lift sketches.
+- Terminal entropy maps over executable code with ASCII, zero-byte, unique-byte, and high/low entropy flags.
 - Hostile-mode tracing for packed or deliberately confusing binaries.
 - Reverse caller tracing across priority modules and custom scan scopes.
 - Structural diffing, CFG diff views, code/control heatmaps, corpus indexing, and sample hunting.
@@ -65,6 +68,9 @@ resx dump <image> --at <rva>
 resx cfg <image> <function>
 resx reconstruct-cfg <image>
 resx intelli <image> [function]
+resx behavior <image>
+resx unpack <image>
+resx entropy <image>
 resx peinfo <image>
 resx sections <image>
 resx eat <image>
@@ -100,6 +106,7 @@ Extensions: Install from VSIX...
 
 The extension contributes a custom editor for Windows binaries and command-palette workflows:
 
+- `RESX: Open Binary File`
 - `RESX: Refresh Binary Analysis`
 - `RESX: Locate`
 - `RESX: Locate Symbol`
@@ -171,6 +178,9 @@ Use `--json` for machine-readable output:
 
 ```powershell
 resx peinfo .\sample.dll --json
+resx behavior .\sample.dll --json
+resx unpack .\sample.dll --json
+resx entropy .\sample.dll --json
 resx dump .\sample.dll DllMain --json
 resx reconstruct-cfg .\sample.dll --json
 resx scan .\samples --json

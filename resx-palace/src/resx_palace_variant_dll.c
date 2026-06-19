@@ -139,6 +139,15 @@ RESX_PALACE_API int ResxIndirectCallMessage(ResxPalaceCallback callback, int val
     return table[index](value);
 }
 
+RESX_PALACE_API int ResxBehaviorSignals(unsigned int selector) {
+    HMODULE kernel = LoadLibraryA("kernel32.dll");
+    FARPROC proc = kernel ? GetProcAddress(kernel, "GetCurrentProcessId") : 0;
+    if (kernel != 0) {
+        FreeLibrary(kernel);
+    }
+    return (int)(selector ^ (proc != 0 ? 0x77U : 0U));
+}
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)instance;
     (void)reserved;

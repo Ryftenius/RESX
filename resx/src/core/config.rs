@@ -77,6 +77,15 @@ pub struct Cli {
     #[arg(long = "intelli")]
     pub intelli: bool,
 
+    #[arg(long = "behavior")]
+    pub behavior: bool,
+
+    #[arg(long = "unpack")]
+    pub unpack: bool,
+
+    #[arg(long = "entropy")]
+    pub entropy: bool,
+
     #[arg(long = "patch", hide = true)]
     pub patch: bool,
 
@@ -101,6 +110,15 @@ pub struct Cli {
     #[arg(long = "update-checksum")]
     pub patch_update_checksum: bool,
 
+    #[arg(long = "entropy-window", default_value_t = 1024)]
+    pub entropy_window: usize,
+
+    #[arg(long = "entropy-stride", default_value_t = 512)]
+    pub entropy_stride: usize,
+
+    #[arg(long = "entropy-all")]
+    pub entropy_all: bool,
+
     #[arg(long = "reconstruct-cfg")]
     pub reconstruct_cfg: bool,
 
@@ -116,8 +134,13 @@ pub struct Cli {
     #[arg(long = "max-bytes", default_value_t = 8192)]
     pub max_bytes: usize,
 
-    #[arg(long = "bytes", default_value_t = true, action = clap::ArgAction::SetTrue)]
-    pub show_bytes: bool,
+    #[arg(
+        long = "bytes",
+        num_args = 0..=1,
+        default_missing_value = "0",
+        value_name = "N"
+    )]
+    pub bytes: Option<Option<usize>>,
 
     #[arg(long = "no-bytes", action = clap::ArgAction::SetTrue)]
     pub no_bytes: bool,
@@ -382,6 +405,9 @@ pub struct Config {
     pub unsafe_map_image: bool,
     pub hookchk: bool,
     pub intelli: bool,
+    pub behavior: bool,
+    pub unpack: bool,
+    pub entropy: bool,
     pub patch: bool,
     pub patch_bytes: String,
     pub patch_expect: String,
@@ -390,6 +416,9 @@ pub struct Config {
     pub patch_in_place: bool,
     pub patch_overwrite: bool,
     pub patch_update_checksum: bool,
+    pub entropy_window: usize,
+    pub entropy_stride: usize,
+    pub entropy_all: bool,
     pub reconstruct_cfg: bool,
     pub reconstruct_thread_filter: String,
     pub reconstruct_api_filter: String,
@@ -499,6 +528,9 @@ impl Config {
             unsafe_map_image: cli.unsafe_map_image,
             hookchk: cli.hookchk,
             intelli: cli.intelli,
+            behavior: cli.behavior,
+            unpack: cli.unpack,
+            entropy: cli.entropy,
             patch: cli.patch,
             patch_bytes: cli.patch_bytes.clone().unwrap_or_default(),
             patch_expect: cli.patch_expect.clone().unwrap_or_default(),
@@ -507,12 +539,19 @@ impl Config {
             patch_in_place: cli.patch_in_place,
             patch_overwrite: cli.patch_overwrite,
             patch_update_checksum: cli.patch_update_checksum,
+            entropy_window: cli.entropy_window,
+            entropy_stride: cli.entropy_stride,
+            entropy_all: cli.entropy_all,
             reconstruct_cfg: cli.reconstruct_cfg,
             reconstruct_thread_filter: cli.reconstruct_thread_filter.clone(),
             reconstruct_api_filter: cli.reconstruct_api_filter.clone(),
             max_insns: cli.max_insns,
-            max_bytes: cli.max_bytes,
-            show_bytes: cli.show_bytes && !cli.no_bytes,
+            max_bytes: cli
+                .bytes
+                .flatten()
+                .filter(|bytes| *bytes > 0)
+                .unwrap_or(cli.max_bytes),
+            show_bytes: !cli.no_bytes,
             intel_syntax: !cli.att || cli.intel,
             follow_jmp: cli.follow_jmp && !cli.no_follow_jmp,
             no_follow_fwd: cli.no_follow_forward,

@@ -1,5 +1,6 @@
 use super::constants::IMAGE_DIRECTORY_ENTRY_IMPORT;
 use super::types::{read_cstr, read_u16, read_u32, read_u64, ImportDll, ImportEntry, PeFile};
+use std::collections::HashMap;
 
 pub fn read_imports(pe: &PeFile, raw: &[u8]) -> Vec<ImportDll> {
     let (dir_rva, _) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_IMPORT);
@@ -178,6 +179,30 @@ pub fn resolve_iat_slot(pe: &PeFile, raw: &[u8], slot_rva: u32) -> Option<(Strin
         }
     }
     None
+}
+
+pub fn import_slot_map_by_va(pe: &PeFile, raw: &[u8]) -> HashMap<u64, (String, String)> {
+    let mut slots = HashMap::new();
+    for dll in read_imports(pe, raw) {
+        let dll_base = normalize_dll_base(&dll.dll);
+        for entry in dll.entries {
+            slots.insert(
+                pe.image_base + entry.slot_rva as u64,
+                (dll_base.clone(), entry.name),
+            );
+        }
+    }
+    slots
+}
+
+fn normalize_dll_base(path_or_name: &str) -> String {
+    path_or_name
+        .rsplit(&['/', '\\'][..])
+        .next()
+        .unwrap_or(path_or_name)
+        .trim_end_matches(".dll")
+        .trim_end_matches(".DLL")
+        .to_lowercase()
 }
 
 pub fn find_iat_slots_by_name(

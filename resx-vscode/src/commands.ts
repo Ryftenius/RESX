@@ -78,8 +78,15 @@ const locateIndexSeedModules = [
     'iphlpapi.dll',
 ];
 
+function isResxImagePath(filePath: string): boolean {
+    return /\.(dll|exe|sys|bin)$/i.test(filePath);
+}
+
 export function registerResxCommands(context: vscode.ExtensionContext): vscode.Disposable[] {
     return [
+        vscode.commands.registerCommand('resx.openBinaryFile', async (uri?: vscode.Uri) => {
+            await openBinaryFile(uri);
+        }),
         vscode.commands.registerCommand('resx.locate', async () => {
             await openLocate(context, 'locate');
         }),
@@ -96,6 +103,12 @@ export function registerResxCommands(context: vscode.ExtensionContext): vscode.D
             await openScanReport(context, uri);
         }),
     ];
+}
+
+async function openBinaryFile(uri?: vscode.Uri): Promise<void> {
+    const target = await pickImageUri(uri, 'Select image to open in RESX');
+    if (!target) return;
+    await vscode.commands.executeCommand('vscode.openWith', target, ResxEditorProvider.viewTypeForUri(target));
 }
 
 async function openReconstructCfgReport(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
@@ -135,12 +148,12 @@ async function openScanReport(context: vscode.ExtensionContext, uri?: vscode.Uri
 }
 
 async function pickImageUri(uri: vscode.Uri | undefined, title: string): Promise<vscode.Uri | undefined> {
-    if (uri?.scheme === 'file' && /\.(dll|exe|sys)$/i.test(uri.fsPath)) {
+    if (uri?.scheme === 'file' && isResxImagePath(uri.fsPath)) {
         return uri;
     }
 
     const active = vscode.window.activeTextEditor?.document.uri;
-    if (active?.scheme === 'file' && /\.(dll|exe|sys)$/i.test(active.fsPath)) {
+    if (active?.scheme === 'file' && isResxImagePath(active.fsPath)) {
         return active;
     }
 
@@ -148,7 +161,7 @@ async function pickImageUri(uri: vscode.Uri | undefined, title: string): Promise
         canSelectMany: false,
         canSelectFiles: true,
         canSelectFolders: false,
-        filters: { 'Windows binaries': ['dll', 'exe', 'sys'], 'All files': ['*'] },
+        filters: { 'Windows PE images': ['dll', 'exe', 'sys', 'bin'], 'All files': ['*'] },
         title,
     });
     return picked?.[0];
@@ -218,7 +231,7 @@ async function openDump(context: vscode.ExtensionContext): Promise<void> {
     if (!func) return;
 
     const uri = vscode.Uri.file(module.modulePath);
-    await vscode.commands.executeCommand('vscode.openWith', uri, ResxEditorProvider.viewType);
+    await vscode.commands.executeCommand('vscode.openWith', uri, ResxEditorProvider.viewTypeForUri(uri));
     await ResxEditorProvider.navigateTo(uri, {
         func: func.name || '',
         rva: func.rva || undefined,
@@ -239,7 +252,7 @@ function resxRunOpts(): RunOptions {
 
 async function openResolvedTarget(hit: LocateHit, fallbackQuery: string): Promise<void> {
     const uri = vscode.Uri.file(hit.dll_path || '');
-    await vscode.commands.executeCommand('vscode.openWith', uri, ResxEditorProvider.viewType);
+    await vscode.commands.executeCommand('vscode.openWith', uri, ResxEditorProvider.viewTypeForUri(uri));
     await ResxEditorProvider.navigateTo(uri, {
         func: hit.name || fallbackQuery,
         rva: hit.rva || undefined,

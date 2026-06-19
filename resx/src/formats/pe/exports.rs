@@ -93,13 +93,35 @@ pub fn read_exports(pe: &PeFile, raw: &[u8]) -> Vec<Export> {
 }
 
 pub fn attribute_to_func(rva: u32, exports: &[Export]) -> Option<&Export> {
-    if exports.is_empty() {
-        return None;
+    exports
+        .iter()
+        .filter(|e| e.rva != 0 && e.rva <= rva)
+        .max_by_key(|e| e.rva)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn export(name: &str, ordinal: u32, rva: u32) -> Export {
+        Export {
+            name: name.to_owned(),
+            ordinal,
+            rva,
+            forward_to: String::new(),
+        }
     }
-    let idx = exports.partition_point(|e| e.rva <= rva);
-    if idx == 0 {
-        None
-    } else {
-        Some(&exports[idx - 1])
+
+    #[test]
+    fn attribute_to_func_uses_nearest_rva_not_ordinal_order() {
+        let exports = vec![
+            export("OrdinalLowRvaHigh", 1, 0x3000),
+            export("OrdinalMidRvaLow", 2, 0x1000),
+            export("OrdinalHighRvaMid", 3, 0x2000),
+        ];
+
+        let owner = attribute_to_func(0x2100, &exports).expect("owner");
+
+        assert_eq!(owner.name, "OrdinalHighRvaMid");
     }
 }
