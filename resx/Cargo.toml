@@ -4,6 +4,7 @@ version = "1.10.0"
 edition = "2021"
 authors = ["TITAN Softwork Solutions"]
 description = "Windows binary recon CLI for exports, PDB-backed symbols, CFG recovery, and triage"
+license = "MIT"
 repository = "https://github.com/TITAN-Softwork-Solutions/RESX"
 homepage = "https://github.com/TITAN-Softwork-Solutions/RESX"
 build = "build.rs"

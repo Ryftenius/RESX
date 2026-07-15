@@ -229,3 +229,7 @@ media/                README screenshots
 ## Notes
 
 RESX analysis is static best-effort evidence. Runtime dispatch, obfuscation, dynamically generated code, packed images, and data-dependent control flow can make static results incomplete. Use hostile-mode and startup-flow reconstruction as investigation aids, not as proof of runtime behaviour.
+
+## License
+
+RESX is available under the [MIT License](LICENSE). You may use, modify, and distribute it provided the TITAN Softwork Solutions copyright and license notice are retained.

@@ -4,7 +4,7 @@
   "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, SYS, and PE-style BIN files powered by RESX",
   "version": "1.10.0",
   "publisher": "titan-softwork-solutions",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/TITAN-Softwork-Solutions/RESX.git"
