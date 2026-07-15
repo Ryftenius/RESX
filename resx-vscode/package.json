@@ -2,7 +2,7 @@
   "name": "resx-vscode",
   "displayName": "RESX Binary Viewer",
   "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, SYS, and PE-style BIN files powered by RESX",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "publisher": "titan-softwork-solutions",
   "license": "MIT",
   "repository": {

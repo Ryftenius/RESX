@@ -76,7 +76,7 @@ Typed analysis functions return JSON by default. The success envelope contains:
   "status_code": 0,
   "command": "peinfo",
   "args": ["sample.dll", "--json", "--no-color", "--quiet"],
-  "resx_version": "1.10.0",
+  "resx_version": "1.10.1",
   "payload": {}
 }
 ```
@@ -92,7 +92,7 @@ Error envelopes contain:
   "status": "error",
   "status_code": 5,
   "error": "message",
-  "resx_version": "1.10.0"
+  "resx_version": "1.10.1"
 }
 ```
 

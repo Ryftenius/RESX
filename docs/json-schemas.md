@@ -25,7 +25,7 @@ The DLL/FFI API wraps command output in a standard envelope:
   "status_code": 0,
   "command": "peinfo",
   "args": ["sample.dll", "--json", "--no-color", "--quiet"],
-  "resx_version": "1.10.0",
+  "resx_version": "1.10.1",
   "payload": {}
 }
 ```
@@ -43,7 +43,7 @@ FFI errors use:
   "status": "error",
   "status_code": 5,
   "error": "message",
-  "resx_version": "1.10.0"
+  "resx_version": "1.10.1"
 }
 ```
 
