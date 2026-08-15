@@ -10,6 +10,11 @@ on:
 jobs:
   lint-and-test:
     runs-on: windows-latest
+    env:
+      # Do not inherit target-cpu=native from .cargo/config.toml in CI.
+      # Hosted runner CPU models can differ between cache creation and reuse,
+      # which can make cached build scripts crash with ILLEGAL_INSTRUCTION.
+      RUSTFLAGS: -C target-cpu=x86-64 -C target-feature=+crt-static -C link-args=/SUBSYSTEM:CONSOLE
 
     steps:
       - name: Checkout
