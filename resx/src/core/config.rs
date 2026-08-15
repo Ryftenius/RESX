@@ -7,7 +7,7 @@ use clap::Parser;
 #[command(
     name = "resx",
     version = env!("CARGO_PKG_VERSION"),
-    author = "TITAN Softwork Solutions",
+    author = "RYFTENIUS",
     about = "Windows binary recon CLI for exports, symbols, metadata, CFG, callers, and triage",
     long_about = None,
     disable_help_flag = true,

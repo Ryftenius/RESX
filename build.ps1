@@ -3,7 +3,7 @@ param(
     [string]$Configuration = "release",
     [string]$OutputRoot = "publish",
     [string]$TimestampServer = "http://timestamp.digicert.com",
-    [string]$SubjectName = "TITAN Softwork Solutions",
+    [string]$SubjectName = "RYFTENIUS",
     [string]$CertificateStoreName = "My",
     [string]$CertificateThumbprint,
     [string]$PfxPath,

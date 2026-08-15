@@ -17,11 +17,11 @@ fn main() {
 
     let mut res = winres::WindowsResource::new();
     res.set_manifest_file("resx.manifest");
-    res.set("CompanyName", "TITAN Softwork Solutions");
+    res.set("CompanyName", "RYFTENIUS");
     res.set("FileDescription", &description);
     res.set("FileVersion", &version);
     res.set("InternalName", "resx");
-    res.set("LegalCopyright", "Copyright (c) TITAN Softwork Solutions");
+    res.set("LegalCopyright", "Copyright (c) RYFTENIUS");
     res.set("OriginalFilename", "resx.exe");
     res.set("ProductName", "RESX");
     res.set("ProductVersion", &version);

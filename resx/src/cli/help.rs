@@ -1,7 +1,7 @@
 use crate::core::config::Cli;
 
 pub const APP_NAME: &str = "RESX";
-pub const ORG_NAME: &str = "TITAN Softwork Solutions";
+pub const ORG_NAME: &str = "RYFTENIUS";
 
 pub fn version_string() -> String {
     format!("{} v{}", APP_NAME, env!("CARGO_PKG_VERSION"))

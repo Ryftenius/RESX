@@ -2,11 +2,11 @@
 name = "resx"
 version = "1.10.1"
 edition = "2021"
-authors = ["TITAN Softwork Solutions"]
+authors = ["RYFTENIUS"]
 description = "Windows binary recon CLI for exports, PDB-backed symbols, CFG recovery, and triage"
 license = "MIT"
-repository = "https://github.com/TITAN-Softwork-Solutions/RESX"
-homepage = "https://github.com/TITAN-Softwork-Solutions/RESX"
+repository = "https://github.com/RYFTENIUS/RESX"
+homepage = "https://github.com/RYFTENIUS/RESX"
 build = "build.rs"
 
 [lib]

@@ -4,7 +4,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white&style=for-the-badge" />
   <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white&style=for-the-badge" />
-  <img src="https://img.shields.io/github/actions/workflow/status/TITAN-Softwork-Solutions/RESX/ci.yml?style=for-the-badge&label=CI" />
+  <img src="https://img.shields.io/github/actions/workflow/status/RYFTENIUS/RESX/ci.yml?style=for-the-badge&label=CI" />
 </p>
 
 RESX is a Windows binary analysis toolkit for PE inspection, export/import analysis, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, startup-flow reconstruction, triage, structural diffing, corpus indexing, sample hunting, YARA scanning, and native DLL/FFI integration.
@@ -232,4 +232,4 @@ RESX analysis is static best-effort evidence. Runtime dispatch, obfuscation, dyn
 
 ## License
 
-RESX is available under the [MIT License](LICENSE). You may use, modify, and distribute it provided the TITAN Softwork Solutions copyright and license notice are retained.
+RESX is available under the [MIT License](LICENSE). You may use, modify, and distribute it provided the RYFTENIUS copyright and license notice are retained.

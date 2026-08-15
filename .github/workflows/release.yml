@@ -85,6 +85,7 @@ jobs:
           $remoteTag = git ls-remote --tags origin $tagRef
           if ([string]::IsNullOrWhiteSpace($remoteTag)) {
             "tag_exists=false" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "should_publish=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
             exit 0
           }
 
@@ -92,12 +93,17 @@ jobs:
           $resolvedTagSha = git rev-list -n 1 "${{ steps.version.outputs.tag }}"
 
           if ($resolvedTagSha -ne $targetSha) {
-            throw "Version tag ${{ steps.version.outputs.tag }} already exists on commit $resolvedTagSha, but this run targets $targetSha. Bump resx/Cargo.toml version before publishing again."
+            Write-Host "Version tag ${{ steps.version.outputs.tag }} is already published from $resolvedTagSha; this commit does not require a release."
+            "tag_exists=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "should_publish=false" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
           }
 
           "tag_exists=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "should_publish=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Materialize signing certificate
+        if: steps.release_state.outputs.should_publish == 'true'
         id: signing
         shell: powershell
         run: |
@@ -106,6 +112,7 @@ jobs:
           "pfx_path=$pfxPath" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Build CLI and VSIX
+        if: steps.release_state.outputs.should_publish == 'true'
         shell: powershell
         run: |
           ./build.ps1 `
@@ -116,6 +123,7 @@ jobs:
             -AllowUnsignedFallback
 
       - name: Upload workflow artifacts
+        if: steps.release_state.outputs.should_publish == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: resx-release-${{ steps.version.outputs.version }}
@@ -126,7 +134,7 @@ jobs:
             ${{ steps.version.outputs.publish_dir }}/vscode/**
 
       - name: Create version tag
-        if: steps.release_state.outputs.tag_exists != 'true'
+        if: steps.release_state.outputs.should_publish == 'true' && steps.release_state.outputs.tag_exists != 'true'
         shell: powershell
         run: |
           git config user.name "github-actions[bot]"
@@ -135,6 +143,7 @@ jobs:
           git push origin "refs/tags/${{ steps.version.outputs.tag }}"
 
       - name: Publish VS Code extension
+        if: steps.release_state.outputs.should_publish == 'true'
         shell: powershell
         working-directory: resx-vscode
         env:
@@ -153,6 +162,7 @@ jobs:
           }
 
       - name: Publish GitHub release
+        if: steps.release_state.outputs.should_publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}

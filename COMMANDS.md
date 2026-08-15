@@ -3,7 +3,7 @@
 ## Identity
 
 - Name: `RESX`
-- Author: `TITAN Softwork Solutions`
+- Author: `RYFTENIUS`
 - Version: `resx version` or `resx --version`
 
 ## Core

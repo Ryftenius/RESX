@@ -3,15 +3,15 @@
   "displayName": "RESX Binary Viewer",
   "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, SYS, and PE-style BIN files powered by RESX",
   "version": "1.10.1",
-  "publisher": "titan-softwork-solutions",
+  "publisher": "RYFTENIUS",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TITAN-Softwork-Solutions/RESX.git"
+    "url": "https://github.com/RYFTENIUS/RESX.git"
   },
-  "homepage": "https://github.com/TITAN-Softwork-Solutions/RESX",
+  "homepage": "https://github.com/RYFTENIUS/RESX",
   "bugs": {
-    "url": "https://github.com/TITAN-Softwork-Solutions/RESX/issues"
+    "url": "https://github.com/RYFTENIUS/RESX/issues"
   },
   "engines": {
     "vscode": "^1.85.0"
