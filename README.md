@@ -7,13 +7,7 @@
   <img src="https://img.shields.io/github/actions/workflow/status/RYFTENIUS/RESX/ci.yml?style=for-the-badge&label=CI" />
 </p>
 
-RESX is a Windows binary analysis toolkit for PE inspection, export/import analysis, PDB-backed symbols, targeted disassembly, pseudo-C reconstruction, CFG recovery, startup-flow reconstruction, triage, structural diffing, corpus indexing, sample hunting, YARA scanning, and native DLL/FFI integration.
-
-It ships as:
-
-- A Rust CLI (`resx.exe`) for terminal and automation workflows.
-- A VS Code binary viewer for `.exe`, `.dll`, and `.sys` files, plus opt-in support for PE-formatted `.bin` samples.
-- A native DLL/FFI surface for host applications that want RESX analysis in-process.
+**RESX** is a Windows SRE & Binary Analysis utility designed to make **Reverse Engineers** and **Malware Analysts** lifes easier. **RESX** isn't trying to replace a fully-fledged disassembler such as [IDA](https://hex-rays.com/ida-pro), [Ghidra](https://github.com/nationalsecurityagency/ghidra) or [Binary Ninja](https://binary.ninja/), but is trying to make life easier. **RESX** provides quick PE analysis, deep function discovery and tracing (eg; finding which DLL a Windows API originates from, which also follows calls into the kernel), quick RE, binary difference fuzzing, kernel driver analysis & IOCTL recovery, intelligence and more!
 
 ## Documentation
 
@@ -22,13 +16,16 @@ It ships as:
 - [DLL / FFI integration](docs/dll.md)
 - [Analysis surfaces](docs/analysis-surfaces.md)
 - [JSON schemas](docs/json-schemas.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
-## What RESX Does
+## Features
 
 - PE metadata, section, data directory, debug, CLR, TLS, load config, signer/version, and anomaly inspection.
 - Export Address Table and Import Address Table browsing.
 - Export and PDB symbol loading, type browsing, and symbol-backed navigation.
 - Targeted disassembly by name, RVA, or ordinal.
+- Incoming call and jump xrefs for functions and imports.
 - C-like reconstruction for selected functions.
 - Basic CFG rendering for selected targets.
 - Startup flow reconstruction from entry point, TLS callbacks, thread/workpool callbacks, import calls, indirect edges, and x64 unwind/exception-handler evidence.
@@ -39,6 +36,8 @@ It ships as:
 - Hostile-mode tracing for packed or deliberately confusing binaries.
 - Reverse caller tracing across priority modules and custom scan scopes.
 - Structural diffing, CFG diff views, code/control heatmaps, corpus indexing, and sample hunting.
+- Kernel driver analysis, WDF inspection, and IOCTL recovery.
+- Guarded byte patching by RVA, VA, or file offset.
 - Folder scanning with fuzz target candidate ranking.
 - YARA scanning.
 - Versioned JSON output for automation.
@@ -61,12 +60,14 @@ Common commands:
 ```powershell
 resx dump <image> <function>
 resx dump <image> --at <rva>
+resx xrefs <image> <function-or-import>
 resx cfg <image> <function>
 resx reconstruct-cfg <image>
 resx intelli <image> [function]
 resx behavior <image>
 resx unpack <image>
 resx entropy <image>
+resx patch <image> --at <address> --patch-bytes <hex>
 resx peinfo <image>
 resx sections <image>
 resx eat <image>
@@ -184,51 +185,6 @@ resx diff .\old.dll .\new.dll --json
 ```
 
 Where possible, RESX emits versioned JSON envelopes. Consumers should tolerate additional fields across releases.
-
-## Development Checks
-
-Before pushing Rust changes:
-
-```powershell
-cargo fmt -p resx -- --check
-cargo clippy -p resx --all-targets -- -D warnings
-cargo test -p resx
-```
-
-Before pushing VS Code extension changes:
-
-```powershell
-cd resx-vscode
-npx tsc -p ./ --noEmit
-npx tsc -p ./tsconfig.webview.json --noEmit
-node --experimental-default-type=module ./test/run-tests.mjs
-```
-
-Before packaging the extension:
-
-```powershell
-cd resx-vscode
-npm run compile
-npm run package
-```
-
-`resx-vscode/bin/`, `target/`, `target-resx-tests/`, generated packages, and local signing/build artifacts are ignored by git.
-
-## Repository Layout
-
-```text
-resx/                 Rust CLI, library, FFI, analyzers, and tests
-resx/include/         Public C header for DLL/FFI users
-resx-vscode/          VS Code extension source and webview assets
-docs/                 CLI, VS Code, DLL, schema, and analysis docs
-examples/             FFI smoke-test examples
-resx-palace/          Test/sample binaries used by RESX integration tests
-media/                README screenshots
-```
-
-## Notes
-
-RESX analysis is static best-effort evidence. Runtime dispatch, obfuscation, dynamically generated code, packed images, and data-dependent control flow can make static results incomplete. Use hostile-mode and startup-flow reconstruction as investigation aids, not as proof of runtime behaviour.
 
 ## License
 

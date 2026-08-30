@@ -11,6 +11,7 @@
 - `resx dump <dll> <function>`
 - `resx dump <dll> --at <rva>`
 - `resx dump <dll> --ordinal <n>`
+- `resx xrefs <dll> <function-or-import>`
 - `resx cfg <dll> <function>`
 - `resx cfg <dll> --at <rva>`
 - `resx cfg <dll> --ordinal <n>`
@@ -19,6 +20,7 @@
 - `resx behavior <dll>`
 - `resx unpack <dll>`
 - `resx entropy <dll>`
+- `resx patch <dll> --at <addr> --patch-bytes <hex>`
 - `resx diff <image-a> <image-b> [image-c ...]`
 - `resx index <dir-or-image> --db <file>`
 - `resx hunt <sample> --db <file>`
@@ -107,6 +109,14 @@
 - PDB symbols are used when available for names, prototypes, and size-backed decode bounds.
 - `--thread-filter <term>` and `--api-filter <term>` focus the text output for non-interactive review.
 - `--json` emits a versioned `reconstruct_cfg` report with roots, nested edge children, PDB status, statistics, and static-analysis notes.
+
+## Patch
+
+- `resx patch <image> --at <addr> --patch-bytes <hex>` writes a patched copy by default.
+- Addresses accept RVA, PE VA, or file offset. Use `rva:`, `va:`, or `file:` to force the form.
+- `--expect <hex>` guards against unexpected original bytes.
+- `--dry-run` validates without writing. `--in-place` must be explicit.
+- `--update-checksum` updates the PE checksum. Authenticode signatures are not preserved.
 
 ## Diff
 
@@ -201,7 +211,7 @@
 - `--quiet`
 - `--example`
 
-## Newer Output Areas
+## Capabilities
 
 - `dump --cfg text` can recover and render `Switch Map` sections for jump-table dispatchers.
 - `cfg` supports function names, `--at <rva>`, and `--ordinal <n>` just like `dump`.

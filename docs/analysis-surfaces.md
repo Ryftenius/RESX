@@ -48,6 +48,7 @@ Commands:
 resx dump <image> <function>
 resx dump <image> --at <rva>
 resx dump <image> --ordinal <n>
+resx xrefs <image> <function-or-import>
 resx cfg <image> <function>
 ```
 
@@ -222,6 +223,14 @@ resx yara <image> <rule.yar>
 ```
 
 YARA output can be included in automation pipelines with `--json`.
+
+## Byte Patching
+
+```powershell
+resx patch <image> --at <address> --patch-bytes <hex>
+```
+
+Patches resolve RVA, PE VA, or file-offset addresses. `--expect` verifies original bytes, `--dry-run` writes nothing, and `--update-checksum` updates the PE checksum. A patched copy is the default; in-place changes require `--in-place`.
 
 ## Output Contracts
 

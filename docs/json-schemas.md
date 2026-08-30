@@ -297,6 +297,10 @@ Diff payloads include image summaries, pair summaries, function matches, unmatch
 
 Corpus payloads include index metadata and image/function fingerprints. Fingerprints are implementation details and may grow new fields.
 
+## Patch
+
+`patch --json` reports the input and output paths, resolved address, original and replacement bytes, write mode, checksum status, and dry-run status.
+
 ## Consumer Guidance
 
 - Prefer `schema_version` and explicit keys over text parsing.
