@@ -44,11 +44,25 @@ pub fn build_basic_blocks_with_edges(
 
     for (idx, insn) in insns.iter().enumerate() {
         by_rva.insert(insn.rva, idx);
+    }
+
+    for (idx, insn) in insns.iter().enumerate() {
         if (insn.is_jmp || insn.is_jcc) && insn.call_target != 0 {
             leaders.insert(insn.call_target.wrapping_sub(image_base) as u32);
         }
-        if (insn.is_jmp || insn.is_jcc || is_ret(insn.iced.mnemonic())) && idx + 1 < insns.len() {
-            leaders.insert(insns[idx + 1].rva);
+        let architectural_next = next_rva(insn);
+        if (insn.is_jmp || insn.is_jcc || is_ret(insn.iced.mnemonic()))
+            && architectural_next.is_some_and(|rva| by_rva.contains_key(&rva))
+        {
+            leaders.insert(architectural_next.unwrap());
+        }
+        if let Some(next) = insns.get(idx + 1) {
+            if architectural_next != Some(next.rva) {
+                leaders.insert(next.rva);
+                if architectural_next.is_some_and(|rva| by_rva.contains_key(&rva)) {
+                    leaders.insert(architectural_next.unwrap());
+                }
+            }
         }
     }
 
@@ -63,6 +77,9 @@ pub fn build_basic_blocks_with_edges(
         let mut end_idx = start_idx;
         while end_idx + 1 < insns.len() {
             if Some(insns[end_idx + 1].rva) == next_leader {
+                break;
+            }
+            if next_rva(&insns[end_idx]) != Some(insns[end_idx + 1].rva) {
                 break;
             }
             end_idx += 1;
@@ -80,8 +97,7 @@ pub fn build_basic_blocks_with_edges(
                     label: edge_label(last, Some(target_rva)),
                 });
             }
-            if end_idx + 1 < insns.len() {
-                let fallthrough = insns[end_idx + 1].rva;
+            if let Some(fallthrough) = next_rva(last).filter(|rva| by_rva.contains_key(rva)) {
                 edges.push(BlockEdge {
                     kind: "fallthrough",
                     label: format!("fallthrough -> block_{:08X}", fallthrough),
@@ -118,8 +134,7 @@ pub fn build_basic_blocks_with_edges(
                 kind: "exit",
                 label: "return".to_owned(),
             });
-        } else if end_idx + 1 < insns.len() {
-            let next_rva = insns[end_idx + 1].rva;
+        } else if let Some(next_rva) = next_rva(last).filter(|rva| by_rva.contains_key(rva)) {
             edges.push(BlockEdge {
                 kind: "fallthrough",
                 label: format!("fallthrough -> block_{:08X}", next_rva),
@@ -140,6 +155,10 @@ pub fn build_basic_blocks_with_edges(
     }
 
     blocks
+}
+
+fn next_rva(insn: &Instruction) -> Option<u32> {
+    insn.rva.checked_add(insn.bytes.len() as u32)
 }
 
 #[allow(dead_code)]
@@ -362,5 +381,81 @@ fn edge_label(insn: &Instruction, target_rva: Option<u32>) -> String {
         insn.mnemonic.clone()
     } else {
         format!("{} ({})", insn.mnemonic, insn.comment)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced_x86::{Decoder, DecoderOptions, OpKind};
+
+    use super::*;
+    use crate::analysis::disasm::{is_jcc, is_jmp};
+
+    const IMAGE_BASE: u64 = 0x140000000;
+
+    fn decode(rva: u32, bytes: &[u8]) -> Instruction {
+        let mut decoder =
+            Decoder::with_ip(64, bytes, IMAGE_BASE + rva as u64, DecoderOptions::NONE);
+        let iced = decoder.decode();
+        let mnemonic = iced.mnemonic();
+        let call_target = match iced.op0_kind() {
+            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+                iced.near_branch_target()
+            }
+            _ => 0,
+        };
+        Instruction {
+            rva,
+            va: IMAGE_BASE + rva as u64,
+            file_off: 0,
+            bytes: bytes.to_vec(),
+            text: format!("{:?}", mnemonic),
+            mnemonic: format!("{:?}", mnemonic),
+            operands: String::new(),
+            iced,
+            comment: String::new(),
+            is_call: mnemonic == iced_x86::Mnemonic::Call,
+            is_jmp: is_jmp(mnemonic),
+            is_jcc: is_jcc(mnemonic),
+            call_target,
+        }
+    }
+
+    #[test]
+    fn overlapping_streams_keep_architectural_fallthrough() {
+        let insns = vec![
+            decode(0x118B, &[0x85, 0xC9]),
+            decode(0x118D, &[0x74, 0x04]),
+            decode(0x118F, &[0xEB, 0x00]),
+            decode(
+                0x1191,
+                &[0x49, 0xBB, 0xE8, 0xE8, 0xFF, 0xFF, 0xFF, 0xEB, 0x01, 0x90],
+            ),
+            decode(0x1193, &[0xE8, 0xE8, 0xFF, 0xFF, 0xFF]),
+            decode(0x1198, &[0xEB, 0x01]),
+            decode(0x119B, &[0x48, 0x83, 0xC4, 0x28]),
+            decode(0x119F, &[0xC3]),
+        ];
+
+        let blocks = build_basic_blocks(&insns, IMAGE_BASE);
+        let outer = blocks
+            .iter()
+            .find(|block| block.start_rva == 0x1191)
+            .expect("outer carrier block");
+        assert_eq!(outer.insns.len(), 1);
+        assert_eq!(outer.insns[0].rva, 0x1191);
+        assert_eq!(outer.edges.len(), 1);
+        assert!(outer.edges[0].label.contains("block_0000119B"));
+        assert!(!outer.edges[0].label.contains("block_00001193"));
+
+        let nested = blocks
+            .iter()
+            .find(|block| block.start_rva == 0x1193)
+            .expect("nested call block");
+        assert_eq!(
+            nested.insns.iter().map(|insn| insn.rva).collect::<Vec<_>>(),
+            vec![0x1193, 0x1198]
+        );
+        assert!(nested.edges[0].label.contains("block_0000119B"));
     }
 }
