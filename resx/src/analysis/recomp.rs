@@ -200,6 +200,18 @@ pub fn recomp_c(
             jump_targets.insert(t_rva);
         }
     }
+    for pair in insns.windows(2) {
+        let current = &pair[0];
+        let expected = current.rva.checked_add(current.bytes.len() as u32);
+        if !current.is_jmp
+            && !current.is_jcc
+            && !crate::analysis::disasm::is_ret(current.iced.mnemonic())
+            && expected != Some(pair[1].rva)
+            && expected.is_some_and(|rva| insn_rvas.contains(&rva))
+        {
+            jump_targets.insert(expected.unwrap());
+        }
+    }
 
     let (default_cc, param_regs): (&str, &[&str]) = if arch == 64 {
         ("__fastcall", &["rcx", "rdx", "r8", "r9"])
@@ -285,7 +297,7 @@ pub fn recomp_c(
 
     let mut prev_cmp: Option<&Instruction> = None;
 
-    for insn in insns {
+    for (index, insn) in insns.iter().enumerate() {
         if jump_targets.contains(&insn.rva) {
             sb.push_str(&format!("\nlabel_{:08X}:\n", insn.rva));
         }
@@ -406,6 +418,24 @@ pub fn recomp_c(
             " ".repeat(pad),
             orig_asm
         ));
+        if !insn.is_jmp
+            && !insn.is_jcc
+            && !crate::analysis::disasm::is_ret(m)
+            && insns
+                .get(index + 1)
+                .is_some_and(|next| insn.rva.checked_add(insn.bytes.len() as u32) != Some(next.rva))
+        {
+            if let Some(target) = insn
+                .rva
+                .checked_add(insn.bytes.len() as u32)
+                .filter(|rva| insn_rvas.contains(rva))
+            {
+                sb.push_str(&format!(
+                    "    goto label_{:08X};  // architectural stream continuation\n",
+                    target
+                ));
+            }
+        }
     }
 
     sb.push_str("}\n");
