@@ -649,8 +649,8 @@ fn describe_string_slice_address(
 
     if len.is_multiple_of(2) {
         let mut units = Vec::with_capacity(len / 2);
-        for chunk in slice.chunks_exact(2) {
-            units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        for chunk in slice.as_chunks::<2>().0 {
+            units.push(u16::from_le_bytes(*chunk));
         }
         if let Ok(text) = String::from_utf16(&units) {
             if is_printable_text(&text) && text.chars().any(|ch| ch.is_alphabetic()) {
