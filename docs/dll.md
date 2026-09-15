@@ -43,7 +43,7 @@ Include the header from C or C++:
 All exported functions use UTF-8 strings. Every returned `char *` is allocated by RESX and must be released with:
 
 ```c
-RsxFreeString(value);
+ResxFreeString(value);
 ```
 
 Never release returned strings with `free`, `delete`, `CoTaskMemFree`, or another allocator.
@@ -51,7 +51,7 @@ Never release returned strings with `free`, `delete`, `CoTaskMemFree`, or anothe
 ## Status Codes
 
 ```c
-typedef enum RsxStatus {
+typedef enum ResxStatus {
     RSX_STATUS_OK = 0,
     RSX_STATUS_NULL_ARGUMENT = 1,
     RSX_STATUS_INVALID_UTF8 = 2,
@@ -59,7 +59,7 @@ typedef enum RsxStatus {
     RSX_STATUS_INVALID_OPTIONS = 4,
     RSX_STATUS_EXECUTION_ERROR = 5,
     RSX_STATUS_PANIC = 255
-} RsxStatus;
+} ResxStatus;
 ```
 
 When a function fails, it still attempts to write a JSON error envelope to the output pointer.
@@ -76,7 +76,7 @@ Typed analysis functions return JSON by default. The success envelope contains:
   "status_code": 0,
   "command": "peinfo",
   "args": ["sample.dll", "--json", "--no-color", "--quiet"],
-  "resx_version": "1.10.0",
+  "resx_version": "1.15.0",
   "payload": {}
 }
 ```
@@ -92,16 +92,16 @@ Error envelopes contain:
   "status": "error",
   "status_code": 5,
   "error": "message",
-  "resx_version": "1.10.0"
+  "resx_version": "1.15.0"
 }
 ```
 
 ## Generic Entry Points
 
-### `RsxRunArgs`
+### `ResxRunArgs`
 
 ```c
-RSX_API int RsxRunArgs(size_t argc, const char *const *argv, char **out_utf8);
+RSX_API int ResxRunArgs(size_t argc, const char *const *argv, char **out_utf8);
 ```
 
 Runs the CLI router directly. `argv` may include `resx` as `argv[0]` or start with a RESX command:
@@ -109,17 +109,17 @@ Runs the CLI router directly. `argv` may include `resx` as `argv[0]` or start wi
 ```c
 const char *argv[] = {"peinfo", "sample.dll", "--json"};
 char *out = NULL;
-int status = RsxRunArgs(3, argv, &out);
+int status = ResxRunArgs(3, argv, &out);
 /* use out */
-RsxFreeString(out);
+ResxFreeString(out);
 ```
 
 This function returns captured command output directly. Use `--json` when the caller needs machine-readable output.
 
-### `RsxRunCommandJson`
+### `ResxRunCommandJson`
 
 ```c
-RSX_API int RsxRunCommandJson(const char *request_json, char **out_json);
+RSX_API int ResxRunCommandJson(const char *request_json, char **out_json);
 ```
 
 Accepts a JSON request:
@@ -152,35 +152,34 @@ It returns a JSON envelope, parsing command JSON into `payload` when possible.
 
 | Export | Purpose |
 | --- | --- |
-| `RsxVersion` | Returns version text. |
-| `RsxHelp` | Returns FFI help text. |
-| `RsxDump` | Dump/disassemble by function name. |
-| `RsxDumpAt` | Dump/disassemble by RVA. |
-| `RsxDumpOrdinal` | Dump/disassemble by export ordinal. |
-| `RsxCfg` | CFG view by function name. |
-| `RsxCfgAt` | CFG view by RVA. |
-| `RsxCfgOrdinal` | CFG view by ordinal. |
-| `RsxReconstructCfg` | Startup-flow reconstruction. |
-| `RsxIntelli` | Image or function triage. |
-| `RsxPeInfo` | PE metadata. |
-| `RsxSections` | Section table and protection analysis. |
-| `RsxPeCheck` | PE anomaly checks. |
-| `RsxShowEat` | Export Address Table. |
-| `RsxShowIat` | Import Address Table. |
-| `RsxShowSyms` | Exports/PDB symbols. |
-| `RsxTypes` | PDB-backed type browser. |
-| `RsxFollowCallers` | Reverse caller tracing. |
-| `RsxLocate` | Export-backed locate. |
-| `RsxLocateSymbols` | Export/PDB-backed locate. |
-| `RsxExplain` | Prefix/API glossary explanation. |
-| `RsxDiff` | Structural image diff. |
-| `RsxCfgDiff` | Structural diff with one CFG diff target. |
-| `RsxIndex` | Build a corpus index. |
-| `RsxHunt` | Compare a sample against a corpus. |
-| `RsxScan` | Folder scan and fuzz target ranking. |
-| `RsxYara` | YARA scan. |
-| `RsxPriority` | Priority config command. |
-| `RsxUpdate` | Git update command. |
+| `ResxVersion` | Returns version text. |
+| `ResxHelp` | Returns FFI help text. |
+| `ResxDump` | Dump/disassemble by function name. |
+| `ResxDumpAt` | Dump/disassemble by RVA. |
+| `ResxDumpOrdinal` | Dump/disassemble by export ordinal. |
+| `ResxCfg` | CFG view by function name. |
+| `ResxCfgAt` | CFG view by RVA. |
+| `ResxCfgOrdinal` | CFG view by ordinal. |
+| `ResxReconstructCfg` | Startup-flow reconstruction. |
+| `ResxIntelli` | Image or function triage. |
+| `ResxPeInfo` | PE metadata. |
+| `ResxSections` | Section table and protection analysis. |
+| `ResxPeCheck` | PE anomaly checks. |
+| `ResxShowEat` | Export Address Table. |
+| `ResxShowIat` | Import Address Table. |
+| `ResxShowSyms` | Exports/PDB symbols. |
+| `ResxTypes` | PDB-backed type browser. |
+| `ResxFollowCallers` | Reverse caller tracing. |
+| `ResxLocate` | Export-backed locate. |
+| `ResxLocateSymbols` | Export/PDB-backed locate. |
+| `ResxDiff` | Structural image diff. |
+| `ResxCfgDiff` | Structural diff with one CFG diff target. |
+| `ResxIndex` | Build a corpus index. |
+| `ResxHunt` | Compare a sample against a corpus. |
+| `ResxScan` | Folder scan and fuzz target ranking. |
+| `ResxYara` | YARA scan. |
+| `ResxPriority` | Priority config command. |
+| `ResxUpdate` | Git update command. |
 
 ## Options JSON
 
@@ -282,7 +281,7 @@ only if you intentionally want text output.
 
 int main(void) {
     char *json = NULL;
-    int status = RsxPeInfo(
+    int status = ResxPeInfo(
         "C:\\Windows\\System32\\kernel32.dll",
         "{\"no_pdb\":true}",
         &json
@@ -290,7 +289,7 @@ int main(void) {
 
     if (json) {
         puts(json);
-        RsxFreeString(json);
+        ResxFreeString(json);
     }
 
     return status == RSX_STATUS_OK ? 0 : 1;
@@ -301,7 +300,7 @@ int main(void) {
 
 ```c
 char *json = NULL;
-int status = RsxDump(
+int status = ResxDump(
     "C:\\Windows\\System32\\kernel32.dll",
     "CreateFileW",
     "{\"recomp\":true,\"show_strings\":true,\"show_xrefs\":true}",
@@ -311,7 +310,7 @@ int status = RsxDump(
 if (status == RSX_STATUS_OK) {
     /* parse json */
 }
-RsxFreeString(json);
+ResxFreeString(json);
 ```
 
 ## Command JSON Example
@@ -325,9 +324,9 @@ const char *request =
     "}";
 
 char *json = NULL;
-int status = RsxRunCommandJson(request, &json);
+int status = ResxRunCommandJson(request, &json);
 /* parse json */
-RsxFreeString(json);
+ResxFreeString(json);
 ```
 
 ## PowerShell Smoke Test
@@ -347,7 +346,7 @@ Run it after building the release DLL:
 
 ## Threading and Reentrancy
 
-The FFI layer catches panics at the boundary and returns `RSX_STATUS_PANIC`. It initializes Rayon once if worker options require it. Calls are intended to be independent; callers should not mutate or free output buffers except through `RsxFreeString`.
+The FFI layer catches panics at the boundary and returns `RSX_STATUS_PANIC`. It initializes Rayon once if worker options require it. Calls are intended to be independent; callers should not mutate or free output buffers except through `ResxFreeString`.
 
 For high-volume integration, prefer typed exports over repeatedly constructing arbitrary CLI strings. Keep JSON parsing tolerant of added fields.
 
@@ -355,8 +354,8 @@ For high-volume integration, prefer typed exports over repeatedly constructing a
 
 - Pass valid UTF-8 strings.
 - Pass a non-null output pointer.
-- Release every returned string exactly once with `RsxFreeString`.
-- Do not call `RsxFreeString` on memory not returned by RESX.
+- Release every returned string exactly once with `ResxFreeString`.
+- Do not call `ResxFreeString` on memory not returned by RESX.
 - Treat all analysis as static best-effort evidence.
 - Use `--unsafe-map-image` only when you understand that the command may map the target image into the RESX process.
 
