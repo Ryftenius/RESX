@@ -159,7 +159,7 @@ fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
         for entry in &dll.entries {
             let name_lower = entry.name.to_ascii_lowercase();
             let full = format!("{}!{}", dll.dll, entry.name);
-            if is_loader_api(&dll_lower, &name_lower) {
+            if apis::is_loader_api(&dll_lower, &name_lower) {
                 findings.push(finding(
                     "loader",
                     "dynamic-loader-api",
@@ -171,7 +171,7 @@ fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
                     vec![full.clone()],
                 ));
             }
-            if is_exec_memory_api(&name_lower) {
+            if apis::is_executable_memory_api(&name_lower) {
                 findings.push(finding(
                     "jit-selfmod",
                     "executable-memory-api",
@@ -183,7 +183,7 @@ fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
                     vec![full.clone()],
                 ));
             }
-            if is_write_memory_api(&name_lower) {
+            if apis::is_process_memory_write_api(&name_lower) {
                 findings.push(finding(
                     "injection-loader",
                     "remote-or-process-memory-write-api",
@@ -195,7 +195,7 @@ fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
                     vec![full.clone()],
                 ));
             }
-            if is_thread_context_api(&name_lower) {
+            if apis::is_thread_context_api(&name_lower) {
                 findings.push(finding(
                     "anti-debug",
                     "thread-context-api",
@@ -355,7 +355,7 @@ fn scan_instruction_signals(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
         if let Some((dll, name)) = &insn.import_call {
             let lower = name.to_ascii_lowercase();
             let dll_lower = dll.to_ascii_lowercase();
-            if is_exec_memory_api(&lower) {
+            if apis::is_executable_memory_api(&lower) {
                 findings.push(finding(
                     "jit-selfmod",
                     "executable-memory-callsite",
@@ -370,7 +370,7 @@ fn scan_instruction_signals(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
                     )],
                 ));
             }
-            if is_loader_api(&dll_lower, &lower) {
+            if apis::is_loader_api(&dll_lower, &lower) {
                 findings.push(finding(
                     "loader",
                     "dynamic-loader-callsite",
@@ -443,7 +443,7 @@ fn scan_medium_clusters(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
             continue;
         };
         let lower = name.to_ascii_lowercase();
-        if !is_exec_memory_api(&lower) {
+        if !apis::is_executable_memory_api(&lower) {
             continue;
         }
         let end = insns.len().min(idx + 64);
@@ -503,15 +503,6 @@ fn resolve_import_call(
     resolve_iat_slot(pe, raw, slot_rva)
 }
 
-fn is_loader_api(dll: &str, name: &str) -> bool {
-    name.contains("loadlibrary")
-        || name.contains("getprocaddress")
-        || name == "ldrloaddll"
-        || name == "ldrgetprocedureaddress"
-        || name == "ldrgetdllhandle"
-        || (dll.contains("ntdll") && name.starts_with("ldr"))
-}
-
 fn syscall_window_start(insns: &[ScannedInsn], idx: usize) -> usize {
     let mut start = idx;
     while start > 0 && idx - start < 8 {
@@ -523,41 +514,6 @@ fn syscall_window_start(insns: &[ScannedInsn], idx: usize) -> usize {
         start -= 1;
     }
     start
-}
-
-fn is_exec_memory_api(name: &str) -> bool {
-    matches!(
-        name,
-        "virtualalloc"
-            | "virtualalloc2"
-            | "virtualallocex"
-            | "virtualprotect"
-            | "virtualprotectex"
-            | "ntallocatevirtualmemory"
-            | "ntprotectvirtualmemory"
-            | "zwallocatevirtualmemory"
-            | "zwprotectvirtualmemory"
-            | "mapviewoffile"
-            | "mapviewoffileex"
-            | "createmapping"
-            | "createfilemappinga"
-            | "createfilemappingw"
-            | "flushinstructioncache"
-    )
-}
-
-fn is_write_memory_api(name: &str) -> bool {
-    matches!(
-        name,
-        "writeprocessmemory" | "ntwritevirtualmemory" | "zwwritevirtualmemory"
-    )
-}
-
-fn is_thread_context_api(name: &str) -> bool {
-    matches!(
-        name,
-        "getthreadcontext" | "setthreadcontext" | "wow64getthreadcontext" | "wow64setthreadcontext"
-    )
 }
 
 fn starts_trap_flag_window(insns: &[ScannedInsn], idx: usize) -> bool {
@@ -699,3 +655,7 @@ fn severity_rank(value: &str) -> u8 {
         _ => 0,
     }
 }
+pub mod apis;
+pub mod contract_flows;
+pub mod discovery;
+pub mod intelli;

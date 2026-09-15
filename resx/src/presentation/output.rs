@@ -206,15 +206,15 @@ fn render_progress_bar(width: usize, done: usize, total: usize, color: bool) -> 
     let filled = (done * width).div_ceil(total);
     if color {
         format!(
-            "\x1b[2m[\x1b[0m\x1b[96m{}\x1b[0m\x1b[2m{}\x1b[0m\x1b[2m]\x1b[0m",
-            "█".repeat(filled),
-            "░".repeat(width.saturating_sub(filled))
+            "\x1b[96m{}\x1b[0m{}",
+            ".".repeat(filled),
+            " ".repeat(width.saturating_sub(filled))
         )
     } else {
         format!(
-            "[{}{}]",
-            "#".repeat(filled),
-            "-".repeat(width.saturating_sub(filled))
+            "{}{}",
+            ".".repeat(filled),
+            " ".repeat(width.saturating_sub(filled))
         )
     }
 }
@@ -322,6 +322,33 @@ pub(crate) fn apply_insn_color(insn: &Instruction, s: &str, c: &Colors) -> Strin
         return c.dim(s);
     }
     c.b_white(s)
+}
+
+/// Format an instruction recovered from textual/runtime evidence with the
+/// same semantic columns used by normal disassembly. Column widths are
+/// computed before ANSI styling so colour never breaks alignment.
+pub fn format_text_insn(
+    c: &Colors,
+    marker: &str,
+    selected: bool,
+    rva: u64,
+    bytes: &str,
+    instruction: &str,
+) -> String {
+    let marker = if selected {
+        c.selected_marker(marker)
+    } else {
+        marker.to_owned()
+    };
+    let address = format!("{rva:08X}");
+    let address = if selected {
+        c.b_yellow(&address)
+    } else {
+        c.address(&address)
+    };
+    let byte_column = c.bytes(&format!("{bytes:<24}"));
+    let assembly = c.assembly(instruction);
+    format!("{marker} {address}  {byte_column} {assembly}")
 }
 
 pub(crate) fn highlight_symbolic_text(text: &str, c: &Colors) -> String {
@@ -599,49 +626,52 @@ pub fn print_iat(w: &mut dyn Write, imps: &[ImportDll], dll_name: &str, c: &Colo
 }
 
 pub fn print_sections(w: &mut dyn Write, pe: &PeFile, c: &Colors) {
-    writeln!(w).ok();
-    writeln!(w, "{}", c.bold(&c.b_blue("Sections:"))).ok();
-    writeln!(
+    writeln!(w, "\n{}", c.bold(&c.b_blue("Sections:"))).ok();
+    let short = |name: &str| match name {
+        "Read+Execute" => "RX".to_owned(),
+        "Read+Write" => "RW".to_owned(),
+        "Read+Write+Execute" => "RWX".to_owned(),
+        "Read" => "R".to_owned(),
+        "Read or Read+Write" => "R/RW".to_owned(),
+        other => other.to_owned(),
+    };
+    let rows: Vec<_> = pe
+        .sections
+        .iter()
+        .map(|s| {
+            vec![
+                s.name.clone(),
+                format!("0x{:08X}", s.virtual_address),
+                format!("0x{:08X}", s.virtual_size),
+                format!("0x{:08X}", s.raw_size),
+                s.protection_string(),
+                short(s.normal_expectation_name()),
+                format!("{:.3}", s.entropy),
+            ]
+        })
+        .collect();
+    super::table::print(
         w,
-        "  {:<10} {:<10} {:<10} {:<10} {:<4} {:<22} {:<22} {:<8} {}",
-        c.bold("NAME"),
-        c.bold("RVA"),
-        c.bold("VSIZE"),
-        c.bold("RAW"),
-        c.bold("TAG"),
-        c.bold("PROTECTION"),
-        c.bold("EXPECTED"),
-        c.bold("ENTROPY"),
-        c.bold("NOTES")
-    )
-    .ok();
-    for s in &pe.sections {
-        let notes = s.unusual_protection_reason().unwrap_or_default();
-        let notes = if notes.is_empty() {
-            String::new()
-        } else {
-            c.warn(&notes)
-        };
-        writeln!(
-            w,
-            "  {:<10} 0x{:08X} 0x{:08X} 0x{:08X} {:<4} {:<22} {:<22} {:<8.3} {}",
-            c.b_white(&s.name),
-            s.virtual_address,
-            s.virtual_size,
-            s.raw_size,
-            s.protection_string(),
-            s.protection_name(),
-            s.normal_expectation_name(),
-            s.entropy,
-            notes
-        )
-        .ok();
-    }
+        &["Name", "RVA", "VSize", "Raw", "Prot", "Expected", "Entropy"],
+        &rows,
+        c,
+    );
+    writeln!(w, "R = Read, W = Write, X = Execute.").ok();
+    let notes: Vec<_> = pe
+        .sections
+        .iter()
+        .filter_map(|s| {
+            s.unusual_protection_reason()
+                .filter(|n| !n.is_empty())
+                .map(|n| vec![s.name.clone(), n])
+        })
+        .collect();
+    super::table::print(w, &["Section", "Notes"], &notes, c);
 }
 
 pub fn print_pe_anomalies(w: &mut dyn Write, anomalies: &[PeAnomaly], c: &Colors) {
     writeln!(w).ok();
-    writeln!(w, "{}", c.bold(&c.b_mag("PE Header / Layout Check:"))).ok();
+    writeln!(w, "{}", c.bold(&c.b_mag("Layout Check:"))).ok();
     if anomalies.is_empty() {
         writeln!(w, "{}", c.ok("No header or section anomalies detected")).ok();
         return;
@@ -652,7 +682,7 @@ pub fn print_pe_anomalies(w: &mut dyn Write, anomalies: &[PeAnomaly], c: &Colors
             "warn" => c.b_yellow("WARN"),
             _ => c.cyan("INFO"),
         };
-        writeln!(w, "  [{}] {}: {}", sev, c.b_white(&a.kind), a.detail).ok();
+        writeln!(w, "  {}: {}: {}", sev, c.b_white(&a.kind), a.detail).ok();
     }
 }
 
@@ -675,6 +705,40 @@ pub fn print_yara_matches(w: &mut dyn Write, matches: &[YaraMatch], c: &Colors) 
             format!(" [{}]", m.tags.join(", "))
         };
         writeln!(w, "  {}{}  {}", c.b_yellow(&prefix), tags, c.dim(&m.file)).ok();
+        for string in &m.strings {
+            let where_ = string
+                .rva
+                .map(|rva| {
+                    format!(
+                        "RVA 0x{rva:08X} ({}, file+0x{:X})",
+                        string.section.as_deref().unwrap_or("?"),
+                        string.offset
+                    )
+                })
+                .unwrap_or_else(|| format!("file+0x{:X}", string.offset));
+            writeln!(
+                w,
+                "    {} @ {}  {}",
+                c.b_cyan(&string.identifier),
+                c.b_blue(&where_),
+                c.dim(&string.data)
+            )
+            .ok();
+        }
+        for (key, value) in &m.metadata {
+            writeln!(w, "    {} = {}", c.magenta(key), value).ok();
+        }
+        if let Some(rva) = m.strings.iter().find_map(|item| item.rva) {
+            writeln!(
+                w,
+                "    {} dump --at 0x{:X} | xrefs --at 0x{:X} | cfg --at 0x{:X}",
+                c.dim("actions:"),
+                rva,
+                rva,
+                rva
+            )
+            .ok();
+        }
     }
 }
 

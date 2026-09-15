@@ -1,4 +1,4 @@
-use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::formats::pe::{resolve_iat_slot, PeFile};
 
@@ -71,10 +71,29 @@ impl ThunkResolution {
             _ => None,
         }
     }
+
+    /// Returns the final in-image destination of a direct JMP thunk chain.
+    /// IAT thunks deliberately return `None` because they have no local body.
+    pub fn direct_target_rva(&self) -> Option<u32> {
+        match self {
+            ThunkResolution::Direct { target_rva } => Some(*target_rva),
+            ThunkResolution::Chain { final_target, .. } => final_target.direct_target_rva(),
+            ThunkResolution::Iat { .. } | ThunkResolution::IatUnresolved { .. } => None,
+        }
+    }
 }
 
 pub fn follow_jmp_thunk(raw: &[u8], pe: &PeFile, start_rva: u32) -> Option<ThunkResolution> {
     follow_jmp_thunk_inner(raw, pe, start_rva, 0, &mut Vec::new())
+}
+
+pub fn direct_branch_target_rva(pe: &PeFile, instruction: &Instruction) -> Option<u32> {
+    matches!(
+        instruction.op0_kind(),
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+    )
+    .then(|| instruction.near_branch_target())
+    .and_then(|target| pe.va_to_rva(target))
 }
 
 fn follow_jmp_thunk_inner(
@@ -88,12 +107,10 @@ fn follow_jmp_thunk_inner(
         return None;
     }
 
-    let off = pe.rva_to_offset(start_rva)?;
-    if off >= raw.len() {
+    if !matches!(pe.machine, 0x014c | 0x8664) || !pe.rva_to_section(start_rva)?.is_executable() {
         return None;
     }
-
-    let chunk = &raw[off..];
+    let chunk = pe.rva_bytes(raw, start_rva)?;
     if chunk.is_empty() {
         return None;
     }
@@ -111,8 +128,7 @@ fn follow_jmp_thunk_inner(
 
     let resolved = match instr.op0_kind() {
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-            let target_va = instr.near_branch_target();
-            let target_rva = target_va.wrapping_sub(pe.image_base) as u32;
+            let target_rva = direct_branch_target_rva(pe, &instr)?;
 
             // Follow chained JMP stubs inside the image.
             if pe.rva_to_offset(target_rva).is_some() {

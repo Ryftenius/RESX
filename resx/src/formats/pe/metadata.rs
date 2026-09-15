@@ -9,7 +9,7 @@ use super::types::{
     PeTlsInfo, PeUnwindOperation, PeVTable,
 };
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub fn read_debug_info(pe: &PeFile, raw: &[u8]) -> PeDebugInfo {
     let (dir_rva, dir_size) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_DEBUG);
@@ -23,7 +23,10 @@ pub fn read_debug_info(pe: &PeFile, raw: &[u8]) -> PeDebugInfo {
         Some(v) => v,
         None => return PeDebugInfo::default(),
     };
-    let end = off.saturating_add(dir_size as usize).min(raw.len());
+    if pe.rva_slice(raw, dir_rva, dir_size as usize).is_none() {
+        return PeDebugInfo::default();
+    }
+    let end = off + (dir_size as usize).min(super::types::MAX_PE_ENTRIES * 28);
     while off + 28 <= end {
         let debug_type = read_u32(raw, off + 12);
         let size_of_data = read_u32(raw, off + 16);
@@ -48,14 +51,13 @@ pub fn read_clr_info(pe: &PeFile, raw: &[u8]) -> Option<PeClrInfo> {
         return None;
     }
     let off = pe.rva_to_offset(dir_rva)?;
-    if off + 0x18 > raw.len() {
-        return None;
-    }
+    pe.rva_slice(raw, dir_rva, 0x18)?;
 
     let major_runtime_version = read_u16(raw, off + 4);
     let minor_runtime_version = read_u16(raw, off + 6);
     let metadata_rva = read_u32(raw, off + 8);
     let metadata_size = read_u32(raw, off + 12);
+    pe.rva_slice(raw, metadata_rva, metadata_size as usize)?;
     let flags = read_u32(raw, off + 16);
     let entry_point_token_or_rva = read_u32(raw, off + 20);
     let metadata_version = read_clr_metadata_version(pe, raw, metadata_rva).unwrap_or_default();
@@ -77,12 +79,10 @@ pub fn read_load_config(pe: &PeFile, raw: &[u8]) -> Option<PeLoadConfigInfo> {
         return None;
     }
     let off = pe.rva_to_offset(dir_rva)?;
-    if off + 4 > raw.len() {
-        return None;
-    }
+    pe.rva_slice(raw, dir_rva, 4)?;
 
     let size = read_u32(raw, off);
-    if size == 0 {
+    if size < 4 || size > dir_size || pe.rva_slice(raw, dir_rva, size as usize).is_none() {
         return None;
     }
 
@@ -134,7 +134,7 @@ pub fn read_runtime_function(
     raw: &[u8],
     target_rva: u32,
 ) -> Option<PeRuntimeFunctionInfo> {
-    if pe.arch != 64 {
+    if pe.machine != 0x8664 {
         return None;
     }
 
@@ -143,14 +143,15 @@ pub fn read_runtime_function(
         return None;
     }
     let mut off = pe.rva_to_offset(dir_rva)?;
-    let end = off.checked_add(dir_size as usize)?.min(raw.len());
+    pe.rva_slice(raw, dir_rva, dir_size as usize)?;
+    let end = off.checked_add((dir_size as usize).min(super::types::MAX_PE_ENTRIES * 12))?;
 
     while off + 12 <= end {
         let begin_rva = read_u32(raw, off);
         let end_rva = read_u32(raw, off + 4);
         let unwind_info_rva = read_u32(raw, off + 8);
         if begin_rva <= target_rva && target_rva < end_rva {
-            return parse_unwind_info(pe, raw, begin_rva, end_rva, unwind_info_rva);
+            return parse_unwind_info(pe, raw, begin_rva, end_rva, unwind_info_rva, &mut 16_384);
         }
         off += 12;
     }
@@ -159,7 +160,7 @@ pub fn read_runtime_function(
 }
 
 pub fn read_runtime_functions(pe: &PeFile, raw: &[u8]) -> Vec<PeRuntimeFunctionInfo> {
-    if pe.arch != 64 {
+    if pe.machine != 0x8664 {
         return Vec::new();
     }
 
@@ -170,16 +171,30 @@ pub fn read_runtime_functions(pe: &PeFile, raw: &[u8]) -> Vec<PeRuntimeFunctionI
     let Some(mut off) = pe.rva_to_offset(dir_rva) else {
         return Vec::new();
     };
-    let end = off.saturating_add(dir_size as usize).min(raw.len());
+    if pe.rva_slice(raw, dir_rva, dir_size as usize).is_none() {
+        return Vec::new();
+    }
+    let end = off + (dir_size as usize).min(super::types::MAX_PE_ENTRIES * 12);
     let mut out = Vec::new();
+    let mut unwind_budget = 2_000_000usize;
     while off + 12 <= end {
         let begin_rva = read_u32(raw, off);
         let end_rva = read_u32(raw, off + 4);
         let unwind_info_rva = read_u32(raw, off + 8);
         if begin_rva != 0 && end_rva > begin_rva {
-            if let Some(info) = parse_unwind_info(pe, raw, begin_rva, end_rva, unwind_info_rva) {
+            if let Some(info) = parse_unwind_info(
+                pe,
+                raw,
+                begin_rva,
+                end_rva,
+                unwind_info_rva,
+                &mut unwind_budget,
+            ) {
                 out.push(info);
             }
+        }
+        if unwind_budget == 0 {
+            break;
         }
         off += 12;
     }
@@ -206,9 +221,7 @@ pub fn read_tls_info(pe: &PeFile, raw: &[u8]) -> Option<PeTlsInfo> {
         return None;
     }
     let off = pe.rva_to_offset(dir_rva)?;
-    if off + min_size > raw.len() {
-        return None;
-    }
+    pe.rva_slice(raw, dir_rva, min_size)?;
 
     let read_ptr = |offset: usize| -> u64 {
         if pe.arch == 64 {
@@ -238,7 +251,14 @@ fn read_data_strings(pe: &PeFile, raw: &[u8], limit: usize) -> Vec<PeDataString>
             .min(raw.len());
         let mut off = start;
         while off < end && out.len() < limit {
-            if let Some((value, consumed)) = read_ascii_string_at(raw, off, end) {
+            // Only attempt a string at the beginning of a printable run. Retrying
+            // every suffix of an overlong run makes scanning quadratic.
+            let ascii_start =
+                off == start || !matches!(raw[off - 1], 0x20..=0x7E | b'\t' | b'\r' | b'\n');
+            if let Some((value, consumed)) = ascii_start
+                .then(|| read_ascii_string_at(raw, off, end))
+                .flatten()
+            {
                 let rva = section.virtual_address + (off - start) as u32;
                 if seen.insert((rva, "ascii")) {
                     out.push(PeDataString {
@@ -251,7 +271,12 @@ fn read_data_strings(pe: &PeFile, raw: &[u8], limit: usize) -> Vec<PeDataString>
                 off += consumed.max(1);
                 continue;
             }
-            if let Some((value, consumed)) = read_utf16_string_at(raw, off, end) {
+            let utf16_start =
+                off < start + 2 || !matches!(read_u16(raw, off - 2), 0x20..=0x7E | 9 | 10 | 13);
+            if let Some((value, consumed)) = utf16_start
+                .then(|| read_utf16_string_at(raw, off, end))
+                .flatten()
+            {
                 let rva = section.virtual_address + (off - start) as u32;
                 if seen.insert((rva, "utf16")) {
                     out.push(PeDataString {
@@ -367,6 +392,7 @@ fn is_data_section(name: &str) -> bool {
 }
 
 fn read_ascii_string_at(raw: &[u8], off: usize, end: usize) -> Option<(String, usize)> {
+    let end = end.min(off.saturating_add(super::types::MAX_PE_STRING));
     let mut pos = off;
     while pos < end && matches!(raw[pos], 0x20..=0x7E | b'\t' | b'\r' | b'\n') {
         pos += 1;
@@ -384,6 +410,7 @@ fn read_ascii_string_at(raw: &[u8], off: usize, end: usize) -> Option<(String, u
 }
 
 fn read_utf16_string_at(raw: &[u8], off: usize, end: usize) -> Option<(String, usize)> {
+    let end = end.min(off.saturating_add(super::types::MAX_PE_STRING * 2));
     let mut units = Vec::new();
     let mut pos = off;
     while pos + 1 < end {
@@ -408,399 +435,377 @@ fn read_utf16_string_at(raw: &[u8], off: usize, end: usize) -> Option<(String, u
     Some((text, (pos + 2) - off))
 }
 
-pub fn find_startup_routines(pe: &PeFile, raw: &[u8]) -> Vec<PeStartupRoutine> {
-    let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
+mod startup;
+pub use startup::find_startup_routines;
+#[cfg(test)]
+pub(in crate::formats::pe) use startup::validate_unwind_chain;
 
-    if seen.insert((pe.entry_point, "pe-entry".to_owned())) {
-        let section_name = pe
-            .rva_to_section(pe.entry_point)
-            .map(|section| section.name.clone())
-            .unwrap_or_default();
-        out.push(PeStartupRoutine {
-            kind: "PE Entry Point".to_owned(),
-            source: "AddressOfEntryPoint".to_owned(),
-            rva: pe.entry_point,
-            va: pe.image_base + pe.entry_point as u64,
-            section_name,
-            note: "loader transfers control here after image initialization".to_owned(),
-        });
-    }
-
-    if let Some(tls) = read_tls_info(pe, raw) {
-        for callback in tls.callbacks {
-            if seen.insert((callback.rva, "tls-callback".to_owned())) {
-                let section_name = pe
-                    .rva_to_section(callback.rva)
-                    .map(|section| section.name.clone())
-                    .unwrap_or_default();
-                out.push(PeStartupRoutine {
-                    kind: "TLS Callback".to_owned(),
-                    source: ".tls".to_owned(),
-                    rva: callback.rva,
-                    va: callback.va,
-                    section_name,
-                    note: "invoked by the loader before the normal entry point".to_owned(),
-                });
-            }
-        }
-    }
-
-    let ptr_width = if pe.arch == 64 { 8usize } else { 4usize };
-    for section in &pe.sections {
-        if !is_xl_like_section(&section.name) || section.raw_size == 0 {
-            continue;
-        }
-        let start = section.raw_offset as usize;
-        let end = start
-            .saturating_add(section.raw_size as usize)
-            .min(raw.len());
-        let mut hits = 0usize;
-        let mut off = start;
-        while off + ptr_width <= end && hits < 32 {
-            let value = if ptr_width == 8 {
-                read_u64(raw, off)
-            } else {
-                read_u32(raw, off) as u64
-            };
-            off += ptr_width;
-            let Some(target_rva) = pe.va_to_rva(value) else {
-                continue;
-            };
-            let Some(target_section) = pe.rva_to_section(target_rva) else {
-                continue;
-            };
-            if !target_section.is_executable() {
-                continue;
-            }
-            if !seen.insert((target_rva, "xl-pointer".to_owned())) {
-                continue;
-            }
-            hits += 1;
-            out.push(PeStartupRoutine {
-                kind: "XL Startup".to_owned(),
-                source: section.name.clone(),
-                rva: target_rva,
-                va: value,
-                section_name: target_section.name.clone(),
-                note: format!(
-                    "{} pointer at +0x{:X} targets executable startup code",
-                    section.name,
-                    off.saturating_sub(start + ptr_width)
-                ),
-            });
-        }
-    }
-
-    for candidate in find_real_entry_candidates(pe, raw) {
-        if seen.insert((candidate.rva, candidate.kind.clone())) {
-            out.push(candidate);
-        }
-    }
-
-    out.sort_by_key(|entry| (startup_kind_priority(&entry.kind), entry.rva));
-    out
-}
-
-#[derive(Clone, Debug)]
-struct StartupEdge {
-    target_rva: u32,
-    via: &'static str,
-    note: String,
-}
-
-#[derive(Clone, Debug)]
-struct PendingCodePtr {
-    target_rva: u32,
-    source: &'static str,
-}
-
-const STARTUP_SCAN_MAX_DEPTH: usize = 1;
-const STARTUP_HANDOFF_LIMIT: usize = 8;
-const STARTUP_MAIN_CANDIDATE_LIMIT: usize = 4;
-const STARTUP_PENDING_PTR_LIMIT: usize = 6;
-
-fn find_real_entry_candidates(pe: &PeFile, raw: &[u8]) -> Vec<PeStartupRoutine> {
-    let mut out = Vec::new();
-    let mut seen_rvas = BTreeSet::new();
-    let mut queue = VecDeque::from([(pe.entry_point, 0usize)]);
-    let mut visited = BTreeSet::new();
-    let mut handoff_count = 0usize;
-    let mut main_count = 0usize;
-
-    while let Some((rva, depth)) = queue.pop_front() {
-        if depth > STARTUP_SCAN_MAX_DEPTH || !visited.insert(rva) {
-            continue;
-        }
-        let Some(window) = decode_startup_window(pe, raw, rva, 96, 768) else {
-            continue;
-        };
-        let mut pending_ptrs: Vec<PendingCodePtr> = Vec::new();
-        for insn in window {
-            if main_count < STARTUP_MAIN_CANDIDATE_LIMIT {
-                pending_ptrs.extend(extract_code_pointer_loads(pe, &insn));
-                if pending_ptrs.len() > STARTUP_PENDING_PTR_LIMIT {
-                    pending_ptrs.drain(
-                        0..pending_ptrs
-                            .len()
-                            .saturating_sub(STARTUP_PENDING_PTR_LIMIT / 2),
-                    );
-                }
-            }
-
-            if depth == 0 && handoff_count < STARTUP_HANDOFF_LIMIT {
-                for edge in extract_startup_edges(pe, &insn) {
-                    if !is_plausible_startup_target(pe, raw, edge.target_rva) {
-                        continue;
-                    }
-                    if !seen_rvas.insert((edge.target_rva, edge.via)) {
-                        continue;
-                    }
-                    let section_name = pe
-                        .rva_to_section(edge.target_rva)
-                        .map(|section| section.name.clone())
-                        .unwrap_or_default();
-                    out.push(PeStartupRoutine {
-                        kind: "Startup Handoff".to_owned(),
-                        source: format!("{} @ depth {}", edge.via, depth),
-                        rva: edge.target_rva,
-                        va: pe.image_base + edge.target_rva as u64,
-                        section_name,
-                        note: edge.note.clone(),
-                    });
-                    handoff_count += 1;
-                    if depth < STARTUP_SCAN_MAX_DEPTH {
-                        queue.push_back((edge.target_rva, depth + 1));
-                    }
-                }
-            }
-
-            if main_count < STARTUP_MAIN_CANDIDATE_LIMIT
-                && is_call_or_jmp(insn.instr.mnemonic())
-                && !pending_ptrs.is_empty()
-            {
-                for ptr in pending_ptrs.drain(..) {
-                    if main_count >= STARTUP_MAIN_CANDIDATE_LIMIT {
-                        break;
-                    }
-                    if !is_plausible_startup_target(pe, raw, ptr.target_rva) {
-                        continue;
-                    }
-                    if seen_rvas.insert((ptr.target_rva, "real-main")) {
-                        let section_name = pe
-                            .rva_to_section(ptr.target_rva)
-                            .map(|section| section.name.clone())
-                            .unwrap_or_default();
-                        out.push(PeStartupRoutine {
-                            kind: "Real Main Candidate".to_owned(),
-                            source: format!("{} callback depth {}", ptr.source, depth),
-                            rva: ptr.target_rva,
-                            va: pe.image_base + ptr.target_rva as u64,
-                            section_name,
-                            note: "startup code passes this executable address as a callback or main routine".to_owned(),
-                        });
-                        main_count += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    out
-}
-
-fn startup_kind_priority(kind: &str) -> u8 {
-    match kind {
-        "PE Entry Point" => 0,
-        "TLS Callback" => 1,
-        "Real Main Candidate" => 2,
-        "Startup Handoff" => 3,
-        "Startup Chain" => 4,
-        "XL Startup" => 5,
-        _ => 6,
-    }
-}
-
-#[derive(Clone, Debug)]
-struct StartupInsn {
-    instr: iced_x86::Instruction,
-}
-
-fn decode_startup_window(
+fn validate_unwind_bounded(
     pe: &PeFile,
     raw: &[u8],
-    start_rva: u32,
-    max_insns: usize,
-    max_bytes: usize,
-) -> Option<Vec<StartupInsn>> {
-    let file_off = pe.rva_to_offset(start_rva)?;
-    let end = file_off.saturating_add(max_bytes).min(raw.len());
-    let chunk = &raw[file_off..end];
-    let mut decoder = Decoder::with_ip(
-        pe.arch,
-        chunk,
-        pe.image_base + start_rva as u64,
-        DecoderOptions::NONE,
-    );
-    let mut insn = iced_x86::Instruction::default();
-    let mut out = Vec::new();
-    let mut count = 0usize;
-    while decoder.can_decode() && count < max_insns {
-        decoder.decode_out(&mut insn);
-        if insn.is_invalid() || insn.len() == 0 {
-            break;
-        }
-        out.push(StartupInsn { instr: insn });
-        count += 1;
-        if matches!(insn.mnemonic(), Mnemonic::Ret | Mnemonic::Retf) {
-            break;
-        }
-    }
-    Some(out)
+    begin: u32,
+    end: u32,
+    unwind: u32,
+    budget: &mut usize,
+) -> Option<()> {
+    validate_unwind_storage(pe, raw, begin, end, unwind, budget).ok()
 }
 
-fn extract_startup_edges(pe: &PeFile, insn: &StartupInsn) -> Vec<StartupEdge> {
-    let Some(target_rva) = branch_target_rva(pe, &insn.instr) else {
-        return Vec::new();
-    };
-    let Some(section) = pe.rva_to_section(target_rva) else {
-        return Vec::new();
-    };
-    if !section.is_executable() {
-        return Vec::new();
-    }
-    let (via, note) = if matches!(insn.instr.mnemonic(), Mnemonic::Call) {
-        (
-            "direct call",
-            "entry/startup code calls deeper internal initialization".to_owned(),
-        )
-    } else if matches!(insn.instr.mnemonic(), Mnemonic::Jmp) {
-        (
-            "direct jump",
-            "entry/startup code tail-jumps into deeper internal initialization".to_owned(),
-        )
-    } else {
-        return Vec::new();
-    };
-    vec![StartupEdge {
-        target_rva,
-        via,
-        note,
-    }]
+#[derive(Debug, PartialEq)]
+enum UnwindFailure {
+    Invalid,
+    Unavailable,
+    Inconsistent,
 }
 
-fn extract_code_pointer_loads(pe: &PeFile, insn: &StartupInsn) -> Vec<PendingCodePtr> {
-    let mut out = Vec::new();
-    let mnemonic = insn.instr.mnemonic();
-    match mnemonic {
-        Mnemonic::Lea => {
-            if let Some(target_rva) = memory_target_rva(pe, &insn.instr) {
-                out.push(PendingCodePtr {
-                    target_rva,
-                    source: "lea",
-                });
-            }
+fn unwind_bytes<'a>(
+    pe: &PeFile,
+    raw: &'a [u8],
+    rva: u32,
+    size: usize,
+) -> Result<&'a [u8], UnwindFailure> {
+    pe.rva_slice(raw, rva, size).ok_or_else(|| {
+        if super::validation::mapped(pe, rva, size as u32) {
+            UnwindFailure::Unavailable
+        } else {
+            UnwindFailure::Invalid
         }
-        Mnemonic::Mov => {
-            if let Some(target_rva) = immediate_target_rva(pe, &insn.instr) {
-                out.push(PendingCodePtr {
-                    target_rva,
-                    source: "mov",
-                });
-            }
-        }
-        Mnemonic::Push => {
-            if let Some(target_rva) = immediate_target_rva(pe, &insn.instr) {
-                out.push(PendingCodePtr {
-                    target_rva,
-                    source: "push",
-                });
-            }
-        }
-        _ => {}
-    }
-    out.retain(|item| {
-        pe.rva_to_section(item.target_rva)
-            .is_some_and(|section| section.is_executable())
-    });
-    out
+    })
 }
 
-fn branch_target_rva(pe: &PeFile, instr: &iced_x86::Instruction) -> Option<u32> {
-    match instr.op0_kind() {
-        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-            pe.va_to_rva(instr.near_branch_target())
-        }
-        _ => None,
+fn validate_unwind_storage(
+    pe: &PeFile,
+    raw: &[u8],
+    mut begin: u32,
+    mut end: u32,
+    mut unwind: u32,
+    budget: &mut usize,
+) -> Result<(), UnwindFailure> {
+    use UnwindFailure::Invalid;
+    if pe.machine != 0x8664 {
+        return Err(Invalid);
     }
-}
-
-fn immediate_target_rva(pe: &PeFile, instr: &iced_x86::Instruction) -> Option<u32> {
-    for kind in [instr.op0_kind(), instr.op1_kind()] {
-        let value = match kind {
-            OpKind::Immediate8 => instr.immediate8() as u64,
-            OpKind::Immediate16 => instr.immediate16() as u64,
-            OpKind::Immediate32 | OpKind::Immediate32to64 => instr.immediate32() as u64,
-            OpKind::Immediate64 => instr.immediate64(),
-            _ => continue,
+    let mut visited = BTreeSet::new();
+    let mut inconsistent = false;
+    for _ in 0..32 {
+        *budget = budget.checked_sub(1).ok_or(Invalid)?;
+        if !visited.insert(unwind) || unwind == 0 || unwind & 3 != 0 || end <= begin {
+            return Err(Invalid);
+        }
+        if !super::validation::mapped(pe, begin, end - begin) {
+            return Err(Invalid);
+        }
+        let header = unwind_bytes(pe, raw, unwind, 4)?;
+        let version = header[0] & 7;
+        let flags = header[0] >> 3;
+        if !matches!(version, 1 | 2) || flags & !7 != 0 || flags & 4 != 0 && flags & 3 != 0 {
+            return Err(Invalid);
+        }
+        if u32::from(header[1]) > end - begin {
+            inconsistent = true;
+        }
+        let count = header[2] as usize;
+        if count > *budget {
+            *budget = 0;
+            return Err(Invalid);
+        }
+        *budget -= count;
+        let aligned = (count * 2 + 3) & !3;
+        let suffix = if flags & 4 != 0 {
+            12
+        } else if flags & 3 != 0 {
+            4
+        } else {
+            0
         };
-        if let Some(rva) = pe.va_to_rva(value) {
-            return Some(rva);
+        let record = unwind_bytes(pe, raw, unwind, 4 + aligned + suffix)?;
+        let mut index = if version == 2 {
+            epilog_prefix(&record[4..4 + count * 2], end - begin)
+                .ok_or(Invalid)?
+                .0
+        } else {
+            0
+        };
+        let mut previous_offset = u8::MAX;
+        let mut stack_bytes = 0u32;
+        while index < count {
+            let offset = record[4 + index * 2];
+            let op = record[5 + index * 2] & 15;
+            let info = record[5 + index * 2] >> 4;
+            if offset > header[1] || offset > previous_offset {
+                inconsistent = true;
+            }
+            previous_offset = offset;
+            let extra = match (op, info) {
+                (0 | 2 | 3, _) => 0,
+                (1, 0) | (4 | 8, _) => 1,
+                (1, 1) | (5 | 9, _) => 2,
+                (10, 0 | 1) => 0,
+                _ => return Err(Invalid),
+            };
+            if index + 1 + extra > count {
+                return Err(Invalid);
+            }
+            let allocation = match op {
+                0 => 8,
+                1 if info == 0 => u32::from(read_u16(record, 6 + index * 2)) * 8,
+                1 => read_u32(record, 6 + index * 2),
+                2 => u32::from(info) * 8 + 8,
+                10 => {
+                    if info == 0 {
+                        40
+                    } else {
+                        48
+                    }
+                }
+                _ => 0,
+            };
+            stack_bytes = stack_bytes.checked_add(allocation).ok_or(Invalid)?;
+            index += 1 + extra;
         }
+        if flags & 4 == 0 {
+            if flags & 3 != 0 {
+                let handler = read_u32(record, 4 + aligned);
+                unwind_bytes(pe, raw, handler, 1)?;
+                if !pe
+                    .rva_to_section(handler)
+                    .is_some_and(|s| s.is_executable())
+                {
+                    return Err(Invalid);
+                }
+            }
+            return if inconsistent {
+                Err(UnwindFailure::Inconsistent)
+            } else {
+                Ok(())
+            };
+        }
+        begin = read_u32(record, 4 + aligned);
+        end = read_u32(record, 8 + aligned);
+        unwind = read_u32(record, 12 + aligned);
     }
-    None
+    Err(Invalid)
 }
 
-fn is_plausible_startup_target(pe: &PeFile, raw: &[u8], rva: u32) -> bool {
-    if rva == 0 || rva == pe.entry_point || rva & 1 != 0 {
-        return false;
-    }
-    let Some(section) = pe.rva_to_section(rva) else {
-        return false;
-    };
-    if !section.is_executable() {
-        return false;
-    }
-    let Some(off) = pe.rva_to_offset(rva) else {
-        return false;
-    };
-    if off >= raw.len() {
-        return false;
-    }
-
-    let first = raw[off];
-    if matches!(first, 0x00 | 0x90 | 0xCC | 0xC2 | 0xC3 | 0xCA | 0xCB)
-        || (first == 0x0F && raw.get(off + 1).is_some_and(|b| *b == 0x0B))
-    {
-        return false;
-    }
-
-    let end = off.saturating_add(16).min(raw.len());
-    let chunk = &raw[off..end];
-    let mut decoder = Decoder::with_ip(
-        pe.arch,
-        chunk,
-        pe.image_base + rva as u64,
-        DecoderOptions::NONE,
-    );
-    let mut instr = iced_x86::Instruction::default();
-    decoder.decode_out(&mut instr);
-    !instr.is_invalid() && instr.len() > 0
-}
-
-fn memory_target_rva(pe: &PeFile, instr: &iced_x86::Instruction) -> Option<u32> {
-    if instr.op1_kind() != OpKind::Memory {
+/// V2 begins with UWOP_EPILOG(size, flags), followed by 12-bit distances from
+/// function end. A zero distance is alignment padding; flag 1 also describes
+/// the final epilog. These entries are not prologue offsets.
+fn epilog_prefix(codes: &[u8], function_size: u32) -> Option<(usize, Vec<PeEpilogScope>)> {
+    if !codes.len().is_multiple_of(2) {
         return None;
     }
-    if matches!(instr.memory_base(), Register::RIP | Register::EIP) {
-        let addr = instr.ip_rel_memory_address();
-        return pe.va_to_rva(addr);
+    if codes.len() < 2 || codes[1] & 15 != 6 {
+        return Some((0, Vec::new()));
     }
-    None
+    let size = u32::from(codes[0]);
+    let flags = codes[1] >> 4;
+    if size == 0 || size > function_size || flags > 1 {
+        return None;
+    }
+    let mut scopes = Vec::new();
+    let mut distances = BTreeSet::new();
+    let mut add = |distance: u32| -> Option<()> {
+        if distance < size || distance > function_size || !distances.insert(distance) {
+            return None;
+        }
+        let start = function_size.checked_sub(distance)?;
+        scopes.push(PeEpilogScope {
+            start_offset: start,
+            end_offset: start.checked_add(size)?,
+            source: "unwind-v2-epilog-metadata".into(),
+        });
+        Some(())
+    };
+    if flags & 1 != 0 {
+        add(size)?;
+    }
+    let mut index = 1;
+    let mut padding = false;
+    while index * 2 < codes.len() && codes[index * 2 + 1] & 15 == 6 {
+        let distance = u32::from(codes[index * 2]) | (u32::from(codes[index * 2 + 1] >> 4) << 8);
+        if distance == 0 {
+            padding = true;
+        } else {
+            if padding {
+                return None;
+            }
+            add(distance)?;
+        }
+        index += 1;
+    }
+    if scopes.is_empty() {
+        return None;
+    }
+    Some((index, scopes))
 }
 
-fn is_call_or_jmp(mnemonic: Mnemonic) -> bool {
-    matches!(mnemonic, Mnemonic::Call | Mnemonic::Jmp)
+pub(super) fn metadata_anomalies(pe: &PeFile, raw: &[u8]) -> Vec<super::types::PeAnomaly> {
+    let mut out = Vec::new();
+    let (tls_rva, tls_size) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_TLS);
+    if tls_rva != 0 {
+        let width = if pe.arch == 64 { 8 } else { 4 };
+        let minimum = if width == 8 { 40 } else { 24 };
+        let mut invalid = false;
+        let mut terminated = false;
+        if let Some(directory) = pe
+            .rva_slice(raw, tls_rva, minimum)
+            .filter(|_| tls_size as usize >= minimum)
+        {
+            let table_va = if width == 8 {
+                read_u64(directory, 24)
+            } else {
+                u64::from(read_u32(directory, 12))
+            };
+            if table_va == 0 {
+                terminated = true;
+            } else if let Some(table) = pe
+                .va_to_rva(table_va)
+                .and_then(|rva| pe.rva_bytes(raw, rva))
+            {
+                for slot in table.chunks_exact(width).take(64) {
+                    let va = if width == 8 {
+                        read_u64(slot, 0)
+                    } else {
+                        u64::from(read_u32(slot, 0))
+                    };
+                    if va == 0 {
+                        terminated = true;
+                        break;
+                    }
+                    if pe.va_to_rva(va).is_none_or(|rva| {
+                        !pe.rva_to_section(rva).is_some_and(|s| s.is_executable())
+                            || pe.rva_slice(raw, rva, 1).is_none()
+                    }) {
+                        invalid = true;
+                    }
+                }
+            } else {
+                invalid = true;
+            }
+        } else {
+            invalid = true;
+        }
+        if invalid || !terminated {
+            out.push(super::types::anomaly("warn", "tls-validation", "TLS contains invalid callback references or lacks a terminator within the 64-slot budget; recovery is incomplete".into()));
+        }
+    }
+    let (rva, size) = pe.data_dir(IMAGE_DIRECTORY_ENTRY_EXCEPTION);
+    if rva != 0 {
+        if pe.machine != 0x8664 {
+            out.push(super::types::anomaly(
+                "info",
+                "unwind-unsupported",
+                "Exception records are not decoded as x64 unwind data on this machine type".into(),
+            ));
+        } else if let Some(table) = pe.rva_slice(raw, rva, size as usize) {
+            let count = table.len() / 12;
+            let mut budget = 2_000_000usize;
+            let mut non_code_storage = 0usize;
+            let mut unavailable = 0usize;
+            let mut inconsistent = 0usize;
+            let mut invalid_reasons = BTreeMap::<&'static str, (usize, Vec<u32>)>::new();
+            let invalid = table
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .take(super::types::MAX_PE_ENTRIES)
+                .filter(|record| {
+                    let begin = read_u32(*record, 0);
+                    let end = read_u32(*record, 4);
+                    if end > begin
+                        && super::validation::mapped(pe, begin, end - begin)
+                        && (!pe
+                            .rva_to_section(begin)
+                            .is_some_and(|section| section.is_executable())
+                            || pe.rva_slice(raw, begin, (end - begin) as usize).is_none())
+                    {
+                        non_code_storage += 1;
+                    }
+                    match validate_unwind_storage(
+                        pe,
+                        raw,
+                        read_u32(*record, 0),
+                        read_u32(*record, 4),
+                        read_u32(*record, 8),
+                        &mut budget,
+                    ) {
+                        Ok(()) => false,
+                        Err(UnwindFailure::Unavailable) => {
+                            unavailable += 1;
+                            false
+                        }
+                        Err(UnwindFailure::Invalid) => {
+                            let reason = if end <= begin {
+                                "begin-greater-than-or-equal-to-end"
+                            } else if !super::validation::mapped(pe, begin, end - begin) {
+                                "function-range-outside-image"
+                            } else if read_u32(*record, 8) == 0 || read_u32(*record, 8) & 3 != 0 {
+                                "invalid-unwind-rva-or-alignment"
+                            } else if let Some(header) = pe.rva_slice(raw, read_u32(*record, 8), 4)
+                            {
+                                let version = header[0] & 7;
+                                let flags = header[0] >> 3;
+                                if !matches!(version, 1 | 2)
+                                    || flags & !7 != 0
+                                    || flags & 4 != 0 && flags & 3 != 0
+                                {
+                                    "invalid-version-or-flags"
+                                } else {
+                                    "malformed-codes-chain-or-handler"
+                                }
+                            } else {
+                                "unwind-rva-outside-observed-file-bytes"
+                            };
+                            let item = invalid_reasons.entry(reason).or_default();
+                            item.0 += 1;
+                            if item.1.len() < 3 {
+                                item.1.push(begin);
+                            }
+                            true
+                        }
+                        Err(UnwindFailure::Inconsistent) => {
+                            inconsistent += 1;
+                            false
+                        }
+                    }
+                })
+                .count();
+            if invalid != 0 || table.len() % 12 != 0 || count > super::types::MAX_PE_ENTRIES {
+                let categories = invalid_reasons
+                    .iter()
+                    .map(|(reason, (count, examples))| {
+                        format!(
+                            "{reason}={count} examples=[{}]",
+                            examples
+                                .iter()
+                                .map(|rva| format!("0x{rva:08X}"))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                out.push(super::types::anomaly("warn", "unwind-validation", format!("{invalid} x64 records failed validation; declared records={count}, limit={}; categories: {categories}. Rejected records are not recovered.", super::types::MAX_PE_ENTRIES)));
+            }
+            if unavailable != 0 {
+                out.push(super::types::anomaly("info", "unwind-unavailable", format!("{unavailable} x64 records reference mapped metadata or handler bytes unavailable on disk; contents unknown, not recovered. Runtime bytes require fresh validation")));
+            }
+            if inconsistent != 0 {
+                out.push(super::types::anomaly("warn", "unwind-semantics", format!("{inconsistent} x64 records have bounded, non-circular structure but inconsistent prologue lengths or code offsets. These records are not recovered as trustworthy unwind metadata")));
+            }
+            if non_code_storage != 0 {
+                out.push(super::types::anomaly("info", "runtime-function-storage", format!("{non_code_storage} runtime-function ranges occupy non-executable or non-file-backed storage. Metadata does not establish executable bytes; runtime evidence is required")));
+            }
+            if budget == 0 {
+                out.push(super::types::anomaly(
+                    "warn",
+                    "unwind-budget",
+                    "Aggregate unwind validation budget exhausted; recovery is incomplete".into(),
+                ));
+            }
+        }
+    }
+    out
 }
 
 fn parse_unwind_info(
@@ -809,7 +814,9 @@ fn parse_unwind_info(
     begin_rva: u32,
     end_rva: u32,
     unwind_info_rva: u32,
+    budget: &mut usize,
 ) -> Option<PeRuntimeFunctionInfo> {
+    validate_unwind_bounded(pe, raw, begin_rva, end_rva, unwind_info_rva, budget)?;
     let off = pe.rva_to_offset(unwind_info_rva)?;
     if off + 4 > raw.len() {
         return None;
@@ -827,8 +834,43 @@ fn parse_unwind_info(
     let codes_size = (unwind_code_count as usize) * 2;
     let aligned_codes_size = (codes_size + 3) & !3;
     let handler_field_off = off + 4 + aligned_codes_size;
-    let (unwind_operations, stack_alloc_size, saved_registers) =
-        parse_unwind_operations(raw, off + 4, unwind_code_count);
+    let (epilog_count, epilog_scopes) = if unwind_version == 2 {
+        epilog_prefix(
+            &raw[off + 4..off + 4 + codes_size],
+            end_rva.checked_sub(begin_rva)?,
+        )?
+    } else {
+        (0, Vec::new())
+    };
+    let (mut unwind_operations, stack_alloc_size, saved_registers) = parse_unwind_operations(
+        raw,
+        off + 4 + epilog_count * 2,
+        unwind_code_count - epilog_count as u8,
+    );
+    let mut epilog_operations = Vec::new();
+    for index in 0..epilog_count {
+        let offset = off + 4 + index * 2;
+        epilog_operations.push(PeUnwindOperation {
+            code_offset: raw[offset],
+            op: "UWOP_EPILOG".into(),
+            info: raw[offset + 1] >> 4,
+            stack_offset: 0,
+            description: if index == 0 {
+                format!(
+                    "epilog size 0x{:X}, flags 0x{:X}",
+                    raw[offset],
+                    raw[offset + 1] >> 4
+                )
+            } else {
+                format!(
+                    "epilog distance from function end 0x{:X}",
+                    u32::from(raw[offset]) | (u32::from(raw[offset + 1] >> 4) << 8)
+                )
+            },
+        });
+    }
+    epilog_operations.append(&mut unwind_operations);
+    let unwind_operations = epilog_operations;
     let chained_parent = if unwind_flags & 0x4 != 0 && handler_field_off + 12 <= raw.len() {
         Some(PeChainedRuntimeFunction {
             begin_rva: read_u32(raw, handler_field_off),
@@ -870,7 +912,7 @@ fn parse_unwind_info(
         saved_registers,
         unwind_operations,
         chained_parent,
-        epilog_scopes: infer_epilog_scopes(raw, pe, begin_rva, end_rva),
+        epilog_scopes,
     })
 }
 
@@ -894,6 +936,16 @@ fn parse_unwind_operations(
         let info = b >> 4;
         let mut stack_offset = 0u32;
         let mut extra_slots = 0usize;
+        let required = match uwop {
+            1 if info == 0 => 1,
+            1 => 2,
+            4 | 8 => 1,
+            5 | 9 => 2,
+            _ => 0,
+        };
+        if idx + 1 + required > count as usize {
+            break;
+        }
         let (name, description) = match uwop {
             0 => {
                 saved.push(PeSavedRegister {
@@ -901,6 +953,7 @@ fn parse_unwind_operations(
                     stack_offset: stack_alloc,
                     prolog_offset: code_offset,
                 });
+                stack_alloc = stack_alloc.saturating_add(8);
                 (
                     "UWOP_PUSH_NONVOL",
                     format!("push {}", unwind_reg_name(info)),
@@ -971,14 +1024,17 @@ fn parse_unwind_operations(
                     format!("save xmm{} at stack+0x{:X}", info, extra),
                 )
             }
-            10 => (
-                "UWOP_PUSH_MACHFRAME",
-                if info == 0 {
-                    "push machine frame".to_owned()
-                } else {
-                    "push machine frame with error code".to_owned()
-                },
-            ),
+            10 => {
+                stack_alloc = stack_alloc.saturating_add(if info == 0 { 40 } else { 48 });
+                (
+                    "UWOP_PUSH_MACHFRAME",
+                    if info == 0 {
+                        "push machine frame".to_owned()
+                    } else {
+                        "push machine frame with error code".to_owned()
+                    },
+                )
+            }
             _ => ("UWOP_UNKNOWN", format!("unknown unwind op {}", uwop)),
         };
         ops.push(PeUnwindOperation {
@@ -993,35 +1049,50 @@ fn parse_unwind_operations(
     (ops, stack_alloc, saved)
 }
 
-fn infer_epilog_scopes(
-    raw: &[u8],
-    pe: &PeFile,
-    begin_rva: u32,
-    end_rva: u32,
-) -> Vec<PeEpilogScope> {
-    let Some(start) = pe.rva_to_offset(begin_rva) else {
-        return Vec::new();
-    };
-    let Some(end) = pe.rva_to_offset(end_rva.saturating_sub(1)).map(|v| v + 1) else {
-        return Vec::new();
-    };
-    let end = end.min(raw.len());
-    if start >= end {
-        return Vec::new();
+#[cfg(test)]
+mod unwind_stack_contracts {
+    #[test]
+    fn version_two_epilog_prefix_separates_size_flags_and_distances() {
+        // Same encoding shape as installed ntdll's V2 records; zero is padding.
+        let (count, scopes) = super::epilog_prefix(&[7, 0x16, 0x12, 0x06, 7, 0x32], 0x70).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!((scopes[0].start_offset, scopes[0].end_offset), (0x69, 0x70));
+        assert_eq!((scopes[1].start_offset, scopes[1].end_offset), (0x5e, 0x65));
+        let (_, scopes) = super::epilog_prefix(&[4, 0x06, 0xe4, 0x16, 0x0b, 0x03], 0x383).unwrap();
+        assert_eq!(
+            (scopes[0].start_offset, scopes[0].end_offset),
+            (0x19f, 0x1a3)
+        );
+        assert!(super::epilog_prefix(&[1, 0x16, 0, 0x06, 2, 0x02], 0xaf).is_some());
     }
-    let window_start = end.saturating_sub(32).max(start);
-    let mut scopes = Vec::new();
-    for (off, b) in raw.iter().enumerate().take(end).skip(window_start) {
-        if *b == 0xC3 || *b == 0xC2 || *b == 0xCB || *b == 0xCA {
-            let rva = begin_rva.saturating_add((off - start) as u32);
-            scopes.push(PeEpilogScope {
-                start_offset: rva.saturating_sub(begin_rva),
-                end_offset: rva.saturating_sub(begin_rva).saturating_add(1),
-                source: "ret-scan".to_owned(),
-            });
+    #[test]
+    fn version_two_rejects_bad_epilog_extent_flags_duplicates_and_padding() {
+        for bytes in [
+            &[0, 0x16][..],
+            &[8, 0x26],
+            &[8, 0x06],
+            &[8, 0x06, 4, 0x06],
+            &[8, 0x16, 8, 0x06],
+            &[8, 0x16, 0, 0x06, 9, 0x06],
+            &[8, 0x06, 0xff, 0xf6],
+            &[8],
+        ] {
+            assert!(super::epilog_prefix(bytes, 0x100).is_none(), "{bytes:?}");
         }
     }
-    scopes
+    #[test]
+    fn pushed_register_offset_precedes_the_unwind_pop() {
+        let (_, total, saved) = super::parse_unwind_operations(&[4, 0x32, 1, 0x30], 0, 2);
+        assert_eq!(total, 40);
+        assert_eq!(saved[0].register, "rbx");
+        assert_eq!(saved[0].stack_offset, 32);
+    }
+
+    #[test]
+    fn machine_frame_contributes_its_full_stack_size() {
+        assert_eq!(super::parse_unwind_operations(&[0, 0x0a], 0, 1).1, 40);
+        assert_eq!(super::parse_unwind_operations(&[0, 0x1a], 0, 1).1, 48);
+    }
 }
 
 fn unwind_reg_name(reg: u8) -> &'static str {
@@ -1072,7 +1143,9 @@ fn read_clr_metadata_version(pe: &PeFile, raw: &[u8], metadata_rva: u32) -> Opti
         return None;
     }
     let version_len = read_u32(raw, off + 12) as usize;
-    if off + 16 + version_len > raw.len() {
+    if version_len > super::types::MAX_PE_STRING
+        || pe.rva_slice(raw, metadata_rva, 16 + version_len).is_none()
+    {
         return None;
     }
     Some(
@@ -1110,11 +1183,13 @@ fn parse_tls_callbacks(pe: &PeFile, raw: &[u8], callbacks_va: u64) -> Vec<PeTlsC
         return Vec::new();
     };
     let width = if pe.arch == 64 { 8usize } else { 4usize };
+    let Some(region) = pe.rva_bytes(raw, callbacks_rva) else {
+        return Vec::new();
+    };
+    let end = off + region.len();
     let mut callbacks = Vec::new();
-    let mut seen = BTreeSet::new();
-
     for _ in 0..64 {
-        if off + width > raw.len() {
+        if off + width > end {
             break;
         }
         let va = if width == 8 {
@@ -1129,7 +1204,11 @@ fn parse_tls_callbacks(pe: &PeFile, raw: &[u8], callbacks_va: u64) -> Vec<PeTlsC
         let Some(rva) = pe.va_to_rva(va) else {
             continue;
         };
-        if !seen.insert(rva) {
+        if !pe
+            .rva_to_section(rva)
+            .is_some_and(|section| section.is_executable())
+            || pe.rva_slice(raw, rva, 1).is_none()
+        {
             continue;
         }
         callbacks.push(PeTlsCallback { va, rva });
@@ -1148,124 +1227,4 @@ fn is_xl_like_section(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::formats::pe::{PeAnomaly, PeSection, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ};
-
-    fn startup_test_pe(entry_point: u32) -> PeFile {
-        PeFile {
-            arch: 64,
-            machine: 0x8664,
-            timestamp: 0,
-            coff_characteristics: 0,
-            major_linker_version: 0,
-            minor_linker_version: 0,
-            image_base: 0x1800_0000,
-            entry_point,
-            size_of_image: 0xA000,
-            size_of_headers: 0x400,
-            section_alignment: 0x1000,
-            file_alignment: 0x200,
-            checksum: 0,
-            subsystem: 3,
-            dll_characteristics: 0,
-            sections: vec![PeSection {
-                name: ".text".to_owned(),
-                virtual_address: 0x1000,
-                virtual_size: 0x9000,
-                raw_offset: 0,
-                raw_size: 0x9000,
-                characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
-                entropy: 0.0,
-            }],
-            data_dirs: vec![(0, 0); 16],
-            anomalies: Vec::<PeAnomaly>::new(),
-        }
-    }
-
-    fn put(raw: &mut [u8], rva: u32, bytes: &[u8]) {
-        let off = rva.saturating_sub(0x1000) as usize;
-        raw[off..off + bytes.len()].copy_from_slice(bytes);
-    }
-
-    #[test]
-    fn startup_routines_do_not_export_recursive_branch_chains() {
-        let pe = startup_test_pe(0x1000);
-        let mut raw = vec![0xCC; 0x9000];
-        put(&mut raw, 0x1000, &[0xE8, 0xFB, 0x0F, 0x00, 0x00, 0xC3]);
-        put(&mut raw, 0x2000, &[0xE8, 0xFB, 0x0F, 0x00, 0x00, 0xC3]);
-        put(&mut raw, 0x3000, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-
-        let routines = find_startup_routines(&pe, &raw);
-
-        assert!(routines
-            .iter()
-            .any(|entry| entry.kind == "PE Entry Point" && entry.rva == 0x1000));
-        assert_eq!(
-            routines
-                .iter()
-                .filter(|entry| entry.kind == "Startup Handoff")
-                .count(),
-            1
-        );
-        assert!(!routines.iter().any(|entry| entry.kind == "Startup Chain"));
-    }
-
-    #[test]
-    fn startup_routines_reject_raw_rva_immediates_as_main_candidates() {
-        let pe = startup_test_pe(0x1000);
-        let mut raw = vec![0xCC; 0x9000];
-        put(
-            &mut raw,
-            0x1000,
-            &[
-                0x48, 0xB8, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0xF1, 0x0F, 0x00,
-                0x00, 0xC3,
-            ],
-        );
-        put(&mut raw, 0x2000, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-        put(&mut raw, 0x8000, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-
-        let routines = find_startup_routines(&pe, &raw);
-
-        assert!(!routines
-            .iter()
-            .any(|entry| entry.kind == "Real Main Candidate" && entry.rva == 0x8000));
-    }
-
-    #[test]
-    fn startup_routines_accept_full_va_code_pointer_candidates() {
-        let pe = startup_test_pe(0x1000);
-        let mut raw = vec![0xCC; 0x9000];
-        let mut entry = vec![0x48, 0xB8];
-        entry.extend_from_slice(&(pe.image_base + 0x3000).to_le_bytes());
-        entry.extend_from_slice(&[0xE8, 0xF1, 0x0F, 0x00, 0x00, 0xC3]);
-        put(&mut raw, 0x1000, &entry);
-        put(&mut raw, 0x2000, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-        put(&mut raw, 0x3000, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-
-        let routines = find_startup_routines(&pe, &raw);
-
-        assert!(routines
-            .iter()
-            .any(|entry| entry.kind == "Real Main Candidate" && entry.rva == 0x3000));
-    }
-
-    #[test]
-    fn startup_routines_reject_odd_code_pointer_candidates() {
-        let pe = startup_test_pe(0x1000);
-        let mut raw = vec![0xCC; 0x9000];
-        let mut entry = vec![0x48, 0xB8];
-        entry.extend_from_slice(&(pe.image_base + 0x3001).to_le_bytes());
-        entry.extend_from_slice(&[0xE8, 0xF1, 0x0F, 0x00, 0x00, 0xC3]);
-        put(&mut raw, 0x1000, &entry);
-        put(&mut raw, 0x2000, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-        put(&mut raw, 0x3001, &[0x48, 0x83, 0xEC, 0x28, 0xC3]);
-
-        let routines = find_startup_routines(&pe, &raw);
-
-        assert!(!routines
-            .iter()
-            .any(|entry| entry.kind == "Real Main Candidate" && entry.rva == 0x3001));
-    }
-}
+mod tests;
