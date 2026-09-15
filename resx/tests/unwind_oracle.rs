@@ -1,6 +1,6 @@
 //! Optional comparison against separately recorded Microsoft dumpbin output.
 //! Reads known valid images only; never launches an image or an external parser.
-use resx::formats::pe::{parse_pe, read_runtime_functions};
+use resx_ffi::formats::pe::{parse_pe, read_runtime_functions};
 #[test]
 #[ignore = "requires RESX_UNWIND_ORACLE from recorded dumpbin /unwindinfo output"]
 fn matches_independent_os_unwind_records() {

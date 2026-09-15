@@ -26,9 +26,11 @@ Typical outputs:
 
 ```text
 target/release/resx.exe
-target/release/resx.dll
-target/release/resx.lib
+target/release/resx_ffi.dll
+target/release/resx_ffi.dll.lib
 ```
+
+The release packaging script publishes these ABI artifacts as `resx.dll` and `resx.lib`.
 
 The exact import-library name depends on the Rust/MSVC toolchain.
 

@@ -1,4 +1,4 @@
-use resx::analysis::codec;
+use resx_ffi::analysis::codec;
 use std::path::PathBuf;
 
 #[test]

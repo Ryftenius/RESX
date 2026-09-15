@@ -7,7 +7,7 @@ use std::process::Command;
 use std::ptr;
 use std::time::Instant;
 
-use resx::ffi::{
+use resx_ffi::ffi::{
     ResxCfg, ResxCfgAt, ResxCfgDiff, ResxCfgOrdinal, ResxDiff, ResxDump, ResxDumpAt,
     ResxDumpOrdinal, ResxFollowCallers, ResxFreeString, ResxHelp, ResxHunt, ResxIndex, ResxIntelli,
     ResxLocate, ResxLocateSymbols, ResxPeCheck, ResxPeInfo, ResxPriority, ResxReconstructCfg,

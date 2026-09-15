@@ -9,7 +9,7 @@ homepage = "https://github.com/Ryftenius/RESX"
 build = "build.rs"
 
 [lib]
-name = "resx"
+name = "resx_ffi"
 crate-type = ["rlib", "cdylib"]
 
 [[bin]]

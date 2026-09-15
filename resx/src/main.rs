@@ -4,6 +4,8 @@ use std::time::Instant;
 
 use rayon::ThreadPoolBuilder;
 
+use resx_ffi as resx;
+
 use resx::cli::help::{
     example_topic, help_topic, is_help_request, is_version_request, normalize_cli_syntax,
     preprocess_args, print_examples, print_usage, product_banner,

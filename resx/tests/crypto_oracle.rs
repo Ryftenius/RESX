@@ -1,5 +1,5 @@
 #![cfg(windows)]
-use resx::analysis::{codec, crypto_decode};
+use resx_ffi::analysis::{codec, crypto_decode};
 use std::path::PathBuf;
 
 #[test]

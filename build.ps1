@@ -249,6 +249,8 @@ $CliStage = Join-Path $StageDir "cli"
 $VsixStage = Join-Path $StageDir "vscode"
 
 $CargoExe = Join-Path $RepoRoot "target\$Configuration\resx.exe"
+$CargoDll = Join-Path $RepoRoot "target\$Configuration\resx_ffi.dll"
+$CargoImportLibrary = Join-Path $RepoRoot "target\$Configuration\resx_ffi.dll.lib"
 $BundledExe = Join-Path $BundledCliDir "resx.exe"
 $VsixPath = Join-Path $ExtensionRoot "resx-vscode-$ExtensionVersion.vsix"
 
@@ -313,6 +315,9 @@ Invoke-Step -FilePath $Cargo -Arguments @("build", "-p", "resx", "--$Configurati
 if (-not (Test-Path $CargoExe)) {
     throw "Built CLI not found: $CargoExe"
 }
+if (-not (Test-Path $CargoDll)) {
+    throw "Built FFI library not found: $CargoDll"
+}
 
 if (-not $SkipNpmCi) {
     Invoke-Step -FilePath $Node -Arguments @("ci") -WorkingDirectory $ExtensionRoot
@@ -344,6 +349,10 @@ if (-not (Test-Path $VsixPath)) {
 }
 
 Copy-Item -LiteralPath $CargoExe -Destination (Join-Path $CliStage "resx.exe") -Force
+Copy-Item -LiteralPath $CargoDll -Destination (Join-Path $CliStage "resx.dll") -Force
+if (Test-Path $CargoImportLibrary) {
+    Copy-Item -LiteralPath $CargoImportLibrary -Destination (Join-Path $CliStage "resx.lib") -Force
+}
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path $CliStage "README.md") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "COMMANDS.md") -Destination (Join-Path $CliStage "COMMANDS.md") -Force
 Copy-Item -LiteralPath $VsixPath -Destination (Join-Path $VsixStage (Split-Path -Leaf $VsixPath)) -Force

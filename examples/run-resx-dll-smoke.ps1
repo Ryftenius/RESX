@@ -15,8 +15,8 @@ $Exe = Join-Path $OutDir "resx_dll_smoke.exe"
 
 function Resolve-DefaultResxDll {
     $candidates = @(
-        (Join-Path $RepoRoot "resx-demo\target\release\resx.dll"),
-        (Join-Path $RepoRoot "target\release\resx.dll"),
+        (Join-Path $RepoRoot "resx-demo\target\release\resx_ffi.dll"),
+        (Join-Path $RepoRoot "target\release\resx_ffi.dll"),
         (Join-Path $RepoRoot "target-resx-tests\cargo-full\debug\deps\resx.dll"),
         (Join-Path $RepoRoot "target-resx-tests\ffi-trace\debug\deps\resx.dll")
     )
@@ -25,7 +25,7 @@ function Resolve-DefaultResxDll {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-    throw "Could not find resx.dll. Build it first with: cargo build -p resx --release --lib"
+    throw "Could not find resx_ffi.dll. Build it first with: cargo build -p resx --release --lib"
 }
 
 function Resolve-DefaultImage {
