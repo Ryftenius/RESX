@@ -1,13 +1,22 @@
+#![forbid(unsafe_code)]
+
 mod constants;
 mod exports;
 mod imports;
 mod metadata;
 mod parse;
 mod types;
+mod validation;
+
+#[cfg(test)]
+mod safety_tests;
 
 pub use constants::*;
 pub use exports::{attribute_to_func, read_exports};
-pub use imports::{find_iat_slots_by_name, import_slot_map_by_va, read_imports, resolve_iat_slot};
+pub use imports::{
+    find_iat_slots_by_name, import_slot_map_by_rva, import_slot_map_by_va, read_imports,
+    resolve_iat_slot,
+};
 pub use metadata::{
     find_startup_routines, read_clr_info, read_data_summary, read_debug_info, read_load_config,
     read_runtime_function, read_runtime_functions, read_tls_info,

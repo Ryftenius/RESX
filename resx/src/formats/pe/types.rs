@@ -121,17 +121,67 @@ pub struct PeFile {
 
 impl PeFile {
     pub fn rva_to_offset(&self, rva: u32) -> Option<usize> {
-        self.rva_to_section(rva).map(|s| {
-            let delta = rva - s.virtual_address;
-            (s.raw_offset + delta) as usize
-        })
+        if rva < self.size_of_headers {
+            if self
+                .sections
+                .iter()
+                .any(|section| section.contains_rva(rva))
+            {
+                return None;
+            }
+            return Some(rva as usize);
+        }
+        let section = self.rva_to_section(rva)?;
+        let delta = rva.checked_sub(section.virtual_address)?;
+        if delta >= section.raw_size {
+            return None; // Loader zero-fill is not present in a disk image.
+        }
+        section
+            .raw_offset
+            .checked_add(delta)
+            .map(|off| off as usize)
     }
 
     pub fn rva_to_section(&self, rva: u32) -> Option<&PeSection> {
-        self.sections.iter().find(|s| s.contains_rva(rva))
+        let mut matches = self.sections.iter().filter(|s| s.contains_rva(rva));
+        let section = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(section)
+        }
+    }
+
+    /// File-backed bytes from this RVA to the end of its unambiguous region.
+    pub fn rva_bytes<'a>(&self, raw: &'a [u8], rva: u32) -> Option<&'a [u8]> {
+        let off = self.rva_to_offset(rva)?;
+        let mut available = if rva < self.size_of_headers {
+            self.size_of_headers.checked_sub(rva)? as usize
+        } else {
+            let section = self.rva_to_section(rva)?;
+            section
+                .raw_size
+                .checked_sub(rva.checked_sub(section.virtual_address)?)? as usize
+        };
+        for section in &self.sections {
+            if section.virtual_address > rva && section.virtual_size.max(section.raw_size) != 0 {
+                available = available.min((section.virtual_address - rva) as usize);
+            }
+        }
+        let end = off.checked_add(available)?.min(raw.len());
+        raw.get(off..end)
+    }
+
+    pub fn rva_slice<'a>(&self, raw: &'a [u8], rva: u32, size: usize) -> Option<&'a [u8]> {
+        self.rva_bytes(raw, rva)?.get(..size)
+    }
+
+    pub fn rva_string(&self, raw: &[u8], rva: u32) -> Option<String> {
+        read_cstr_checked(self.rva_bytes(raw, rva)?, 0, MAX_PE_STRING)
     }
 
     pub fn file_offset_to_rva(&self, offset: u64) -> Option<u32> {
+        let mut result = None;
         for section in &self.sections {
             if section.raw_size == 0 {
                 continue;
@@ -140,10 +190,14 @@ impl PeFile {
             let end = start.saturating_add(section.raw_size as u64);
             if offset >= start && offset < end {
                 let delta = u32::try_from(offset - start).ok()?;
-                return Some(section.virtual_address.saturating_add(delta));
+                let rva = section.virtual_address.checked_add(delta)?;
+                if result.is_some() || self.rva_to_offset(rva)? as u64 != offset {
+                    return None;
+                }
+                result = Some(rva);
             }
         }
-        None
+        result
     }
 
     pub fn va_to_rva(&self, va: u64) -> Option<u32> {
@@ -363,35 +417,39 @@ impl fmt::Display for PeError {
 impl std::error::Error for PeError {}
 
 pub fn read_u16(raw: &[u8], off: usize) -> u16 {
-    if off + 2 > raw.len() {
+    if off > raw.len() || raw.len() - off < 2 {
         return 0;
     }
     u16::from_le_bytes([raw[off], raw[off + 1]])
 }
 
 pub fn read_u32(raw: &[u8], off: usize) -> u32 {
-    if off + 4 > raw.len() {
+    if off > raw.len() || raw.len() - off < 4 {
         return 0;
     }
     u32::from_le_bytes(raw[off..off + 4].try_into().unwrap())
 }
 
 pub fn read_u64(raw: &[u8], off: usize) -> u64 {
-    if off + 8 > raw.len() {
+    if off > raw.len() || raw.len() - off < 8 {
         return 0;
     }
     u64::from_le_bytes(raw[off..off + 8].try_into().unwrap())
 }
 
 pub fn read_cstr(raw: &[u8], off: usize) -> String {
-    if off >= raw.len() {
-        return String::new();
-    }
-    let end = raw[off..]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(raw.len() - off);
-    String::from_utf8_lossy(&raw[off..off + end]).into_owned()
+    read_cstr_checked(raw, off, MAX_PE_STRING).unwrap_or_default()
+}
+
+pub const MAX_PE_STRING: usize = 4096;
+pub const MAX_PE_ENTRIES: usize = 65_536;
+pub const MAX_PE_BYTES: usize = 512 * 1024 * 1024;
+
+pub fn read_cstr_checked(raw: &[u8], off: usize, limit: usize) -> Option<String> {
+    let bytes = raw.get(off..)?;
+    let bytes = &bytes[..bytes.len().min(limit)];
+    let end = bytes.iter().position(|&byte| byte == 0)?;
+    std::str::from_utf8(&bytes[..end]).ok().map(str::to_owned)
 }
 
 pub(crate) fn anomaly(severity: &str, kind: &str, detail: String) -> PeAnomaly {

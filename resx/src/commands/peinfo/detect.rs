@@ -5,6 +5,10 @@ use regex::Regex;
 
 use super::model::{BuildAssessment, Candidate};
 
+#[cfg(test)]
+#[path = "misconceptions.rs"]
+mod misconceptions;
+
 pub fn machine_name(machine: u16) -> &'static str {
     match machine {
         0x014C => "I386",
@@ -36,23 +40,19 @@ pub fn subsystem_name(subsystem: u16) -> &'static str {
     }
 }
 
-pub fn detect_image_kind(pe: &PeFile, file_name: &str) -> String {
-    let lower = file_name.to_ascii_lowercase();
+pub fn detect_image_kind(pe: &PeFile, _file_name: &str) -> String {
     let is_dll = pe.coff_characteristics & 0x2000 != 0;
-    if lower.ends_with(".sys") || (pe.subsystem == 1 && is_dll) {
-        return "SYS / Driver".to_owned();
-    }
-    if lower.ends_with(".dll") || is_dll {
-        return "DLL".to_owned();
-    }
-    if lower.ends_with(".exe") {
-        return "EXE".to_owned();
-    }
-    if lower.ends_with(".efi") {
+    if matches!(pe.subsystem, 10..=13) {
         return "EFI".to_owned();
     }
-    if lower.ends_with(".bin") {
-        return "BIN".to_owned();
+    if pe.subsystem == 16 {
+        return "Boot Application".to_owned();
+    }
+    if pe.subsystem == 1 && is_dll {
+        return "SYS / Driver".to_owned();
+    }
+    if is_dll {
+        return "DLL".to_owned();
     }
     match pe.subsystem {
         10..=13 => "EFI".to_owned(),
@@ -624,25 +624,23 @@ fn apply_packer_heuristics(
     strings: &[String],
     imports: &[ImportDll],
 ) {
-    if has_section(sections, "upx0")
-        || has_section(sections, "upx1")
-        || strings_contains_any(strings, &["upx!"])
-    {
-        push_candidate(list, "UPX", 100, "UPX section names or strings detected");
+    if has_section(sections, "upx0") || has_section(sections, "upx1") {
+        push_candidate(
+            list,
+            "UPX",
+            100,
+            "UPX-compatible section names; attribution remains tentative",
+        );
     }
-    if has_section(sections, ".aspack") || strings_contains_any(strings, &["aspack"]) {
+    if has_section(sections, ".aspack") {
         push_candidate(list, "ASPack", 95, "ASPack markers detected");
     }
-    if has_section(sections, "mpress1")
-        || has_section(sections, "mpress2")
-        || strings_contains_any(strings, &["mpress"])
-    {
+    if has_section(sections, "mpress1") || has_section(sections, "mpress2") {
         push_candidate(list, "MPRESS", 95, "MPRESS markers detected");
     }
     if has_section(sections, ".vmp0")
         || has_section(sections, ".vmp1")
         || has_section(sections, ".themida")
-        || strings_contains_any(strings, &["vmprotect", "themida"])
     {
         push_candidate(
             list,
@@ -688,8 +686,8 @@ fn apply_packer_heuristics(
             "Packed / Compressed Native Image",
             60,
             format!(
-                "{} executable section(s) show high entropy with a sparse import surface",
-                high_entropy_exec
+                "{} executable section(s) show high entropy; {} declared imports. Static packing hypothesis only",
+                high_entropy_exec, import_count
             ),
         );
     }
@@ -701,7 +699,7 @@ fn apply_packer_heuristics(
     {
         push_candidate(
             list,
-            "Runtime-unpacked / self-modifying image",
+            "Possible runtime decoding / self-modification",
             55,
             "Writable+executable sections were found alongside high-entropy code",
         );
@@ -715,8 +713,13 @@ fn collect_image_strings(raw: &[u8]) -> Vec<String> {
 
     let mut ascii = Vec::new();
     for &b in raw.iter().take(8 * 1024 * 1024) {
+        if out.len() >= 8192 {
+            break;
+        }
         if (0x20..=0x7E).contains(&b) {
-            ascii.push(b);
+            if ascii.len() < 4096 {
+                ascii.push(b);
+            }
             continue;
         }
         if ascii.len() >= 4 {
@@ -725,17 +728,19 @@ fn collect_image_strings(raw: &[u8]) -> Vec<String> {
         }
         ascii.clear();
     }
-    if ascii.len() >= 4 {
+    if ascii.len() >= 4 && out.len() < 8192 {
         out.insert(String::from_utf8_lossy(&ascii).to_ascii_lowercase());
     }
 
     let mut wide = Vec::new();
     let mut i = 0usize;
-    while i + 1 < raw.len().min(8 * 1024 * 1024) {
+    while i + 1 < raw.len().min(8 * 1024 * 1024) && out.len() < 8192 {
         let lo = raw[i];
         let hi = raw[i + 1];
         if hi == 0 && (0x20..=0x7E).contains(&lo) {
-            wide.push(lo);
+            if wide.len() < 4096 {
+                wide.push(lo);
+            }
             i += 2;
             continue;
         }
@@ -746,7 +751,7 @@ fn collect_image_strings(raw: &[u8]) -> Vec<String> {
         wide.clear();
         i += 2;
     }
-    if wide.len() >= 4 {
+    if wide.len() >= 4 && out.len() < 8192 {
         out.insert(String::from_utf8_lossy(&wide).to_ascii_lowercase());
     }
 

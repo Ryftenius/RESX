@@ -53,14 +53,15 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         .unwrap_or_else(|| OsStr::new(""))
         .to_string_lossy()
         .to_string();
-    let metadata_path = dll_path_str.clone();
-    let metadata_task =
-        thread::spawn(move || query_file_metadata(&metadata_path).unwrap_or_default());
 
-    let raw = std::fs::read(&dll_path).map_err(|e| format!("read file: {}", e))?;
+    let raw = crate::core::input::read_image(&dll_path).map_err(|e| format!("read file: {}", e))?;
     progress.tick("reading image");
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     progress.tick("parsing PE headers");
+    let metadata_task = cfg.file_metadata.then(|| {
+        let path = dll_path_str.clone();
+        thread::spawn(move || query_file_metadata(&path).unwrap_or_default())
+    });
     let exports = read_exports(&pe, &raw);
     progress.tick("reading export table");
     let imports = read_imports(&pe, &raw);
@@ -72,7 +73,9 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
     progress.tick("reading CLR metadata");
     let load_config = read_load_config(&pe, &raw);
     progress.tick("reading load config");
-    let metadata = metadata_task.join().unwrap_or_default();
+    let metadata = metadata_task
+        .map(|task| task.join().unwrap_or_default())
+        .unwrap_or_default();
     progress.tick("querying file metadata");
     progress.finish();
 
