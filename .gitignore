@@ -1,5 +1,10 @@
 /target/
 /target-resx-tests/
+/release/
+/build.ps1
+/resx_test.*
+__pycache__/
+*.pyc
 /resx.exe
 /*.exe
 /*.pdb

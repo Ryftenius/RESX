@@ -38,8 +38,8 @@ The required validation baseline is:
 
 ```powershell
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
 
 Fixture-dependent and oracle tests are reported separately. A skipped test is not
