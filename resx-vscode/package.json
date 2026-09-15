@@ -2,19 +2,19 @@
   "name": "resx-vscode",
   "displayName": "RESX Binary Viewer",
   "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, SYS, and PE-style BIN files powered by RESX",
-  "version": "1.10.0",
-  "publisher": "titan-softwork-solutions",
+  "version": "1.15.0",
+  "publisher": "ryftenius",
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TITAN-Softwork-Solutions/RESX.git"
+    "url": "https://github.com/Ryftenius/RESX.git"
   },
-  "homepage": "https://github.com/TITAN-Softwork-Solutions/RESX",
+  "homepage": "https://github.com/Ryftenius/RESX",
   "bugs": {
-    "url": "https://github.com/TITAN-Softwork-Solutions/RESX/issues"
+    "url": "https://github.com/Ryftenius/RESX/issues"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.137.0"
   },
   "categories": [
     "Other",
@@ -63,7 +63,7 @@
             "filenamePattern": "*.bin"
           }
         ],
-        "priority": "option"
+        "priority": "default"
       }
     ],
     "configuration": {
@@ -153,14 +153,15 @@
     "vscode:prepublish": "npm run compile",
     "compile": "npm run compile:webview && tsc -p ./",
     "compile:webview": "tsc -p ./tsconfig.webview.json",
-    "test:webview": "npm run compile:webview && node --experimental-default-type=module ./test/run-tests.mjs",
+    "test:webview": "npm run compile:webview && node ./test/run-tests.mjs",
     "watch": "tsc -watch -p ./",
     "package": "npx --yes @vscode/vsce package",
     "publish:vsce": "npx --yes @vscode/vsce publish"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
-    "typescript": "^5.3.0"
+    "@types/node": "^26.5.0",
+    "@types/vscode": "^1.137.0",
+    "@vscode/vsce": "3.9.2",
+    "typescript": "^7.0.2"
   }
 }

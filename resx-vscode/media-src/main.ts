@@ -92,12 +92,8 @@ vscode.postMessage({ command: 'ready' });
         activeDumpRequestId: null,
         activeTopTab: persistedUiState.topTab,
         activeDumpSubTab: persistedUiState.dumpSubTab,
-        explainCache: new Map(), // name → data|null
-        explainPending: new Set(),
         iatIndex: new Map(), // funcName → dll
         entryPoint: null, // "0x00001234" from peinfo
-        tooltip: null,
-        tipTimer: null,
         ctxMenu: null,
         pdbPaths: [],
         pdbFile: '',
@@ -126,6 +122,15 @@ function persistUiState() {
         dumpSubTab: st.activeDumpSubTab,
         asmMetaWidth: st.asmMetaWidth,
     }));
+}
+function reportPresenceContext() {
+    const entry = st.activeTopTab === 'dump' ? currentNavEntry() : null;
+    vscode.postMessage({
+        command: 'presence_context',
+        topTab: st.activeTopTab,
+        dumpSubTab: st.activeTopTab === 'dump' ? st.activeDumpSubTab : undefined,
+        functionName: entry?.fn || entry?.label || undefined,
+    });
 }
 function esc(s) {
     return String(s ?? '')
@@ -1364,7 +1369,7 @@ function buildHeuristicInsnNotes(insns) {
     }
     return notes;
 }
-function fnLink(name, opts = {}) {
+function fnLink(name: string, opts: { dll?: string; rva?: string } = {}) {
     const cls = prefixClass(name);
     const el = document.createElement('span');
     el.className = 'fn-link' + (cls ? ` pfx-${cls}` : '');
@@ -1372,9 +1377,6 @@ function fnLink(name, opts = {}) {
     if (opts.dll)
         el.dataset.dll = opts.dll;
     el.textContent = name;
-    el.addEventListener('mouseenter', e => startTooltip(name, e));
-    el.addEventListener('mousemove', e => moveTooltip(e));
-    el.addEventListener('mouseleave', () => hideTooltip());
     el.addEventListener('contextmenu', e => showCtxMenu(e, name, opts.dll || null));
     if (opts.rva) {
         el.addEventListener('click', () => navigateRva(opts.rva, name));
@@ -1386,12 +1388,13 @@ function fnLink(name, opts = {}) {
     }
     return el;
 }
-document.querySelectorAll('.tab').forEach(btn => {
+document.querySelectorAll<HTMLElement>('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === btn));
-        document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${btn.dataset.tab}`));
+        document.querySelectorAll<HTMLElement>('.tab').forEach(t => t.classList.toggle('active', t === btn));
+        document.querySelectorAll<HTMLElement>('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${btn.dataset.tab}`));
         st.activeTopTab = btn.dataset.tab;
         persistUiState();
+        reportPresenceContext();
         if (btn.dataset.tab === 'flow') {
             ensureReconstructCfg();
         }
@@ -1421,8 +1424,8 @@ $('export-btn')?.addEventListener('click', () => exportCurrentView());
 if (st.activeTopTab && st.activeTopTab !== 'dump') {
     requestAnimationFrame(() => activateTab(st.activeTopTab));
 }
+requestAnimationFrame(() => reportPresenceContext());
 function activateTab(id) {
-    hideTooltip();
     const btn = document.querySelector(`.tab[data-tab="${id}"]`);
     if (btn)
         btn.dispatchEvent(new Event('click'));
@@ -1438,7 +1441,7 @@ function activateDumpSubTab(id) {
     const panel = $('panel-dump');
     if (!panel)
         return;
-    const target = panel.querySelector(`.stab[data-stab="${id}"]:not(.hidden)`) || panel.querySelector('.stab:not(.hidden)');
+    const target = panel.querySelector<HTMLElement>(`.stab[data-stab="${id}"]:not(.hidden)`) || panel.querySelector<HTMLElement>('.stab:not(.hidden)');
     if (!target)
         return;
     panel.querySelectorAll('.stab').forEach(b => b.classList.toggle('active', b === target));
@@ -1446,6 +1449,7 @@ function activateDumpSubTab(id) {
     panel.querySelectorAll('.stab-panel').forEach(p => p.classList.toggle('active', p.id === targetId));
     st.activeDumpSubTab = target.dataset.stab || 'disasm';
     persistUiState();
+    reportPresenceContext();
 }
 function readDumpSubTabScroll(id) {
     const panel = $(`stab-${id}`);
@@ -1633,7 +1637,6 @@ function _requestDump(entry, prefetch = false) {
     }
 }
 function _showDumpLoading(label) {
-    hideTooltip();
     initDumpShell();
     document.querySelectorAll('.stab-panel').forEach(p => { p.innerHTML = ''; });
     $('stab-disasm').innerHTML = '<p class="loading">Disassembling…</p>';
@@ -1641,7 +1644,7 @@ function _showDumpLoading(label) {
     _updateNavUI();
 }
 function _updateNavUI() {
-    const back = $('dump-back'), fwd = $('dump-fwd');
+    const back = $('dump-back') as HTMLButtonElement | null, fwd = $('dump-fwd') as HTMLButtonElement | null;
     if (back)
         back.disabled = !canNavBack();
     if (fwd)
@@ -1688,7 +1691,7 @@ function initDumpShell() {
             </div>`;
     $('dump-back').addEventListener('click', navBack);
     $('dump-fwd').addEventListener('click', navFwd);
-    panel.querySelectorAll('.stab').forEach(btn => {
+    panel.querySelectorAll<HTMLElement>('.stab').forEach(btn => {
         btn.addEventListener('click', () => {
             activateDumpSubTab(btn.dataset.stab || 'disasm');
         });
@@ -1701,7 +1704,7 @@ function setCurrentDepth(depth) {
         entry.funcsDepth = st.apiDepth;
 }
 function requestSymbolReload() {
-    const serverInp = $('pdb-server-input');
+    const serverInp = $('pdb-server-input') as HTMLInputElement | null;
     st.symServer = serverInp ? serverInp.value.trim() : st.symServer;
     vscode.postMessage({
         command: 'reload_syms',
@@ -1850,90 +1853,8 @@ function copyText(text) {
     ta.remove();
 }
 document.addEventListener('click', dismissCtxMenu);
-document.addEventListener('contextmenu', e => { if (!e.target.closest('#ctx-menu'))
+document.addEventListener('contextmenu', e => { if (!(e.target instanceof Element) || !e.target.closest('#ctx-menu'))
     dismissCtxMenu(); });
-document.addEventListener('scroll', () => hideTooltip(), true);
-window.addEventListener('blur', () => hideTooltip());
-window.addEventListener('resize', () => hideTooltip());
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden)
-        hideTooltip();
-});
-function startTooltip(name, e) {
-    if (st.tipTimer)
-        clearTimeout(st.tipTimer);
-    st._lastHovered = name;
-    st.tipTimer = setTimeout(() => {
-        const cached = st.explainCache.get(name);
-        if (cached === null)
-            return;
-        if (cached !== undefined) {
-            renderTooltip(name, cached, e);
-            return;
-        }
-        if (!st.explainPending.has(name)) {
-            st.explainPending.add(name);
-            vscode.postMessage({ command: 'explain', name });
-        }
-    }, 380);
-}
-function moveTooltip(e) { if (st.tooltip)
-    positionTooltip(e); }
-function hideTooltip() {
-    if (st.tipTimer) {
-        clearTimeout(st.tipTimer);
-        st.tipTimer = null;
-    }
-    if (st.tooltip) {
-        st.tooltip.remove();
-        st.tooltip = null;
-    }
-    st._lastHovered = null;
-}
-document.addEventListener('mousemove', e => {
-    if (!st.tooltip && !st.tipTimer)
-        return;
-    const target = e.target;
-    if (target instanceof Element && target.closest('.fn-link'))
-        return;
-    hideTooltip();
-});
-function renderTooltip(name, data, e) {
-    if (st.tooltip)
-        st.tooltip.remove();
-    const tip = document.createElement('div');
-    tip.id = 'tooltip';
-    st.tooltip = tip;
-    const cls = prefixClass(name);
-    tip.innerHTML = `<div class="tip-fn${cls ? ` pfx-${cls}` : ''}">${esc(name)}</div>`;
-    if (data.prefix) {
-        const p = data.prefix;
-        tip.innerHTML += `<div class="tip-pfx">${esc(p.key)} · ${esc(PREFIX_LABELS[cls] || p.title)} · ${esc(p.layer)}</div>`;
-    }
-    tip.innerHTML += `<div class="tip-sum">${esc(data.summary)}</div>`;
-    if (data.chunks?.length) {
-        for (const c of data.chunks)
-            tip.innerHTML += `<div class="tip-chunk"><span class="tip-chunk-tok">${esc(c.token)}</span><span>${esc(c.meaning)}</span></div>`;
-    }
-    if (data.notes?.length)
-        tip.innerHTML += `<div class="tip-note">${esc(data.notes[0])}</div>`;
-    document.body.appendChild(tip);
-    positionTooltip(e || { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 });
-}
-function positionTooltip(e) {
-    const tip = st.tooltip;
-    if (!tip)
-        return;
-    const pad = 10, vw = window.innerWidth, vh = window.innerHeight;
-    const tw = tip.offsetWidth || 300, th = tip.offsetHeight || 80;
-    let x = e.clientX + 14, y = e.clientY + 14;
-    if (x + tw > vw - pad)
-        x = e.clientX - tw - 4;
-    if (y + th > vh - pad)
-        y = e.clientY - th - 4;
-    tip.style.left = `${Math.max(pad, x)}px`;
-    tip.style.top = `${Math.max(pad, y)}px`;
-}
 (function initPdbPanel() {
     const btn = $('pdb-btn');
     if (!btn)
@@ -1975,7 +1896,7 @@ function positionTooltip(e) {
     btn.addEventListener('click', () => panel.classList.toggle('open'));
     _renderPathsList();
     $('pdb-add-path').addEventListener('click', () => {
-        const inp = ($('pdb-path-input'));
+        const inp = $('pdb-path-input') as HTMLInputElement;
         const val = inp.value.trim();
         if (val && !st.pdbPaths.includes(val)) {
             st.pdbPaths.push(val);
@@ -2062,9 +1983,6 @@ window.addEventListener('message', e => {
         case 'dump_result':
             renderDump(msg);
             break;
-        case 'explain_result':
-            _handleExplain(msg);
-            break;
         case 'file_picked':
             _handleFilePicked(msg);
             break;
@@ -2099,12 +2017,6 @@ function refreshAnalysisPanels() {
     $('panel-scan').innerHTML = '<p class="loading">Run scan to discover fuzz candidates.</p>';
     vscode.postMessage({ command: 'refresh' });
 }
-function _handleExplain(msg) {
-    st.explainPending.delete(msg.name);
-    st.explainCache.set(msg.name, msg.data || null);
-    if (st._lastHovered === msg.name && msg.data)
-        renderTooltip(msg.name, msg.data, null);
-}
 function _handleFilePicked(msg) {
     if (!msg.path)
         return;
@@ -2113,7 +2025,7 @@ function _handleFilePicked(msg) {
             st.pdbPaths.push(msg.path);
             _renderPathsList();
         }
-        const inp = $('pdb-path-input');
+        const inp = $('pdb-path-input') as HTMLInputElement | null;
         if (inp)
             inp.value = msg.path;
     }
@@ -2778,9 +2690,6 @@ function renderEat(msg) {
             link.className = 'fn-link';
             link.textContent = e.name;
             link.dataset.func = e.name;
-            link.addEventListener('mouseenter', ev => startTooltip(e.name, ev));
-            link.addEventListener('mousemove', ev => moveTooltip(ev));
-            link.addEventListener('mouseleave', () => hideTooltip());
             link.addEventListener('contextmenu', ev => showCtxMenu(ev, e.name, null));
             link.addEventListener('click', () => navigateInRoot(e.name));
             link.addEventListener('dblclick', () => navigateInRoot(e.name));
@@ -2864,9 +2773,6 @@ function renderIat(msg) {
                 link.textContent = imp.name;
                 link.dataset.func = imp.name;
                 link.title = `Open ${d.dll}!${imp.name} import entry in the current image`;
-                link.addEventListener('mouseenter', ev => startTooltip(imp.name, ev));
-                link.addEventListener('mousemove', ev => moveTooltip(ev));
-                link.addEventListener('mouseleave', () => hideTooltip());
                 link.addEventListener('contextmenu', ev => showCtxMenu(ev, imp.name, d.dll));
                 link.addEventListener('click', () => navigateRootRva(imp.slot_rva, `${d.dll}!${imp.name}`));
                 link.addEventListener('dblclick', () => navigateRootRva(imp.slot_rva, `${d.dll}!${imp.name}`));
@@ -2970,9 +2876,6 @@ function renderSyms(msg) {
             link.className = 'fn-link';
             link.textContent = s.name;
             link.dataset.func = s.name;
-            link.addEventListener('mouseenter', ev => startTooltip(s.name, ev));
-            link.addEventListener('mousemove', ev => moveTooltip(ev));
-            link.addEventListener('mouseleave', () => hideTooltip());
             link.addEventListener('contextmenu', ev => showCtxMenu(ev, s.name, null));
             link.addEventListener('click', () => navigateRootRva(s.rva, s.name));
             link.addEventListener('dblclick', () => navigateRootRva(s.rva, s.name));
@@ -3198,7 +3101,7 @@ function renderTriage(msg) {
         panel.innerHTML = '<p class="no-data">No triage findings.</p>';
         return;
     }
-    const grouped = {};
+    const grouped: Record<string, any[]> = {};
     if (startupRoutines.length) {
         grouped['Startup Execution'] = startupRoutines.map(entry => ({
             category: 'Startup Execution',
@@ -3214,7 +3117,7 @@ function renderTriage(msg) {
     lbl.textContent = `${totalFindings} findings`;
     const container = document.createElement('div');
     panel.appendChild(container);
-    const allRows = [];
+    const allRows: Array<{ row: HTMLDivElement; grp: HTMLDetailsElement }> = [];
     for (const [cat, items] of Object.entries(grouped)) {
         const grp = document.createElement('details');
         grp.className = 'finding-group';
@@ -3267,7 +3170,7 @@ function renderTriage(msg) {
                 vis.add(grp);
             }
         });
-        container.querySelectorAll('.finding-group').forEach(g => g.style.display = vis.has(g) ? '' : 'none');
+        container.querySelectorAll<HTMLElement>('.finding-group').forEach(g => g.style.display = vis.has(g) ? '' : 'none');
         lbl.textContent = re ? `${visible} / ${totalFindings} findings` : `${totalFindings} findings`;
     });
 }
@@ -3349,7 +3252,6 @@ function renderDevLogs() {
     panel.appendChild(list);
 }
 function renderDump(msg) {
-    hideTooltip();
     if (msg.cacheKey && !msg.error)
         st.dumpCache.set(msg.cacheKey, msg);
     if (msg.prefetch)
@@ -3401,7 +3303,7 @@ function renderDump(msg) {
     const hasHex = !isImportSlot && hasInsns;
     const callArgumentNotes = buildCallArgumentNotes(d.instructions || [], d.api_calls || [], d.arch || '', d.sections || [], d.image_base || '', d.strings || []);
     const callCommentMap = buildCallCommentMap(callArgumentNotes);
-    document.querySelectorAll('.stab').forEach(btn => {
+    document.querySelectorAll<HTMLElement>('.stab').forEach(btn => {
         const s = btn.dataset.stab;
         const show = s === 'disasm' || (s === 'calls' && hasCalls) ||
             (s === 'xrefs' && hasXrefs) || (s === 'strings' && hasStrings) || (s === 'cfg' && hasCfg) ||
@@ -4023,10 +3925,10 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null, sec
     wireAsmFlow(view, insnPane, insnBody, flowSvg, insns, apiCalls, imageName, insnRowByRva);
     return view;
 }
-function collectAsmFlowEdges(insns, apiCalls, imageName, rowByRva) {
-    const callIndex = new Map();
-    const rowList = insns.map(insn => normalizeRva(insn?.rva)).filter(Boolean);
-    const rowIndex = new Map(rowList.map((rva, idx) => [rva, idx]));
+function collectAsmFlowEdges(insns: any[], apiCalls: any[], imageName: string, rowByRva: Map<string, HTMLElement>) {
+    const callIndex = new Map<string, any>();
+    const rowList = insns.map(insn => normalizeRva(insn?.rva)).filter((rva): rva is string => !!rva);
+    const rowIndex = new Map<string, number>(rowList.map((rva, idx) => [rva, idx]));
     (apiCalls || []).forEach(call => {
         if (call?.rva)
             callIndex.set(normalizeRva(call.rva), call);
@@ -4164,8 +4066,8 @@ function wireAsmPaneSync(leftPane, rightPane) {
     leftPane.addEventListener('scroll', () => sync(leftPane, rightPane));
     rightPane.addEventListener('scroll', () => sync(rightPane, leftPane));
 }
-function extractPaneText(node) {
-    return Array.from(node.querySelectorAll('.asm-row'))
+function extractPaneText(node: Element) {
+    return Array.from(node.querySelectorAll<HTMLElement>('.asm-row'))
         .map(row => row.textContent || '')
         .join('\n')
         .trim();
@@ -4179,9 +4081,9 @@ function extractPanelText(node) {
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 }
-function extractDisasmText(insnRows, metaRows) {
-    const leftRows = Array.from(insnRows.querySelectorAll('.asm-row'));
-    const rightRows = Array.from(metaRows.querySelectorAll('.asm-row'));
+function extractDisasmText(insnRows: Element, metaRows: Element) {
+    const leftRows = Array.from(insnRows.querySelectorAll<HTMLElement>('.asm-row'));
+    const rightRows = Array.from(metaRows.querySelectorAll<HTMLElement>('.asm-row'));
     return leftRows.map((row, idx) => {
         const metaRow = rightRows[idx];
         const rva = metaRow?.querySelector('.asm-rva')?.textContent?.trim() || '';
@@ -4269,9 +4171,9 @@ function formatDisasmHeaderText(label, d, hdrMeta, currentSyscall = null, slotSe
         lines.push(`Hooks: ${d.hook_indicators.join(', ')}`);
     return lines.join('\n').trim();
 }
-function wireDisasmSearch(input, label, insnRows, metaRows) {
-    const leftRows = Array.from(insnRows.querySelectorAll('.asm-row'));
-    const rightRows = Array.from(metaRows.querySelectorAll('.asm-row'));
+function wireDisasmSearch(input: HTMLInputElement, label: HTMLElement, insnRows: Element, metaRows: Element) {
+    const leftRows = Array.from(insnRows.querySelectorAll<HTMLElement>('.asm-row'));
+    const rightRows = Array.from(metaRows.querySelectorAll<HTMLElement>('.asm-row'));
     const update = () => {
         const raw = input.value.trim();
         let re = null;

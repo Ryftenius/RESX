@@ -12,6 +12,20 @@ interface PendingNavigation {
     loadSymbols?: boolean;
 }
 
+const RESX_PRESENCE_TABS = [
+    'overview', 'entry', 'triage', 'sections', 'exports', 'imports',
+    'symbols', 'types', 'flow', 'scan', 'dump', 'dev',
+] as const;
+const RESX_DUMP_PRESENCE_SUBTABS = ['disasm', 'calls', 'xrefs', 'strings', 'cfg', 'recomp', 'hex'] as const;
+
+function isResxPresenceTab(value: unknown): value is (typeof RESX_PRESENCE_TABS)[number] {
+    return typeof value === 'string' && (RESX_PRESENCE_TABS as readonly string[]).includes(value);
+}
+
+function isResxDumpPresenceSubtab(value: unknown): value is (typeof RESX_DUMP_PRESENCE_SUBTABS)[number] {
+    return typeof value === 'string' && (RESX_DUMP_PRESENCE_SUBTABS as readonly string[]).includes(value);
+}
+
 function normalizeModuleArg(name: string): string {
     if (/\.(dll|exe|sys)$/i.test(name)) return name;
     if (/^(ntoskrnl|ntkrnlmp|ntkrnlpa|ntkrpamp)$/i.test(name)) return `${name}.exe`;
@@ -234,6 +248,28 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
         const send = (msg: object): void => { webview.postMessage(msg); };
         let symReloadToken = 0;
 
+        const publishPresence = async (value: unknown): Promise<void> => {
+            if (!webviewPanel.active || !value || typeof value !== 'object') return;
+            const payload = value as { topTab?: unknown; dumpSubTab?: unknown; functionName?: unknown };
+            if (!isResxPresenceTab(payload.topTab)) return;
+
+            const dumpSubTab = payload.topTab === 'dump' && isResxDumpPresenceSubtab(payload.dumpSubTab)
+                ? payload.dumpSubTab
+                : undefined;
+            const functionName = payload.topTab === 'dump' && typeof payload.functionName === 'string'
+                ? payload.functionName.trim().slice(0, 256) || undefined
+                : undefined;
+            try {
+                await vscode.commands.executeCommand('vscord.resx.updatePresence', {
+                    topTab: payload.topTab,
+                    dumpSubTab,
+                    functionName,
+                });
+            } catch {
+                // VSCord is optional; RESX remains fully functional without it.
+            }
+        };
+
         function cfgOpts(): RunOptions {
             const cfg = vscode.workspace.getConfiguration('resx');
             return {
@@ -286,14 +322,6 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                         prefetch: !!msg.prefetch,
                         ...result
                     });
-                    break;
-                }
-
-                case 'explain': {
-                    const result = await runJson(this.context, ['explain', msg.name, '--api']);
-                    const d = unwrapObjectPayload<any>(result.data, 'explain');
-                    const useful = d && (d.exact_match || d.prefix || (d.chunks && d.chunks.length > 0));
-                    send({ type: 'explain_result', name: msg.name, data: useful ? d : null });
                     break;
                 }
 
@@ -419,12 +447,18 @@ export class ResxEditorProvider implements vscode.CustomReadonlyEditorProvider {
                 }
 
                 case 'ready': {
+                    await publishPresence(msg);
                     const pending = ResxEditorProvider.pendingNavigation.get(docKey);
                     send({ type: 'dev_log_history', entries: getRunTraceHistory() });
                     if (pending) {
                         ResxEditorProvider.pendingNavigation.delete(docKey);
                         send({ type: 'external_navigate', ...pending });
                     }
+                    break;
+                }
+
+                case 'presence_context': {
+                    await publishPresence(msg);
                     break;
                 }
             }
