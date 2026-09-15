@@ -1,20 +1,189 @@
 use crate::core::config::Cli;
+use clap::CommandFactory;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+const SECTIONS: &[&str] = &[
+    "inspect", "code", "evidence", "recovery", "compare", "options",
+];
+const COMMANDS: &[&str] = &[
+    "dump",
+    "xrefs",
+    "cfg",
+    "reconstruct-cfg",
+    "intelli",
+    "behavior",
+    "contracts",
+    "ipc",
+    "network",
+    "crypto",
+    "strings",
+    "payload",
+    "driver",
+    "ioctl",
+    "entropy",
+    "patch",
+    "types",
+    "peinfo",
+    "sections",
+    "eat",
+    "iat",
+    "syms",
+    "pechk",
+    "priority",
+    "callers",
+    "locate",
+    "locate-sym",
+    "scan",
+    "diff",
+    "index",
+    "hunt",
+    "yara",
+    "find",
+    "edrchk",
+    "follow",
+    "recomp",
+    "symbols",
+    "funcs",
+    "refs",
+    "update",
+    "config",
+];
+
+/// Accept dumpbin-style `/command` and `/option:value` spellings for every clap long option.
+/// Unknown slash-prefixed values are preserved so paths are never reinterpreted as flags.
+pub fn normalize_cli_syntax(raw_args: &[String]) -> Vec<String> {
+    if raw_args.is_empty() {
+        return Vec::new();
+    }
+    let long_options = slash_long_options();
+    let mut out = Vec::with_capacity(raw_args.len() + 2);
+    out.push(raw_args[0].clone());
+    for (index, argument) in raw_args.iter().enumerate().skip(1) {
+        if argument == "/?" {
+            out.push("--help".to_owned());
+            continue;
+        }
+        let Some(body) = argument.strip_prefix('/') else {
+            out.push(argument.clone());
+            continue;
+        };
+        if index == 1 {
+            if let Some(topic) = body
+                .strip_prefix("help:")
+                .or_else(|| body.strip_prefix("help="))
+            {
+                out.push("help".to_owned());
+                if !topic.is_empty() {
+                    out.push(topic.to_owned());
+                }
+                continue;
+            }
+        }
+        if index == 1
+            && (COMMANDS
+                .iter()
+                .chain(SECTIONS)
+                .any(|name| body.eq_ignore_ascii_case(name))
+                || body.eq_ignore_ascii_case("help")
+                || body.eq_ignore_ascii_case("version"))
+        {
+            out.push(body.to_ascii_lowercase());
+            continue;
+        }
+        let (key, value) = body
+            .split_once(':')
+            .or_else(|| body.split_once('='))
+            .unwrap_or((body, ""));
+        let canonical = match key.to_ascii_lowercase().as_str() {
+            "v" => Some("verbose".to_owned()),
+            "q" => Some("quiet".to_owned()),
+            "o" => Some("out".to_owned()),
+            "n" => Some("ordinal".to_owned()),
+            "h" => Some("help".to_owned()),
+            other => long_options.get(other).cloned(),
+        };
+        if let Some(canonical) = canonical {
+            out.push(format!("--{canonical}"));
+            if !value.is_empty() {
+                out.push(value.to_owned());
+            }
+        } else {
+            out.push(argument.clone());
+        }
+    }
+    out
+}
+
+fn slash_long_options() -> &'static HashMap<String, String> {
+    static OPTIONS: OnceLock<HashMap<String, String>> = OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        // Clap's generated command graph is large in debug builds. Construct it on a bounded
+        // worker stack so the Windows 1 MiB main-thread reserve cannot be exhausted at startup.
+        std::thread::Builder::new()
+            .name("resx-schema".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(build_slash_long_options)
+            .ok()
+            .and_then(|worker| worker.join().ok())
+            .unwrap_or_default()
+    })
+}
+
+fn build_slash_long_options() -> HashMap<String, String> {
+    let mut long_options = HashMap::new();
+    for argument in Cli::command().get_arguments() {
+        if let Some(long) = argument.get_long() {
+            let canonical = long.to_owned();
+            long_options.insert(long.to_ascii_lowercase(), canonical.clone());
+            for alias in argument.get_all_aliases().into_iter().flatten() {
+                long_options.insert(alias.to_ascii_lowercase(), canonical.clone());
+            }
+            if let Some(short) = argument.get_short() {
+                long_options.insert(short.to_ascii_lowercase().to_string(), canonical.clone());
+            }
+            for short in argument.get_all_short_aliases().into_iter().flatten() {
+                long_options.insert(short.to_ascii_lowercase().to_string(), canonical.clone());
+            }
+        }
+    }
+    long_options
+}
 
 pub const APP_NAME: &str = "RESX";
-pub const ORG_NAME: &str = "TITAN Softwork Solutions";
+pub const ORG_NAME: &str = "Ryftenius";
 
 pub fn version_string() -> String {
     format!("{} v{}", APP_NAME, env!("CARGO_PKG_VERSION"))
 }
 
+pub fn product_banner() -> String {
+    format!(
+        "Ryftenius (R) RESX Reverse Engineering Suite Extended, Version {}\nCopyright (C) 2026 Ryftenius.\nSEE DEEPER",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 pub fn is_help_request(raw_args: &[String]) -> bool {
-    raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("help")
+    (raw_args.len() >= 2
+        && (raw_args[1].eq_ignore_ascii_case("help")
+            || (raw_args.len() == 2
+                && SECTIONS
+                    .iter()
+                    .any(|name| raw_args[1].eq_ignore_ascii_case(name)))))
         || raw_args.iter().any(|arg| arg == "--help" || arg == "-h")
 }
 
 pub fn help_topic(raw_args: &[String]) -> Option<&str> {
     if raw_args.len() >= 3 && raw_args[1].eq_ignore_ascii_case("help") {
         return raw_args.get(2).map(String::as_str);
+    }
+    if raw_args.len() == 2
+        && SECTIONS
+            .iter()
+            .any(|name| raw_args[1].eq_ignore_ascii_case(name))
+    {
+        return Some(raw_args[1].as_str());
     }
     if raw_args.len() >= 3 && raw_args.iter().any(|arg| arg == "--help" || arg == "-h") {
         let candidate = raw_args[1].as_str();
@@ -31,241 +200,32 @@ pub fn is_version_request(raw_args: &[String]) -> bool {
 }
 
 pub fn print_usage() {
-    eprintln!(
-        r#"
-{name} v{version}
-by {org}
+    println!(
+        r#"{}
 
-Windows binary recon CLI for exports, PDB-backed symbols, PE metadata, CFG recovery,
-switch-map recovery, hook checks, caller tracing, Intelli triage, and rapid analysis.
+Usage: resx <command> [arguments] [options]
 
-USAGE
-  resx dump <dll> <function> [options]
-  resx dump <dll> --at <addr> [options]
-  resx dump <dll> --ordinal <n> [options]
-  resx xrefs <dll> <function-or-import> [options]
-  resx cfg <dll> <function> [options]
-  resx cfg <dll> --at <addr> [options]
-  resx cfg <dll> --ordinal <n> [options]
-  resx reconstruct-cfg <dll> [flow options]
-  resx intelli <dll> [function] [options]
-  resx behavior <dll> [options]
-  resx unpack <dll> [options]
-  resx entropy <dll> [options]
-  resx patch <dll> --at <addr> --patch-bytes <hex> [patch options]
-  resx diff <image-a> <image-b> [image-c ...] [diff options]
-  resx index <dir-or-image> --db <file> [corpus options]
-  resx hunt <sample> --db <file> [corpus options]
-  resx types <dll> [query] [options]
-
-  resx peinfo <dll> [options]
-  resx sections <dll> [options]
-  resx eat <dll> [options]
-  resx iat <dll> [options]
-  resx syms <dll> [options]
-  resx pechk <dll> [options]
-  resx priority
-
-  resx callers <dll> <function> [follow options]
-
-  resx locate <funcname> [options]
-  resx locate-sym <funcname> [options]
-  resx explain <name> [--prefix|--api] [options]
-
-  resx scan <path> [--jsonl] [scan options]
-  resx yara <dll> <rule.yar> [options]
-  resx update [options]
-  resx help
-  resx help <command>
-
-COMMANDS
-  dump        Disassemble or reconstruct one target by name, RVA, or ordinal.
-  xrefs       Show incoming intra-image CALL/JMP references to one target.
-  cfg         Show a control-flow graph view for one target by name, RVA, or ordinal.
-  reconstruct-cfg
-              Rebuild a best-effort startup-to-exit flow waterfall for one image.
-  intelli     Run heuristic triage over a target image or function.
-  behavior    Static anti-analysis, loader, syscall, TLS, and JIT triage.
-  unpack      Static protected-file unpacking and VM-lifting triage.
-  entropy     Render an entropy and byte-factor graph over executable code.
-  patch       Apply guarded byte patches to a PE image copy or explicit in-place target.
-  diff        Compare normalized function and control-flow structure between images.
-  index       Build a reusable structural fingerprint corpus.
-  hunt        Rank corpus images related to one sample by code structure.
-  types       Browse PDB-backed type names and symbol references.
-  peinfo      Show PE metadata, version resources, signer info, and headers.
-  sections    Show section layout, entropy, and protection expectations.
-  eat         Dump the Export Address Table.
-  iat         Dump the Import Address Table.
-  syms        Dump resolved module and PDB symbols.
-  pechk       Run PE header and layout anomaly checks.
-  priority    Open the generated priority config used by locate and callers.
-  callers     Reverse-trace callers across the priority set.
-  locate      Show export-backed matches in the priority list.
-  locate-sym  Show export/symbol-backed matches in the priority list.
-  explain     Explain a prefix or API-style symbol name from the built-in glossary.
-  scan        Inventory EXE/DLL/SYS files and rank fuzz target candidates.
-  yara        Scan a PE image with one or more YARA rules.
-  update      Pull the latest version from the current git remote/branch.
-  help        Show this help text, or command-focused help with `resx help <command>`.
-
-DUMP / INTELLI OPTIONS
-  --at <addr>                dump by RVA, PE VA, or file offset instead of by function name
-  --ordinal <n>              dump by export ordinal
-  --recomp                   show C-like reconstruction
-  --c-out <file>             write reconstruction to a C file
-  --edrchk                   compare disk vs already-loaded in-memory prologue
-  --unsafe-map-image         allow mapping an on-disk image into RESX for checks that need memory bytes
-  --hookchk                  show static entry-hook / thunk indicators
-  --intelli                  run heuristic triage
-  --hostile                  aggressive tracing: recursive register backward-slice,
-                             decoder-driven reverse-index, indirect-JMP emission,
-                             suspicion annotations in disasm output
-  --xrefs                    show incoming intra-image CALL/JMP references to the target
-  --strings                  show referenced string literals
-  --funcs                    show API call map: every CALL/JMP with its resolved target
-  --funcs-depth <N>          recursively trace internal subs N levels deep (implies --funcs)
-  --cfg text                 show a colour-coded basic control-flow graph
-  --reconstruct-cfg          reconstruct startup/TLS flow as an ASCII waterfall
-  --thread-filter <term>     filter reconstruct-cfg to thread paths/APIs
-                             values: all, spawned, api, or text
-  --api-filter <term>        filter reconstruct-cfg to matching API/function paths
-  --explain                  explain the current dump target name with prefix/body glossary hints
-  --prefix                   force explain-mode prefix interpretation
-  --api                      force explain-mode API/symbol interpretation
-  --follow-jmp               follow entry-point thunk (default: on)
-  --no-follow-jmp            disable entry-point thunk following
-  --rebase <addr>            compute rebased addresses
-
-SYMBOL OPTIONS
-  --pdb <file>               explicit PDB file
-  --sym-path <path>          extra symbol path(s)
-  --sym-server <url>         symbol server override
-  --reload                   bypass in-memory/disk PDB cache and reload symbols
-  --no-pdb                   disable symbol/PDB loading
-
-FOLLOW OPTIONS
-  --depth <n>                trace depth
-  --max-callers <n>          cap callers per node
-  --max-total <n>            cap total graph size
-  --format tree|flat|list    output style
-  --show-rva                 show owning function RVA
-  --show-site                show call-site RVA(s)
-  --filter-dll <text>        restrict caller DLL names
-  --include-dir <dir>        add extra directories to scan (.dll/.sys, plus .exe with --scan-exe)
-  --include-image <dll>      explicitly include extra images to scan
-  --scan-exe                 include EXEs
-  --include <glob>           include filter across the whole scan list
-  --scope-file <glob>        filter only files discovered via --include-dir (alias: --include-file)
-  --exclude <glob>           exclude filter
-  --max-dll-size <mb>        max image size
-  --workers <n>              parallel workers
-
-SCAN OPTIONS
-  --jsonl                    emit one JSON object per image
-  --extensions <list>        comma-separated extensions, default exe,dll,sys
-  --max-files <n>            cap files scanned
-  --max-file-mb <mb>         skip images above this size
-  --max-candidates <n>       cap fuzz candidates per image
-
-DIFF OPTIONS
-  --diff-mode quick|balanced|deep
-  --diff-threshold <0-100>   minimum function match score, default 65
-  --include-weak             include weak 50-64 similarity candidates
-  --max-functions <n>        cap functions decoded per image, default 2000
-  --left-pdb <file>          explicit PDB for the left image
-  --right-pdb <file>         explicit PDB for the right image
-  --show-cfg-diff <fn|rva|auto>
-                             render a side-by-side basic-block diff for one matched function
-  --cfg-diff-format text|json|dot
-                             output format for --show-cfg-diff, default text
-  --cfg-diff-out <file>      write the CFG diff view to a file
-  --max-cfg-blocks <n>       cap CFG diff blocks per side, default 128
-  --diff-graph               emit a code/control-structure heatmap
-  --diff-graph-format text|json|dot
-                             output format for --diff-graph, default text
-  --diff-graph-out <file>    write the heatmap/graph view to a file
-
-CORPUS OPTIONS
-  --db <file>                 corpus index path, default resx-corpus.json
-  --extensions <list>         index extensions, default exe,dll,sys
-  --max-files <n>             cap files indexed
-  --max-file-mb <mb>          skip images above this size
-  --max-candidates <n>        cap hunt candidates printed
-
-PATCH OPTIONS
-  --at <addr>                 patch by RVA, PE VA, or file offset
-  --patch-bytes <hex>         replacement bytes, e.g. 90 90, 9090, or 0x90,0x90
-  --expect <hex>              require original bytes before patching
-  --patch-out <file>          write patched copy to this path
-  --dry-run                   validate and report without writing
-  --in-place                  patch the source image itself
-  --overwrite                 allow replacing an existing --patch-out/default copy
-  --update-checksum           recalculate and write the PE optional-header checksum
-
-GLOBAL OPTIONS
-  --arch <auto|x86|x64>
-  --path <dir>
-  --priority
-  --no-system
-  --no-cwd
-  --no-path
-  --bytes[=n] / --no-bytes  show instruction bytes; optional n also sets --max-bytes
-  --show-offsets
-  --intel / --att
-  --json
-  --out <file>
-  --color / --no-color
-  --verbose / --quiet
-  --version
-  --help / -h
+SECTION     PURPOSE          COMMANDS
+  inspect   PE and symbols   peinfo sections eat iat syms types pechk
+  code      Code and flow    dump xrefs cfg reconstruct-cfg callers
+  evidence  Static evidence  contracts driver ioctl ipc network crypto strings
+  recovery  Decode/edit      payload patch
+  compare   Compare/find     diff index hunt scan locate locate-sym
+  options   Shared flags     output, symbols, verbosity and saved preferences
 
 EXAMPLES
-  resx dump kernel32.dll CreateFileW --recomp --bytes
-  resx dump kernel32.dll CreateFileW --funcs --xrefs
-  resx xrefs .\driver.sys WdfDeviceCreate
-  resx intelli suspicious.dll
-  resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
-  resx behavior suspicious.dll --json
-  resx unpack suspicious.dll
-  resx unpack .\packed.dll --json
-  resx entropy suspicious.dll --entropy-window 2048 --entropy-stride 1024
-  resx patch .\sample.dll --at 0x1200 --patch-bytes "90 90" --expect "55 48" --patch-out .\sample.patched.dll
   resx peinfo .\blackbird.sys
-  resx sections ntdll.dll
-  resx eat kernel32.dll
-  resx iat kernel32.dll
-  resx syms ntoskrnl.exe --verbose
-  resx pechk .\sample.dll
-  resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
-  resx cfg ntdll.dll --at 0x161F40
-  resx reconstruct-cfg suspicious.dll --depth 6 --max-total 300
-  resx diff .\old.dll .\new.dll --json
-  resx diff .\old.dll .\new.dll .\canary.dll --diff-graph
-  resx index .\samples --db .\samples.resxdb --no-pdb
-  resx hunt .\unknown.dll --db .\samples.resxdb --diff-threshold 70
-  resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
-  resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
-  resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
-  resx priority
-  resx locate NtOpenProcess --include-dir C:\Work\Drivers
-  resx locate-sym NtOpenProcess --include-image .\mydriver.sys
-  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
-  resx explain Nt
-  resx explain NtQuerySystemInformation
-  resx dump ntoskrnl.exe NtQuerySystemInformation --explain
-  resx syms .\J58.dll --pdb .\J58.pdb
-  resx yara suspicious.dll .\rules\triage.yar
-  resx update
-  resx peinfo --example
-  resx help behavior
-  resx help unpack
-  resx help entropy
-  resx dump --help
-"#,
-        name = APP_NAME,
-        version = env!("CARGO_PKG_VERSION"),
-        org = ORG_NAME,
+  resx ioctl .\J58.dll --json
+  resx dump kernel32.dll CreateFileW --recomp
+  resx /dump kernel32.dll entry /bytes:96
+  resx config --command-style slash --entry-macro ep
+
+DETAILS
+  resx code             Open the code and flow section
+  resx help ioctl       Usage, examples and flags for one command
+  resx ioctl --help     Same command help
+  resx help options     Shared options and saved preferences"#,
+        product_banner()
     );
 }
 
@@ -277,7 +237,14 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "reconstruct-cfg",
         "intelli",
         "behavior",
-        "unpack",
+        "contracts",
+        "ipc",
+        "network",
+        "crypto",
+        "strings",
+        "payload",
+        "driver",
+        "ioctl",
         "entropy",
         "patch",
         "types",
@@ -291,12 +258,12 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "callers",
         "locate",
         "locate-sym",
-        "explain",
         "scan",
         "diff",
         "index",
         "hunt",
         "yara",
+        "find",
         "edrchk",
         "follow",
         "recomp",
@@ -304,6 +271,7 @@ pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
         "funcs",
         "refs",
         "update",
+        "config",
     ];
     if raw_args.len() >= 2 {
         let first = raw_args[1].as_str();
@@ -335,7 +303,12 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
 
     let mut rewritten = vec![raw_args[0].clone()];
     match cmd.as_str() {
-        "dump" => rewritten.extend(raw_args.iter().skip(2).cloned()),
+        "dump" | "driver" | "ioctl" | "contracts" | "ipc" | "network" | "crypto" | "payload"
+        | "strings" => rewritten.extend(raw_args.iter().skip(2).cloned()),
+        "config" => {
+            rewritten.extend(raw_args.iter().skip(2).cloned());
+            rewritten.push("--resx-config".to_owned());
+        }
         "xrefs" | "refs" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--xrefs".to_string());
@@ -357,10 +330,6 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
         "behavior" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
             rewritten.push("--behavior".to_string());
-        }
-        "unpack" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--unpack".to_string());
         }
         "entropy" => {
             rewritten.extend(raw_args.iter().skip(2).cloned());
@@ -407,10 +376,6 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
             rewritten.push("--locate-sym".to_string());
             rewritten.extend(raw_args.iter().skip(2).cloned());
         }
-        "explain" => {
-            rewritten.push("--explain".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
         "scan" => {
             rewritten.push("--resx-scan".to_string());
             if let Some(root) = raw_args.get(2) {
@@ -441,6 +406,18 @@ pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
                 rewritten.extend(raw_args.iter().skip(4).cloned());
             } else {
                 rewritten.extend(raw_args.iter().skip(2).cloned());
+            }
+        }
+        "find" => {
+            if raw_args.len() >= 4 {
+                rewritten.push(raw_args[2].clone());
+                rewritten.push("--resx-find".to_string());
+                rewritten.push("--find".to_string());
+                rewritten.push(raw_args[3].clone());
+                rewritten.extend(raw_args.iter().skip(4).cloned());
+            } else {
+                rewritten.extend(raw_args.iter().skip(2).cloned());
+                rewritten.push("--resx-find".to_string());
             }
         }
         "update" => {
@@ -486,521 +463,342 @@ fn rewrite_patch_command(raw_args: &[String]) -> Vec<String> {
     rewritten
 }
 
-pub fn print_examples(topic: &str) {
-    let topic = topic.to_ascii_lowercase();
-    let body = match topic.as_str() {
-        "update" => {
-            r#"
-UPDATE HELP
-Usage:
-  resx update [--quiet]
+mod examples;
+pub use examples::print_examples;
+
+fn all_help() -> String {
+    // Building and rendering the generated clap graph exceeds the Windows main
+    // thread's 1 MiB stack in debug builds. Keep help generation deterministic,
+    // but render it on the same bounded worker-stack model used by slash syntax.
+    let flags = std::thread::Builder::new()
+        .name("resx-help-schema".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut parser = Cli::command();
+            parser.render_long_help().to_string()
+        })
+        .ok()
+        .and_then(|worker| worker.join().ok())
+        .unwrap_or_else(|| "  <unable to render generated operator arguments>".to_owned());
+    format!(
+        r#"{}
+
+COMPLETE COMMAND REFERENCE
+
+Inspect
+  peinfo  sections  pechk  eat  iat  syms  types
+
+Code and flow
+  dump  xrefs  refs  cfg  reconstruct-cfg  callers  follow  recomp  funcs
+  intelli  behavior
+
+Evidence and search
+  contracts  driver  ioctl  ipc  network  crypto  strings  entropy
+  yara  find  scan  locate  locate-sym  edrchk
+
+Recovery and comparison
+  payload  patch
+  diff  index  hunt
+
+Configuration
+  priority  symbols  config  update
+
+COMMAND HELP
+  resx help <command>               Detailed usage and examples
+  resx <command> --help             Same command help
+  resx help all                     This complete reference
+
+ALL OPERATOR ARGUMENTS AND FLAGS
+{}
+
+INTERNAL COMMAND-ROUTING FLAGS
+  --patch  --resx-find  --resx-scan  --resx-diff  --resx-index  --resx-hunt
+  --resx-config
+
+These internal switches are shown for completeness. Use their command forms above.
+Slash syntax is accepted for every long operator flag, for example /verbose and /out:file."#,
+        product_banner(),
+        flags.trim()
+    )
+}
+
+fn section_help(topic: &str) -> Option<&'static str> {
+    Some(match topic {
+        "contracts" => {
+            r"CONTRACTS | Bounded x64 API arguments and producer relationships
+Usage: resx contracts <image> [--json] [-v]
 
 Examples:
-  resx update
-  resx update --quiet
+  resx contracts .\J58.dll --json
+  resx contracts .\sample.exe -v --out contracts.json
 
-NOTES
-  Runs git fetch/pull against the current repository remote and branch.
-  Intended for source checkouts, not arbitrary installed binaries.
-"#
+Includes IPC, network, crypto and IOCTL/NDIS contracts. Unknown values remain
+unknown; reports include instruction/call budgets. No target execution."
         }
-        "intelli" => {
-            r#"
-INTELLI HELP
-Usage:
-  resx intelli <image> [function] [dump options]
+        "ipc" => {
+            r"IPC | Named pipes, ALPC, RPC, COM and shared mappings
+Usage: resx ipc <image> [--json] [-v]
 
 Examples:
-  resx intelli suspicious.dll
-  resx intelli suspicious.dll WinMain --hookchk --cfg text --strings
-  resx dump suspicious.dll --intelli
-  resx dump suspicious.dll WinMain --intelli --json
-  resx intelli .\packed.dll --funcs --funcs-depth 2 --hostile --no-pdb
+  resx ipc .\BlackbirdController.exe --json
+  resx ipc .\sample.exe -v --out ipc.json
 
-NOTES
-  `intelli` is a first-class command alias for dump-driven heuristic triage.
-  It is useful when you want imports, strings, hooks, and signal tags quickly.
-"#
+Static names, arguments and producer references. Live peers and shared kernel
+objects require runtime evidence."
         }
-        "behavior" => {
-            r#"
-BEHAVIOR HELP
-Usage:
-  resx behavior <image> [--json]
+        "network" => {
+            r"NETWORK | Endpoint candidates and HTTP/socket configuration
+Usage: resx network <image> [--json] [-v]
 
 Examples:
-  resx behavior suspicious.dll
-  resx behavior suspicious.dll --json
-  resx behavior .\packed-loader.dll --json --out .\packed-loader.behavior.json
-  resx behavior .\driver.sys --no-pdb --path C:\Windows\System32\drivers
+  resx network .\sample.exe --json
+  resx network .\sample.exe -v --out endpoints.json
 
-NOTES
-  Static triage for syscall stubs, CPUID/timing/descriptor-table checks,
-  trap/debug instructions, TLS callbacks, executable-memory APIs, dynamic
-  loader APIs, PEB/TEB segment probes, and simple generated-code clusters.
-"#
+Recovers available host, port, method, path and sockaddr fields. No endpoint is
+contacted. Endpoint presence does not establish C2 activity."
         }
-        "unpack" => {
-            r#"
-UNPACK HELP
-Usage:
-  resx unpack <image> [--json]
+        "crypto" => {
+            r"CRYPTO | Imported algorithm, provider and mode configuration
+Usage: resx crypto <image> [--json] [-v]
 
 Examples:
-  resx unpack suspicious.dll
-  resx unpack .\packed-loader.exe --json
-  resx unpack .\protected.dll --no-pdb --hostile
-  resx unpack .\vmprotected.exe --json --out .\vmprotected.unpack.json
-  resx dump .\protected.dll --at 0x401000 --hostile --funcs --strings
-  resx cfg .\protected.dll --at 0x402A10 --hostile --max-insns 1200
+  resx crypto .\sample.exe --json
+  resx crypto .\J58.dll -v --out crypto.json
 
-NOTES
-  Static protected-file triage for packer/protector markers, high-entropy and
-  writable executable sections, sparse imports, CPUID/timing checks, OEP/handoff
-  candidates, runtime import-rebuild leads, and possible VM dispatcher/handler sites.
-  Layer 2 adds bounded disassembly windows, import rebuild plans, and VM handler
-  sketches for follow-up lifting work.
-  It emits leads for malware-analysis unpacking and VM lifting workflows; it does
-  not currently produce a rebuilt unpacked binary.
-"#
+Static CNG/CAPI contracts; custom/inlined algorithms may remain unknown.
+For decoding with a supplied key: resx help payload."
         }
-        "entropy" => {
-            r#"
-ENTROPY HELP
-Usage:
-  resx entropy <image> [--entropy-window <bytes>] [--entropy-stride <bytes>] [--entropy-all] [--json]
+        "strings" => {
+            r"STRINGS | ASCII and UTF-16LE candidates with exact offsets
+Usage: resx strings <image> [--json] [-v]
 
 Examples:
-  resx entropy suspicious.dll
-  resx entropy .\packed.exe --entropy-window 2048 --entropy-stride 1024
-  resx entropy .\sample.dll --entropy-all
-  resx entropy .\sample.dll --json --out .\sample.entropy.json
+  resx strings .\J58.dll --json
+  resx strings .\sample.exe --strings-encoding ascii --strings-min-len 8
+  resx strings .\sample.exe --strings-interesting --strings-limit 200
+  resx strings .\sample.exe --strings-match TARGET --strings-tag success-marker
 
-NOTES
-  Renders an overlaid terminal plot over executable sections by default.
-  The y-axis is the 0.0-8.0 entropy scale; the x-axis follows code RVA order.
-  Plot symbols: * entropy, a ASCII ratio, z zero-byte ratio, u unique-byte ratio,
-  # overlap. The detail table below the plot keeps per-window flags.
-  Use --entropy-all to include non-executable sections.
-"#
+Limits: 16 MiB scanned, 8,192 candidates, 4,096 code units per candidate.
+UTF-16 candidates use a text-quality filter by default; --strings-raw-wide keeps
+permissive binary coincidences. --strings-encoding ascii|utf16le|both,
+--strings-min-len, --strings-limit, --strings-match, and --strings-tag bound output.
+TARGET_OK-like values are labeled success-marker; brace-form tokens are separate
+flag-candidate findings. Text presence does not prove behavior."
         }
-        "patch" => {
-            r#"
-PATCH HELP
-Usage:
-  resx patch <image> --at <addr> --patch-bytes <hex> [patch options]
-  resx patch <image> <addr> <hex> [patch options]
+        "driver" => {
+            r"DRIVER | Static x64 dispatch and driver capability evidence
+Usage: resx driver <image> [--json] [-v]
 
 Examples:
-  resx patch .\sample.dll --at 0x1200 --patch-bytes "90 90" --dry-run
-  resx patch .\sample.dll file:0x600 "90 90" --expect "55 48" --patch-out .\sample.patched.dll
-  resx patch .\driver.sys va:0x140001000 CC --patch-out .\driver.patched.sys --update-checksum
-  resx patch .\sample.dll 0x1200 90 90 --in-place --expect "55 48"
+  resx driver .\hypervisor.sys --verbose
+  resx driver C:\Windows\System32\drivers\vmbus.sys --json --out vmbus.json
 
-Options:
-  --at <addr>           RVA, PE VA, or file offset. Prefix with rva:, va:, or file: to force interpretation.
-  --patch-bytes <hex>   Replacement bytes. Separators are optional for even-length hex strings.
-  --expect <hex>        Require the current bytes to match before writing.
-  --patch-out <file>    Patched copy path. Defaults to <name>.patched.<ext>.
-  --dry-run             Validate and report without writing.
-  --in-place            Modify the source image itself.
-  --overwrite           Allow replacing an existing output copy.
-  --update-checksum     Recalculate the PE optional-header checksum before writing.
-
-NOTES
-  This command patches bytes only. It does not assemble instructions, grow sections,
-  search code caves, rewrite relocations, or preserve Authenticode signatures.
-"#
+driver includes conditional MajorFunction assignments, imported-API capability
+groups, AMD SVM / Intel VMX evidence, and correlated NPT/EPT SLAT hook machinery
+with instruction RVAs. No driver is loaded."
         }
-        "dump" | "xrefs" | "refs" | "recomp" | "c" => {
-            r#"
-DUMP HELP
-Usage:
-  resx dump <image> <function> [options]
-  resx dump <image> --at <addr> [options]
-  resx dump <image> --ordinal <n> [options]
-  resx xrefs <image> <function-or-import> [options]
+        "ioctl" => {
+            r"IOCTL | Static x64 request, dispatch, CTL_CODE and NDIS/OID evidence
+Usage: resx ioctl <image> [--json] [-v]
 
 Examples:
-  resx dump ntdll.dll NtOpenProcess
-  resx dump ntdll.dll --at 0x161F40
-  resx dump ntdll.dll --ordinal 451
-  resx dump kernel32.dll CreateFileW --recomp --c-out CreateFileW.c
-  resx xrefs .\driver.sys WdfDeviceCreate
-  resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
-  resx dump ntoskrnl.exe KiSystemCall64 --cfg text --funcs --recomp
-  resx dump .\sample.dll DllMain --hostile --funcs --funcs-depth 3 --xrefs --strings
-  resx dump .\sample.dll --at 0x401000 --json --no-pdb --max-insns 250
+  resx ioctl .\J58.dll --verbose --out ioctl.txt
+  resx ioctl .\driver.sys --json
 
-Useful options:
-  --hostile, --funcs, --funcs-depth <n>, --cfg text, --recomp,
-  --xrefs, --strings, --edrchk, --hookchk, --pdb <file>, --no-pdb
-"#
+Reports bounded request arguments, producer relationships, CTL_CODE candidates,
+dispatch assignments and known NDIS/OID layouts. No driver is loaded and no IOCTL
+is sent."
         }
-        "cfg" => {
-            r#"
-CFG HELP
-Usage:
-  resx cfg <image> <function>
-  resx cfg <image> --at <addr>
-  resx cfg <image> --ordinal <n>
-
-Examples:
-  resx cfg ntdll.dll NtOpenProcess
-  resx cfg ntoskrnl.exe NtQuerySystemInformation
-  resx cfg ntdll.dll --at 0x161F40
-  resx cfg user32.dll --ordinal 650
-  resx cfg .\packed.dll --at 0x402A10 --hostile --max-insns 900 --no-pdb
-"#
-        }
-        "reconstruct-cfg" => {
-            r#"
-RECONSTRUCT-CFG HELP
-Usage:
-  resx reconstruct-cfg <image> [flow options]
-
-Examples:
-  resx reconstruct-cfg suspicious.dll
-  resx suspicious.dll --reconstruct-cfg --depth 8 --max-total 500
-  resx reconstruct-cfg suspicious.dll --thread-filter spawned
-  resx reconstruct-cfg suspicious.dll --thread-filter api --api-filter GetThreadContext
-  resx reconstruct-cfg .\sample.exe --json
-  resx reconstruct-cfg .\packed.exe --depth 10 --max-callers 64 --max-total 800 --hostile
-  resx reconstruct-cfg .\svc.dll --api-filter LoadLibrary --json --out .\svc.flow.json
-
-NOTES
-  Starts at PE entry/TLS/startup handoff candidates, follows intra-image CALL/JMP
-  targets, marks imports and unresolved indirect calls, and follows statically
-  recovered thread/workpool callback arguments when they point back into the image.
-  PDB symbols are used when available for names, prototype text, and size-backed
-  decode bounds. Internal PDB/export functions, Nt APIs, Microsoft DLL imports,
-  CRT/C++ runtime calls, and external DLL imports are tagged separately.
-  Use --thread-filter and --api-filter for non-interactive focus.
-"#
-        }
-        "peinfo" => {
-            r#"
-PEINFO HELP
-Usage:
-  resx peinfo <image> [--json]
+        "inspect" => {
+            r"INSPECT | PE headers, exports, imports and symbols
+  peinfo / sections / pechk    Metadata, section layout, anomalies
+  eat / iat                   Exports and imports
+  syms / types                Symbols and PDB types
 
 Examples:
   resx peinfo .\blackbird.sys
-  resx peinfo ntdll.dll
-  resx peinfo .\sample.exe --json
-  resx peinfo .\packed.dll --no-pdb --json --out .\packed.peinfo.json
-
-NOTES
-  Reports PE layout, subsystem, image kind, debug info, symbols, signer state,
-  compiler/runtime heuristics, and hardening flags like ASLR, NX, CFG, and CET-related markers.
-"#
+  resx eat .\J58.dll --json
+  resx types .\driver.sys DEVICE_OBJECT --pdb .\driver.pdb"
         }
-        "sections" => {
-            r#"
-SECTIONS HELP
-Usage:
-  resx sections <image> [--json]
+        "code" => {
+            r"CODE | Disassembly and control flow
+  dump                        Disassemble by name, RVA or ordinal
+  xrefs / callers             Incoming references and reverse callers
+  cfg / reconstruct-cfg       Function graph and image startup flow
 
 Examples:
-  resx sections ntdll.dll
-  resx sections .\blackbird.sys
-  resx sections .\sample.dll --json
-  resx sections .\packed.dll --no-color --quiet
-
-NOTES
-  Shows section ranges, entropy, raw/virtual sizes, protections, and expected
-  protection notes such as writable .text or executable data sections.
-"#
+  resx dump kernel32.dll CreateFileW --recomp
+  resx dump .\sample.exe --at 0x1200 --bytes
+  resx cfg .\J58.dll --ordinal 1
+  resx callers ntdll.dll NtOpenProcess --depth 2"
         }
-        "eat" => {
-            r#"
-EAT HELP
-Usage:
-  resx eat <image> [--json]
+        "evidence" => {
+            r"EVIDENCE | Static findings, with provenance and limits
+  contracts                   Combined API arguments and producer references
+  driver / ioctl              Driver dispatch, IOCTL and NDIS/OID evidence
+  ipc / network / crypto      Channel, endpoint and crypto configuration
+  strings / intelli / behavior Text extraction and heuristic triage
+  entropy / yara / find       Byte statistics, YARA, and instruction patterns
 
 Examples:
-  resx eat kernel32.dll
-  resx eat ntdll.dll --json
-  resx eat .\plugin.dll --json --out .\plugin.exports.json
+  resx driver .\blackbird.sys --json
+  resx ioctl .\J58.dll --verbose
+  resx network .\sample.exe --json --out endpoints.json
+  resx yara .\sample.exe .\rules.yar
 
-NOTES
-  Dumps export names, ordinals, RVAs, and forwarders when present.
-"#
+Static findings do not prove execution, live peers or C2 activity."
         }
-        "iat" => {
-            r#"
-IAT HELP
-Usage:
-  resx iat <image> [--json]
+        "recovery" => {
+            r#"RECOVERY | Explicit bounded decoding and editing
+  payload                     Decode bytes with operator-supplied parameters
+  patch                       Apply a checked byte patch to a new image
 
 Examples:
-  resx iat kernel32.dll
-  resx iat suspicious.dll --json
-  resx iat .\packed.dll --json --out .\packed.imports.json
+  resx payload .\blob.bin --payload-dir .\decoded --codec zlib --json
+  resx patch .\sample.exe rva:0x1200 "90 90" --dry-run
 
-NOTES
-  Dumps import DLLs, imported names/ordinals, hints, and IAT slot RVAs.
-"#
+Payload decoding is bounded and records hashes for each transform layer. Patching
+requires explicit bytes and can verify expected original bytes before writing."#
         }
-        "yara" => {
-            r#"
-YARA HELP
-Usage:
-  resx yara <image> <rule.yar> [--json]
-  resx <image> --yara <rule.yar> [--yara <more.yar>]
+        "compare" => {
+            r"COMPARE | Structural similarity and discovery
+  diff                        Compare images and function structure
+  index / hunt                Build and search a fingerprint corpus
+  scan                        Inventory images under a directory
+  locate / locate-sym         Find exports and symbols in configured images
 
 Examples:
-  resx yara suspicious.dll .\rules\triage.yar
-  resx yara ntdll.dll .\rules\exports.yar --json
-  resx .\sample.exe --yara .\rules\packer.yar --yara .\rules\anti-debug.yar --json
-  resx yara .\samples\loader.dll .\rules\loader.yar --no-color --quiet
-
-NOTES
-  Accepts one or more rule files through the `yara` shorthand command or `--yara`.
-"#
-        }
-        "scan" => {
-            r#"
-SCAN HELP
-Usage:
-  resx scan <path> [scan options]
-
-Examples:
-  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
-  resx scan .\samples --extensions exe,dll,sys --max-candidates 16
-  resx scan .\samples --max-file-mb 100 --json
-  resx scan .\corpus --extensions exe,dll --max-files 500 --max-candidates 32 --json
-  resx scan C:\Windows\System32\drivers --extensions sys --jsonl --max-file-mb 50
-
-NOTES
-  Inventories PE images and ranks fuzz-target candidates using image kind,
-  risk imports, exports, startup paths, section anomalies, and symbol names.
-"#
-        }
-        "diff" => {
-            r#"
-DIFF HELP
-Usage:
-  resx diff <image-a> <image-b> [image-c ...] [diff options]
-
-Examples:
-  resx diff .\old.dll .\new.dll
   resx diff .\old.dll .\new.dll --json
-  resx diff .\old.dll .\new.dll .\canary.dll --diff-graph
-  resx diff .\old.exe .\new.exe --diff-mode deep --include-weak
-  resx diff .\left.dll .\right.dll --left-pdb .\left.pdb --right-pdb .\right.pdb
-  resx diff .\old.dll .\new.dll --diff-graph --diff-graph-format dot --diff-graph-out heatmap.dot
-  resx diff .\old.dll .\new.dll --show-cfg-diff auto
-  resx diff .\old.dll .\new.dll --show-cfg-diff TargetFunc --cfg-diff-format dot --cfg-diff-out cfg.dot
-  resx diff .\v1.sys .\v2.sys --diff-mode deep --max-functions 6000 --include-weak --json
-  resx diff .\left.dll .\right.dll --show-cfg-diff auto --cfg-diff-format json --no-pdb
-
-NOTES
-  Compares normalized function code, basic-block shape, calls/imports, constants,
-  and metadata so small string/debug/address changes do not dominate the score.
-  With three or more images, emits an all-pairs matrix after profiling each image
-  once. --diff-graph adds function hotspots, section entropy deltas, and DOT/JSON
-  graph output for recording or offline inspection.
-  CFG diff mode pairs basic blocks and highlights exact, similar, changed,
-  left-only, and right-only control-flow/code regions.
-"#
-        }
-        "index" | "hunt" => {
-            r#"
-CORPUS HELP
-Usage:
-  resx index <dir-or-image> --db <file> [corpus options]
-  resx hunt <sample> --db <file> [corpus options]
-
-Examples:
-  resx index .\samples --db .\samples.resxdb --no-pdb
-  resx index C:\Windows\System32\drivers --db drivers.resxdb --extensions sys --max-files 500
-  resx hunt .\unknown.dll --db .\samples.resxdb
-  resx hunt .\unknown.dll --db .\samples.resxdb --diff-threshold 75 --include-weak
-  resx index .\malware-family --db .\family.resxdb --extensions exe,dll --max-functions 5000 --json
-  resx hunt .\new-sample.exe --db .\family.resxdb --diff-threshold 60 --max-candidates 20 --json
-
-NOTES
-  `index` stores normalized function/CFG/API fingerprints for many PE images.
-  `hunt` compares one sample against that index to find variants, subsets,
-  repacked builds, renamed/debug-stripped builds, and shared-code families.
-"#
-        }
-        "follow" | "callers" => {
-            r#"
-CALLERS HELP
-Usage:
-  resx callers <image> <function> [follow options]
-
-Examples:
-  resx callers kernel32.dll CreateFileW
-  resx callers ntdll.dll NtOpenProcess --depth 2 --format flat
-  resx callers ntdll.dll NtOpenProcess --include-dir C:\Work\Drivers
-  resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
-  resx callers user32.dll MessageBoxW --scan-exe --show-site --json
-  resx callers ntdll.dll NtProtectVirtualMemory --include-dir .\samples --scan-exe --depth 4 --max-total 1000
-  resx callers ntoskrnl.exe MmMapIoSpace --include-dir C:\Windows\System32\drivers --scope-file *.sys --format list
-
-NOTES
-  Reverse-traces callsites across the priority set plus optional include dirs/images.
-  Use --show-site to print callsite RVAs and --filter-dll to narrow noisy graphs.
-"#
-        }
-        "locate" | "locate-sym" => {
-            r#"
-LOCATE HELP
-Usage:
-  resx locate <name> [search options]
-  resx locate-sym <name> [search options]
-
-Examples:
-  resx locate OpenProcess
-  resx locate NtOpenProcess
-  resx locate NtOpenProcess --include-dir C:\Work\Drivers
-  resx locate-sym RtlpHeapHandleError
-  resx locate-sym NtOpenProcess --include-image .\mydriver.sys
-  resx locate VirtualProtect --include-dir .\samples --scan-exe --json
-  resx locate-sym KiDispatch --include-dir C:\Symbols\private --filter-dll ntoskrnl
-
-NOTES
-  `locate` uses exports. `locate-sym` also loads available PDB symbols and can
-  find private/internal names when symbols are present.
-"#
-        }
-        "explain" => {
-            r#"
-EXPLAIN HELP
-Usage:
-  resx explain <name> [--prefix|--api] [--json]
-
-Examples:
-  resx explain Nt
-  resx explain Zw
-  resx explain NtQuerySystemInformation
-  resx explain NtQuerySystemInformation --api --json
-  resx dump ntoskrnl.exe NtOpenProcess --explain
-  resx explain RtlpHeapHandleError --api
-  resx explain Ki --prefix
-
-NOTES
-  `explain` autodetects bare prefixes versus API-style symbols by default.
-  Use `--prefix` or `--api` only when you need to force one interpretation.
-"#
-        }
-        "priority" => {
-            r#"
-PRIORITY HELP
-Usage:
-  resx priority
-
-Examples:
-  resx priority
-
-NOTES
-  Opens the generated priority config JSON used by locate and callers.
-  Edit priority directories, exact filenames, prefixes, and regexes there.
-"#
-        }
-        "symbols" | "pdb" | "syms" => {
-            r#"
-SYMBOL HELP
-Usage:
-  resx syms <image> [symbol options]
-  resx types <image> [query] [symbol options]
-
-Examples:
-  resx dump ntdll.dll RtlpHeapHandleError --verbose
-  resx dump ntdll.dll RtlpHeapHandleError --sym-path "C:\Symbols"
-  resx syms ntoskrnl.exe --verbose
-  resx syms .\J58.dll --pdb .\J58.pdb
-  resx types ntoskrnl.exe _EPROCESS --sym-path "srv*C:\Symbols*https://msdl.microsoft.com/download/symbols"
-  resx syms .\driver.sys --pdb .\driver.pdb --json
-"#
-        }
-        "types" => {
-            r#"
-TYPES HELP
-Usage:
-  resx types <image> [query] [symbol options]
-
-Examples:
-  resx types ntoskrnl.exe
-  resx types ntoskrnl.exe _EPROCESS
-  resx types .\driver.sys DEVICE_OBJECT --pdb .\driver.pdb
-  resx types .\module.dll vtable --sym-path "C:\Symbols" --json
-
-NOTES
-  Browses PDB-backed type names and symbol references. Results depend on symbol
-  availability; use --pdb, --sym-path, --sym-server, or --reload when needed.
-"#
-        }
-        "pechk" => {
-            r#"
-PECHK HELP
-Usage:
-  resx pechk <image> [--json]
-
-Examples:
-  resx pechk .\sample.dll
-  resx pechk .\packed.exe --json
-  resx pechk C:\Windows\System32\drivers\ndis.sys --no-pdb --quiet
-
-NOTES
-  Runs PE header/layout anomaly checks such as invalid directories, suspicious
-  section layout, odd alignment, and malformed or inconsistent metadata.
-"#
-        }
-        "edrchk" | "hookchk" => {
-            r#"
-HOOK / EDR CHECK HELP
-Usage:
-  resx dump <image> <function> --hookchk
-  resx dump <image> <function> --edrchk [--unsafe-map-image]
-
-Examples:
-  resx dump ntdll.dll NtOpenProcess --hookchk
-  resx dump ntdll.dll NtAllocateVirtualMemory --edrchk
-  resx dump C:\Windows\System32\ntdll.dll NtProtectVirtualMemory --edrchk --unsafe-map-image --json
-
-NOTES
-  --hookchk is static entry/thunk triage. --edrchk compares disk bytes with an
-  already-loaded module prologue; --unsafe-map-image allows mapping a target image
-  only when explicit memory comparison needs it.
-"#
-        }
-        _ => {
-            r#"
-GENERAL HELP
-Usage:
-  resx <command> [arguments] [options]
-  resx help <command>
-  resx <command> --help
-
-Examples:
-  resx dump ntdll.dll NtCreateFile
-  resx intelli suspicious.dll
-  resx behavior suspicious.dll --json
-  resx unpack suspicious.dll
-  resx entropy suspicious.dll
-  resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
-  resx reconstruct-cfg suspicious.dll --depth 6
-  resx diff .\old.dll .\new.dll
   resx index .\samples --db .\samples.resxdb --no-pdb
   resx hunt .\unknown.dll --db .\samples.resxdb
-  resx callers ntdll.dll NtOpenProcess --depth 2
-  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
-  resx locate-sym NtOpenProcess
-  resx update
-
-Command help:
-  resx help dump
-  resx help behavior
-  resx help unpack
-  resx help entropy
-  resx help reconstruct-cfg
-  resx help diff
-"#
+  resx scan .\drivers --jsonl --max-files 100"
         }
+        "options" => {
+            r"OPTIONS | Shared output, symbol and saved preference flags
+  --json                      Structured output
+  --out <file>                Save output; evidence commands require a new file
+  --verbose, -v               Coverage and diagnostics on stderr
+  --diagnostic                DEBUG developer trace on stderr; implies --verbose
+  --diagnostic-trace          Include bounded TRACE events; implies --diagnostic
+  --disasm-context <4..32>    Instructions per verbose evidence window (default 12)
+  --debug-report <report.zip> Sanitized reproducibility bundle
+  --debug-report-include-target  Explicitly include target bytes (64 MiB cap)
+  --analysis-budget <n|unlimited>  Alias for --max-insns
+  --cfg-budget <n|unlimited>  Alias for --max-total
+  --time                      Print command completion time on stderr
+  --quiet, -q                 Suppress optional diagnostics; overrides verbose
+  --no-color                  Disable terminal colors
+  --no-pdb                    Disable symbol loading
+  --pdb <file>                Use an explicit local PDB
+  --path <dir>                Add an image lookup directory
+  --max-subcalls <n>          Cap calls rendered per function
+  --driver-flow               Add driver dispatch contracts to CFG output
+
+Slash form:
+  /dump, /json, /out:file and every other long option are accepted.
+  resx config --command-style slash saves the preferred display style.
+
+Function macros:
+  entry                       Declared PE AddressOfEntryPoint
+  rentry                      RESX startup/main candidate, falling back to entry
+  resx config --entry-macro ep --rentry-macro realep
+
+Examples:
+  resx contracts .\J58.dll --json -v --out contracts.json
+  resx peinfo .\blackbird.sys --json -q
+
+Command-specific flags: resx help dump, resx help payload, etc."
+        }
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        all_help, help_topic, is_help_request, normalize_cli_syntax, preprocess_args, section_help,
     };
-    println!("{}", body.trim());
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn help_all_contains_commands_subcommands_and_operator_flags() {
+        let help = all_help();
+        for required in [
+            "COMPLETE COMMAND REFERENCE",
+            "reconstruct-cfg",
+            "--diagnostic-trace",
+            "--max-insns",
+            "--yara",
+            "INTERNAL COMMAND-ROUTING FLAGS",
+        ] {
+            assert!(help.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn slash_commands_and_options_normalize_without_touching_paths() {
+        let normalized = normalize_cli_syntax(&args(&[
+            "resx",
+            "/dump",
+            "C:\\x\\a.dll",
+            "entry",
+            "/max-insns:25",
+            "/limit:12",
+            "/refs",
+            "/json",
+        ]));
+        assert_eq!(
+            normalized,
+            args(&[
+                "resx",
+                "dump",
+                "C:\\x\\a.dll",
+                "entry",
+                "--max-insns",
+                "25",
+                "--max-insns",
+                "12",
+                "--xrefs",
+                "--json",
+            ])
+        );
+        assert_eq!(
+            normalize_cli_syntax(&args(&["resx", "/not-a-command/path"])),
+            args(&["resx", "/not-a-command/path"])
+        );
+    }
+
+    #[test]
+    fn bare_sections_open_help() {
+        let values = args(&["resx", "code"]);
+        assert!(is_help_request(&values));
+        assert_eq!(help_topic(&values), Some("code"));
+    }
+
+    #[test]
+    fn exact_command_help_is_distinct_and_documents_its_flags() {
+        let driver = section_help("driver").unwrap();
+        let ioctl = section_help("ioctl").unwrap();
+        let strings = section_help("strings").unwrap();
+        assert_ne!(driver, ioctl);
+        assert!(driver.starts_with("DRIVER |"));
+        assert!(ioctl.starts_with("IOCTL |"));
+        assert!(strings.contains("--strings-encoding"));
+        assert!(strings.contains("--strings-raw-wide"));
+    }
+
+    #[test]
+    fn yara_shorthand_preserves_one_image_and_routes_rules_as_options() {
+        let args = ["resx", "yara", "sample.exe", "rules.yar", "--json"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            preprocess_args(&args),
+            ["resx", "sample.exe", "--yara", "rules.yar", "--json"]
+        );
+    }
 }

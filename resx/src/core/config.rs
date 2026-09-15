@@ -3,11 +3,36 @@ use crate::core::priority::{
 };
 use clap::Parser;
 
-#[derive(Parser, Debug)]
+fn parse_budget(value: &str) -> Result<usize, String> {
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(0);
+    }
+    value
+        .parse::<usize>()
+        .map_err(|_| "budget must be a non-negative integer or `unlimited`".to_owned())
+}
+
+fn parse_strings_min_len(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=4096).contains(value))
+        .ok_or_else(|| "strings minimum length must be between 1 and 4096".to_owned())
+}
+
+fn parse_strings_limit(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=8192).contains(value))
+        .ok_or_else(|| "strings limit must be between 1 and 8192".to_owned())
+}
+
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "resx",
     version = env!("CARGO_PKG_VERSION"),
-    author = "TITAN Softwork Solutions",
+    author = "Ryftenius",
     about = "Windows binary recon CLI for exports, symbols, metadata, CFG, callers, and triage",
     long_about = None,
     disable_help_flag = true,
@@ -59,10 +84,29 @@ pub struct Cli {
     #[arg(long = "reload")]
     pub reload: bool,
 
-    #[arg(long = "no-pdb")]
+    #[arg(long = "no-pdb", alias = "fast")]
     pub no_pdb: bool,
 
-    #[arg(long = "c-out")]
+    /// Opt into platform version/signature queries (may use Windows trust services).
+    #[arg(long = "file-metadata")]
+    pub file_metadata: bool,
+
+    #[arg(long = "payload-dir")]
+    pub payload_dir: Option<String>,
+    #[arg(long = "codec", value_parser = ["auto", "zlib", "gzip", "deflate", "base64", "hex", "aes-cbc"])]
+    pub codec: Option<String>,
+    #[arg(long = "payload-offset")]
+    pub payload_offset: Option<u64>,
+    #[arg(long = "payload-length")]
+    pub payload_length: Option<u64>,
+    #[arg(long = "key-file")]
+    pub key_file: Option<String>,
+    #[arg(long = "iv-hex")]
+    pub iv_hex: Option<String>,
+    #[arg(long = "pkcs7")]
+    pub pkcs7: bool,
+
+    #[arg(long = "c-out", alias = "decompile-out")]
     pub c_out: Option<String>,
 
     #[arg(long = "edrchk")]
@@ -79,9 +123,6 @@ pub struct Cli {
 
     #[arg(long = "behavior")]
     pub behavior: bool,
-
-    #[arg(long = "unpack")]
-    pub unpack: bool,
 
     #[arg(long = "entropy")]
     pub entropy: bool,
@@ -128,14 +169,15 @@ pub struct Cli {
     #[arg(long = "api-filter", default_value = "")]
     pub reconstruct_api_filter: String,
 
-    #[arg(long = "max-insns", default_value_t = 500)]
+    #[arg(long = "max-insns", aliases = ["limit", "insns", "analysis-budget", "xref-budget"], default_value = "500", value_parser = parse_budget)]
     pub max_insns: usize,
 
-    #[arg(long = "max-bytes", default_value_t = 8192)]
+    #[arg(long = "max-bytes", alias = "byte-limit", default_value_t = 8192)]
     pub max_bytes: usize,
 
     #[arg(
         long = "bytes",
+        aliases = ["hex", "opcode", "opcodes"],
         num_args = 0..=1,
         default_missing_value = "0",
         value_name = "N"
@@ -144,6 +186,9 @@ pub struct Cli {
 
     #[arg(long = "no-bytes", action = clap::ArgAction::SetTrue)]
     pub no_bytes: bool,
+
+    #[arg(long = "nodis", aliases = ["no-dis", "no-disassembly"])]
+    pub no_disassembly: bool,
 
     #[arg(long = "intel", default_value_t = true, action = clap::ArgAction::SetTrue)]
     pub intel: bool,
@@ -187,24 +232,77 @@ pub struct Cli {
     #[arg(long = "verbose", short = 'v')]
     pub verbose: bool,
 
+    /// Emit structured developer diagnostics to stderr for every command.
+    #[arg(long = "diagnostic")]
+    pub diagnostic: bool,
+
+    /// Include bounded TRACE events in addition to the default DEBUG level.
+    #[arg(long = "diagnostic-trace")]
+    pub diagnostic_trace: bool,
+
+    /// Maximum instructions in each bounded verbose evidence window.
+    #[arg(long = "disasm-context", default_value_t = 12, value_parser = clap::value_parser!(u32).range(4..=32))]
+    pub disasm_context: u32,
+
+    #[arg(long = "debug-report", value_name = "REPORT.ZIP")]
+    pub debug_report: Option<String>,
+
+    #[arg(long = "debug-report-include-target", requires = "debug_report")]
+    pub debug_report_include_target: bool,
+
+    #[arg(long = "time")]
+    pub time: bool,
+
     #[arg(long = "quiet", short = 'q')]
     pub quiet: bool,
 
     #[arg(long = "recomp")]
     pub recomp: bool,
 
-    #[arg(long = "xrefs")]
+    #[arg(long = "xrefs", alias = "refs")]
     pub xrefs: bool,
 
-    #[arg(long = "strings")]
+    #[arg(long = "strings", alias = "strrefs")]
     pub strings: bool,
+
+    /// Minimum candidate length for the standalone strings command.
+    #[arg(long = "strings-min-len", default_value_t = 5, value_parser = parse_strings_min_len)]
+    pub strings_min_len: usize,
+
+    /// Maximum strings returned by the standalone strings command.
+    #[arg(long = "strings-limit", default_value_t = 200, value_parser = parse_strings_limit)]
+    pub strings_limit: usize,
+
+    #[arg(long = "strings-encoding", default_value = "both", value_parser = ["ascii", "utf16le", "both"])]
+    pub strings_encoding: String,
+
+    #[arg(long = "strings-interesting")]
+    pub strings_interesting: bool,
+
+    #[arg(long = "strings-match", value_name = "TEXT")]
+    pub strings_match: Option<String>,
+
+    #[arg(long = "strings-tag", value_name = "TAG")]
+    pub strings_tag: Option<String>,
+
+    /// Retain permissive UTF-16 candidates, including low-quality binary coincidences.
+    #[arg(long = "strings-raw-wide")]
+    pub strings_raw_wide: bool,
 
     #[arg(long = "funcs")]
     pub funcs: bool,
 
     /// Recursively trace internal sub_XXXXXXXX calls N levels deep (implies --funcs).
-    #[arg(long = "funcs-depth", value_name = "N")]
+    #[arg(long = "funcs-depth", alias = "call-depth", value_name = "N")]
     pub funcs_depth: Option<u32>,
+
+    /// Maximum calls rendered for each function in recursive call views.
+    #[arg(long = "max-subcalls", default_value_t = 64)]
+    pub max_subcalls: usize,
+
+    /// Include recovered MajorFunction and IOCTL contracts in CFG-oriented output.
+    #[arg(long = "driver-flow")]
+    pub driver_flow: bool,
 
     #[arg(long = "cfg", value_name = "FMT")]
     pub cfg_view: Option<String>,
@@ -232,6 +330,23 @@ pub struct Cli {
 
     #[arg(long = "yara", action = clap::ArgAction::Append, value_name = "RULE_FILE")]
     pub yara: Vec<String>,
+
+    /// Search executable sections using raw, decoded, or semantic instruction matching.
+    #[arg(long = "resx-find", hide = true)]
+    pub resx_find: bool,
+
+    #[arg(long = "find", value_name = "QUERY")]
+    pub find_pattern: Option<String>,
+
+    #[arg(long = "find-mode", value_parser = ["auto", "raw", "decoded", "semantic"], default_value = "auto")]
+    pub find_mode: String,
+
+    /// Try bounded single-byte transforms before decoding a candidate stream.
+    #[arg(long = "find-encoded")]
+    pub find_encoded: bool,
+
+    #[arg(long = "find-budget", default_value = "8388608", value_parser = parse_budget)]
+    pub find_budget: usize,
 
     #[arg(long = "resx-scan", hide = true)]
     pub resx_scan: bool,
@@ -335,7 +450,7 @@ pub struct Cli {
     #[arg(long = "max-callers", default_value_t = 30)]
     pub max_callers: usize,
 
-    #[arg(long = "max-total", default_value_t = 500)]
+    #[arg(long = "max-total", alias = "cfg-budget", default_value = "500", value_parser = parse_budget)]
     pub max_total: usize,
 
     #[arg(long = "format", default_value = "tree")]
@@ -359,23 +474,43 @@ pub struct Cli {
     #[arg(long = "update")]
     pub update: bool,
 
-    #[arg(long = "explain")]
-    pub explain: bool,
-
-    #[arg(long = "prefix")]
-    pub explain_prefix: bool,
-
-    #[arg(long = "api")]
-    pub explain_api: bool,
-
     /// Enable aggressive tracing: recursive register backward-slice, decoder-driven
     /// reverse-index, indirect-JMP emission, and suspicion annotations in disasm.
     #[arg(long = "hostile")]
     pub hostile: bool,
+
+    #[arg(long = "resx-config", hide = true)]
+    pub resx_config: bool,
+
+    #[arg(long = "command-style", value_parser = ["standard", "slash"])]
+    pub command_style: Option<String>,
+
+    #[arg(long = "entry-macro")]
+    pub entry_macro: Option<String>,
+
+    #[arg(long = "rentry-macro")]
+    pub rentry_macro: Option<String>,
+}
+
+/// Build and run Clap's generated parser on a bounded worker stack. The generated command graph
+/// can exceed the Windows main thread's 1 MiB reserve in unoptimized builds.
+pub fn parse_cli(args: Vec<String>) -> Result<Cli, clap::Error> {
+    let worker = std::thread::Builder::new()
+        .name("resx-parser".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || Cli::try_parse_from(args))
+        .map_err(|error| clap::Error::raw(clap::error::ErrorKind::Io, error.to_string()))?;
+    worker.join().map_err(|_| {
+        clap::Error::raw(
+            clap::error::ErrorKind::Format,
+            "RESX command parser terminated unexpectedly",
+        )
+    })?
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub color: bool,
     pub dll: String,
     pub function: String,
     pub extra_diff_images: Vec<String>,
@@ -400,13 +535,13 @@ pub struct Config {
     pub sym_server: String,
     pub reload: bool,
     pub no_pdb: bool,
+    pub file_metadata: bool,
     pub c_out: String,
     pub edrchk: bool,
     pub unsafe_map_image: bool,
     pub hookchk: bool,
     pub intelli: bool,
     pub behavior: bool,
-    pub unpack: bool,
     pub entropy: bool,
     pub patch: bool,
     pub patch_bytes: String,
@@ -426,6 +561,7 @@ pub struct Config {
     pub max_insns: usize,
     pub max_bytes: usize,
     pub show_bytes: bool,
+    pub no_disassembly: bool,
     pub intel_syntax: bool,
     pub follow_jmp: bool,
     pub no_follow_fwd: bool,
@@ -437,12 +573,25 @@ pub struct Config {
     pub json: bool,
     pub out_file: String,
     pub verbose: bool,
+    pub diagnostic: bool,
+    pub diagnostic_trace: bool,
+    pub disasm_context: usize,
+    pub time: bool,
     pub quiet: bool,
 
     pub recomp: bool,
     pub show_xrefs: bool,
     pub show_strings: bool,
+    pub strings_min_len: usize,
+    pub strings_limit: usize,
+    pub strings_encoding: String,
+    pub strings_interesting: bool,
+    pub strings_match: String,
+    pub strings_tag: String,
+    pub strings_raw_wide: bool,
     pub funcs_depth: u32,
+    pub max_subcalls: usize,
+    pub driver_flow: bool,
     pub cfg_view: String,
     pub show_eat: bool,
     pub show_iat: bool,
@@ -452,6 +601,11 @@ pub struct Config {
     pub follow_callers: bool,
     pub peinfo: bool,
     pub yara: Vec<String>,
+    pub resx_find: bool,
+    pub find_pattern: String,
+    pub find_mode: String,
+    pub find_encoded: bool,
+    pub find_budget: usize,
     pub resx_diff: bool,
     pub resx_index: bool,
     pub resx_hunt: bool,
@@ -489,20 +643,23 @@ pub struct Config {
     pub filter_dll: String,
     pub locate: bool,
     pub locate_deep: bool,
-    pub explain: bool,
-    pub explain_prefix: bool,
-    pub explain_api: bool,
     pub hostile: bool,
+    pub command_style: String,
+    pub entry_macro: String,
+    pub rentry_macro: String,
+    pub resx_config: bool,
 }
 
 impl Config {
-    pub fn from_cli(cli: &Cli, _color: bool) -> Self {
+    pub fn from_cli(cli: &Cli, color: bool) -> Self {
+        let preferences = crate::core::preferences::Preferences::load();
         let priority_file = load_priority_file();
         let mut priority_names = built_in_priority_names();
         priority_names.extend(priority_file.exact_names);
         let mut priority_prefixes = built_in_priority_prefixes();
         priority_prefixes.extend(priority_file.prefixes);
         Config {
+            color,
             dll: cli.dll.clone().unwrap_or_default(),
             function: cli.function.clone().unwrap_or_default(),
             extra_diff_images: cli.extra_images.clone(),
@@ -523,13 +680,13 @@ impl Config {
             sym_server: cli.sym_server.clone().unwrap_or_default(),
             reload: cli.reload,
             no_pdb: cli.no_pdb,
+            file_metadata: cli.file_metadata,
             c_out: cli.c_out.clone().unwrap_or_default(),
             edrchk: cli.edrchk,
             unsafe_map_image: cli.unsafe_map_image,
             hookchk: cli.hookchk,
             intelli: cli.intelli,
             behavior: cli.behavior,
-            unpack: cli.unpack,
             entropy: cli.entropy,
             patch: cli.patch,
             patch_bytes: cli.patch_bytes.clone().unwrap_or_default(),
@@ -551,7 +708,8 @@ impl Config {
                 .flatten()
                 .filter(|bytes| *bytes > 0)
                 .unwrap_or(cli.max_bytes),
-            show_bytes: !cli.no_bytes,
+            show_bytes: cli.bytes.is_some() && !cli.no_bytes,
+            no_disassembly: cli.no_disassembly,
             intel_syntax: !cli.att || cli.intel,
             follow_jmp: cli.follow_jmp && !cli.no_follow_jmp,
             no_follow_fwd: cli.no_follow_forward,
@@ -564,12 +722,25 @@ impl Config {
                 || cli.resx_scan
                 || (cli.resx_diff && cli.cfg_diff_format.eq_ignore_ascii_case("json")),
             out_file: cli.out_file.clone().unwrap_or_default(),
-            verbose: cli.verbose,
+            verbose: (cli.verbose || cli.diagnostic || cli.diagnostic_trace) && !cli.quiet,
+            diagnostic: (cli.diagnostic || cli.diagnostic_trace) && !cli.quiet,
+            diagnostic_trace: cli.diagnostic_trace && !cli.quiet,
+            disasm_context: cli.disasm_context.clamp(4, 32) as usize,
+            time: cli.time && !cli.quiet,
             quiet: cli.quiet,
             recomp: cli.recomp,
             show_xrefs: cli.xrefs,
             show_strings: cli.strings,
+            strings_min_len: cli.strings_min_len,
+            strings_limit: cli.strings_limit,
+            strings_encoding: cli.strings_encoding.clone(),
+            strings_interesting: cli.strings_interesting,
+            strings_match: cli.strings_match.clone().unwrap_or_default(),
+            strings_tag: cli.strings_tag.clone().unwrap_or_default(),
+            strings_raw_wide: cli.strings_raw_wide,
             funcs_depth: cli.funcs_depth.unwrap_or(if cli.funcs { 1 } else { 0 }),
+            max_subcalls: cli.max_subcalls.clamp(1, 4096),
+            driver_flow: cli.driver_flow,
             cfg_view: cli.cfg_view.clone().unwrap_or_default(),
             show_eat: cli.show_eat,
             show_iat: cli.show_iat,
@@ -579,6 +750,11 @@ impl Config {
             follow_callers: cli.follow_callers,
             peinfo: cli.peinfo,
             yara: cli.yara.clone(),
+            resx_find: cli.resx_find,
+            find_pattern: cli.find_pattern.clone().unwrap_or_default(),
+            find_mode: cli.find_mode.clone(),
+            find_encoded: cli.find_encoded,
+            find_budget: cli.find_budget,
             resx_diff: cli.resx_diff,
             resx_index: cli.resx_index,
             resx_hunt: cli.resx_hunt,
@@ -616,10 +792,11 @@ impl Config {
             filter_dll: cli.filter_dll.clone(),
             locate: cli.locate || cli.locate_deep,
             locate_deep: cli.locate_deep,
-            explain: cli.explain,
-            explain_prefix: cli.explain_prefix,
-            explain_api: cli.explain_api,
             hostile: cli.hostile,
+            command_style: preferences.command_style,
+            entry_macro: preferences.entry_macro,
+            rentry_macro: preferences.rentry_macro,
+            resx_config: cli.resx_config,
         }
     }
 
