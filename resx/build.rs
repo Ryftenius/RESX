@@ -36,9 +36,28 @@ fn main() {
 
 #[cfg(windows)]
 fn emit_build_identity() {
-    use std::process::Command;
+    use std::{path::PathBuf, process::Command};
 
-    println!("cargo:rerun-if-changed=../.git/HEAD");
+    let git_output = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(git_dir) = git_output(&["rev-parse", "--absolute-git-dir"]) {
+        let git_dir = PathBuf::from(git_dir);
+        println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+        if let Some(reference) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+            println!(
+                "cargo:rerun-if-changed={}",
+                git_dir.join(reference).display()
+            );
+        }
+    }
     let commit = Command::new("git")
         .args(["rev-parse", "--verify", "HEAD"])
         .output()
