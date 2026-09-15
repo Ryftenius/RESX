@@ -5,16 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef int(__cdecl *RsxVersionFn)(char **out_utf8);
-typedef int(__cdecl *RsxLocateFn)(const char *function_name, const char *options_json, char **out_json);
-typedef int(__cdecl *RsxRunArgsFn)(size_t argc, const char *const *argv, char **out_utf8);
-typedef void(__cdecl *RsxFreeStringFn)(char *value);
+typedef int(__cdecl *ResxVersionFn)(char **out_utf8);
+typedef int(__cdecl *ResxLocateFn)(const char *function_name, const char *options_json, char **out_json);
+typedef int(__cdecl *ResxRunArgsFn)(size_t argc, const char *const *argv, char **out_utf8);
+typedef void(__cdecl *ResxFreeStringFn)(char *value);
 
 typedef struct ResxApi {
-    RsxVersionFn version;
-    RsxLocateFn locate;
-    RsxRunArgsFn run_args;
-    RsxFreeStringFn free_string;
+    ResxVersionFn version;
+    ResxLocateFn locate;
+    ResxRunArgsFn run_args;
+    ResxFreeStringFn free_string;
 } ResxApi;
 
 static void usage(const char *exe) {
@@ -90,10 +90,10 @@ static int load_resx(const char *dll_path, HMODULE *module_out, ResxApi *api) {
         return 1;
     }
 
-    api->version = (RsxVersionFn)required_proc(module, "RsxVersion");
-    api->locate = (RsxLocateFn)required_proc(module, "RsxLocate");
-    api->run_args = (RsxRunArgsFn)required_proc(module, "RsxRunArgs");
-    api->free_string = (RsxFreeStringFn)required_proc(module, "RsxFreeString");
+    api->version = (ResxVersionFn)required_proc(module, "ResxVersion");
+    api->locate = (ResxLocateFn)required_proc(module, "ResxLocate");
+    api->run_args = (ResxRunArgsFn)required_proc(module, "ResxRunArgs");
+    api->free_string = (ResxFreeStringFn)required_proc(module, "ResxFreeString");
     if (api->version == NULL || api->locate == NULL || api->run_args == NULL || api->free_string == NULL) {
         FreeLibrary(module);
         return 1;
@@ -194,7 +194,7 @@ static char *make_locate_options(const char *image_path) {
 static int call_and_print_version(const ResxApi *api) {
     char *out = NULL;
     int status = api->version(&out);
-    printf("[resx] RsxVersion status=%d\n", status);
+    printf("[resx] ResxVersion status=%d\n", status);
     if (out != NULL) {
         printf("%s\n", out);
         api->free_string(out);
@@ -210,7 +210,7 @@ static int locate_function(const ResxApi *api, const char *image_path, const cha
     }
 
     char *out = NULL;
-    printf("\n[resx] RsxLocate(%s)\n", function_name);
+    printf("\n[resx] ResxLocate(%s)\n", function_name);
     int status = api->locate(function_name, options, &out);
     free(options);
     printf("[resx] locate status=%d\n", status);
@@ -240,7 +240,7 @@ static int dump_function(const ResxApi *api, const char *image_path, const char 
     };
 
     char *out = NULL;
-    printf("\n[resx] RsxRunArgs dump %s!%s\n", image_path, function_name);
+    printf("\n[resx] ResxRunArgs dump %s!%s\n", image_path, function_name);
     int status = api->run_args(sizeof(argv) / sizeof(argv[0]), argv, &out);
     printf("[resx] dump status=%d\n", status);
     if (out != NULL) {

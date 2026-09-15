@@ -7,15 +7,17 @@ use std::ptr;
 use std::sync::Once;
 use std::time::Instant;
 
-use clap::Parser;
 use rayon::ThreadPoolBuilder;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::cli::help::{is_help_request, is_version_request, preprocess_args, version_string};
+use crate::cli::help::{
+    is_help_request, is_version_request, normalize_cli_syntax, preprocess_args, product_banner,
+    version_string,
+};
 use crate::cli::router::dispatch;
 use crate::core::color::Colors;
-use crate::core::config::{Cli, Config};
+use crate::core::config::{parse_cli, Config};
 use crate::core::json::SCHEMA_VERSION;
 
 const RSX_STATUS_OK: c_int = 0;
@@ -61,27 +63,28 @@ struct CommandJsonRequest {
 #[no_mangle]
 // This C ABI entry point must accept the opaque pointer returned by RESX.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn RsxFreeString(value: *mut c_char) {
+pub extern "C" fn ResxFreeString(value: *mut c_char) {
     if value.is_null() {
         return;
     }
+    // SAFETY: the ABI contract requires the exact pointer returned by a RESX allocation function.
     unsafe {
         let _ = CString::from_raw(value);
     }
 }
 
 #[no_mangle]
-pub extern "C" fn RsxVersion(out_utf8: *mut *mut c_char) -> c_int {
+pub extern "C" fn ResxVersion(out_utf8: *mut *mut c_char) -> c_int {
     write_plain(out_utf8, version_string())
 }
 
 #[no_mangle]
-pub extern "C" fn RsxHelp(out_utf8: *mut *mut c_char) -> c_int {
+pub extern "C" fn ResxHelp(out_utf8: *mut *mut c_char) -> c_int {
     write_plain(out_utf8, ffi_help_text())
 }
 
 #[no_mangle]
-pub extern "C" fn RsxRunArgs(
+pub extern "C" fn ResxRunArgs(
     argc: usize,
     argv: *const *const c_char,
     out_utf8: *mut *mut c_char,
@@ -94,7 +97,7 @@ pub extern "C" fn RsxRunArgs(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxRunCommandJson(
+pub extern "C" fn ResxRunCommandJson(
     request_json: *const c_char,
     out_json: *mut *mut c_char,
 ) -> c_int {
@@ -143,7 +146,7 @@ pub extern "C" fn RsxRunCommandJson(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxDump(
+pub extern "C" fn ResxDump(
     image_path: *const c_char,
     function_name: *const c_char,
     options_json: *const c_char,
@@ -160,7 +163,7 @@ pub extern "C" fn RsxDump(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxDumpAt(
+pub extern "C" fn ResxDumpAt(
     image_path: *const c_char,
     rva: *const c_char,
     options_json: *const c_char,
@@ -184,7 +187,7 @@ pub extern "C" fn RsxDumpAt(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxDumpOrdinal(
+pub extern "C" fn ResxDumpOrdinal(
     image_path: *const c_char,
     ordinal: c_uint,
     options_json: *const c_char,
@@ -201,7 +204,7 @@ pub extern "C" fn RsxDumpOrdinal(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxCfg(
+pub extern "C" fn ResxCfg(
     image_path: *const c_char,
     function_name: *const c_char,
     options_json: *const c_char,
@@ -218,7 +221,7 @@ pub extern "C" fn RsxCfg(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxCfgAt(
+pub extern "C" fn ResxCfgAt(
     image_path: *const c_char,
     rva: *const c_char,
     options_json: *const c_char,
@@ -242,7 +245,7 @@ pub extern "C" fn RsxCfgAt(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxCfgOrdinal(
+pub extern "C" fn ResxCfgOrdinal(
     image_path: *const c_char,
     ordinal: c_uint,
     options_json: *const c_char,
@@ -259,7 +262,7 @@ pub extern "C" fn RsxCfgOrdinal(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxReconstructCfg(
+pub extern "C" fn ResxReconstructCfg(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -270,7 +273,7 @@ pub extern "C" fn RsxReconstructCfg(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxIntelli(
+pub extern "C" fn ResxIntelli(
     image_path: *const c_char,
     function_name: *const c_char,
     options_json: *const c_char,
@@ -287,7 +290,7 @@ pub extern "C" fn RsxIntelli(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxPeInfo(
+pub extern "C" fn ResxPeInfo(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -298,7 +301,7 @@ pub extern "C" fn RsxPeInfo(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxSections(
+pub extern "C" fn ResxSections(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -309,7 +312,7 @@ pub extern "C" fn RsxSections(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxPeCheck(
+pub extern "C" fn ResxPeCheck(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -320,7 +323,7 @@ pub extern "C" fn RsxPeCheck(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxShowEat(
+pub extern "C" fn ResxShowEat(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -331,7 +334,7 @@ pub extern "C" fn RsxShowEat(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxShowIat(
+pub extern "C" fn ResxShowIat(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -342,7 +345,7 @@ pub extern "C" fn RsxShowIat(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxShowSyms(
+pub extern "C" fn ResxShowSyms(
     image_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -353,7 +356,7 @@ pub extern "C" fn RsxShowSyms(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxTypes(
+pub extern "C" fn ResxTypes(
     image_path: *const c_char,
     query: *const c_char,
     options_json: *const c_char,
@@ -370,7 +373,7 @@ pub extern "C" fn RsxTypes(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxFollowCallers(
+pub extern "C" fn ResxFollowCallers(
     image_path: *const c_char,
     function_name: *const c_char,
     options_json: *const c_char,
@@ -387,7 +390,7 @@ pub extern "C" fn RsxFollowCallers(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxLocate(
+pub extern "C" fn ResxLocate(
     function_name: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -398,7 +401,7 @@ pub extern "C" fn RsxLocate(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxLocateSymbols(
+pub extern "C" fn ResxLocateSymbols(
     function_name: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -409,18 +412,7 @@ pub extern "C" fn RsxLocateSymbols(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxExplain(
-    term: *const c_char,
-    options_json: *const c_char,
-    out_json: *mut *mut c_char,
-) -> c_int {
-    with_one_string(out_json, "term", term, |term| {
-        run_typed("explain", vec![term], options_json, true)
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn RsxDiff(
+pub extern "C" fn ResxDiff(
     left_image_path: *const c_char,
     right_image_path: *const c_char,
     options_json: *const c_char,
@@ -437,7 +429,7 @@ pub extern "C" fn RsxDiff(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxCfgDiff(
+pub extern "C" fn ResxCfgDiff(
     left_image_path: *const c_char,
     right_image_path: *const c_char,
     target: *const c_char,
@@ -461,7 +453,7 @@ pub extern "C" fn RsxCfgDiff(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxIndex(
+pub extern "C" fn ResxIndex(
     root_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -472,7 +464,7 @@ pub extern "C" fn RsxIndex(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxHunt(
+pub extern "C" fn ResxHunt(
     sample_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -483,7 +475,7 @@ pub extern "C" fn RsxHunt(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxScan(
+pub extern "C" fn ResxScan(
     root_path: *const c_char,
     options_json: *const c_char,
     out_json: *mut *mut c_char,
@@ -494,7 +486,7 @@ pub extern "C" fn RsxScan(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxYara(
+pub extern "C" fn ResxYara(
     image_path: *const c_char,
     rule_path: *const c_char,
     options_json: *const c_char,
@@ -511,14 +503,14 @@ pub extern "C" fn RsxYara(
 }
 
 #[no_mangle]
-pub extern "C" fn RsxPriority(options_json: *const c_char, out_json: *mut *mut c_char) -> c_int {
+pub extern "C" fn ResxPriority(options_json: *const c_char, out_json: *mut *mut c_char) -> c_int {
     ffi_boundary(out_json, || {
         run_typed("priority", Vec::new(), options_json, false)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn RsxUpdate(options_json: *const c_char, out_json: *mut *mut c_char) -> c_int {
+pub extern "C" fn ResxUpdate(options_json: *const c_char, out_json: *mut *mut c_char) -> c_int {
     ffi_boundary(out_json, || {
         run_typed("update", Vec::new(), options_json, false)
     })
@@ -568,6 +560,7 @@ where
     if out.is_null() {
         return RSX_STATUS_NULL_ARGUMENT;
     }
+    // SAFETY: the ABI contract requires `out` to point to writable pointer storage.
     unsafe {
         *out = ptr::null_mut();
     }
@@ -593,6 +586,7 @@ where
 fn write_allocated(out: *mut *mut c_char, value: &str) -> Result<c_int, ()> {
     let sanitized = value.replace('\0', "\\u0000");
     let c_string = CString::new(sanitized).map_err(|_| ())?;
+    // SAFETY: `out` was checked by the FFI boundary and receives ownership of this allocation.
     unsafe {
         *out = c_string.into_raw();
     }
@@ -606,6 +600,7 @@ fn read_required_cstr(name: &str, value: *const c_char) -> Result<String, FfiErr
             format!("{name} must not be null"),
         ));
     }
+    // SAFETY: the ABI contract requires a readable NUL-terminated C string at `value`.
     let raw = unsafe { CStr::from_ptr(value) };
     raw.to_str()
         .map(str::to_owned)
@@ -616,6 +611,7 @@ fn read_optional_cstr(value: *const c_char) -> Result<Option<String>, FfiError> 
     if value.is_null() {
         return Ok(None);
     }
+    // SAFETY: the ABI contract requires a readable NUL-terminated C string at non-null `value`.
     let raw = unsafe { CStr::from_ptr(value) };
     let text = raw
         .to_str()
@@ -659,6 +655,7 @@ fn read_argv(argc: usize, argv: *const *const c_char) -> Result<Vec<String>, Ffi
             "argv must not be null when argc is nonzero",
         ));
     }
+    // SAFETY: the ABI contract requires `argv` to reference `argc` readable pointer elements.
     let values = unsafe { std::slice::from_raw_parts(argv, argc) };
     values
         .iter()
@@ -694,13 +691,13 @@ fn run_enveloped(raw_args: &[String], command: &str, args: &[String]) -> Result<
 
 fn run_cli_capture(raw_args: &[String]) -> Result<CapturedRun, FfiError> {
     let started = Instant::now();
-    let raw_args = normalize_raw_argv(raw_args.to_vec());
+    let raw_args = normalize_cli_syntax(&normalize_raw_argv(raw_args.to_vec()));
 
     if is_version_request(&raw_args) {
         return Ok(CapturedRun {
             command: "version".to_owned(),
             args: Vec::new(),
-            stdout: format!("{}\n", version_string()),
+            stdout: format!("{}\n", product_banner()),
         });
     }
     if is_help_request(&raw_args) {
@@ -712,7 +709,7 @@ fn run_cli_capture(raw_args: &[String]) -> Result<CapturedRun, FfiError> {
     }
 
     let parsed_args = preprocess_args(&raw_args);
-    let cli = Cli::try_parse_from(parsed_args)
+    let cli = parse_cli(parsed_args)
         .map_err(|e| FfiError::new(RSX_STATUS_INVALID_OPTIONS, e.to_string().trim().to_owned()))?;
     let cfg = Config::from_cli(&cli, false);
     if cfg.workers > 0 {
@@ -915,7 +912,11 @@ fn normalize_raw_argv(mut args: Vec<String>) -> Vec<String> {
     {
         return args;
     }
-    if is_known_command(&first) || first.starts_with('-') {
+    let slash_command = first
+        .strip_prefix('/')
+        .and_then(|value| value.split([':', '=']).next())
+        .is_some_and(is_known_command);
+    if is_known_command(&first) || slash_command || first.starts_with('-') {
         args.insert(0, "resx".to_owned());
     }
     args
@@ -939,7 +940,6 @@ fn is_known_command(command: &str) -> bool {
             | "callers"
             | "locate"
             | "locate-sym"
-            | "explain"
             | "scan"
             | "diff"
             | "index"
@@ -947,6 +947,7 @@ fn is_known_command(command: &str) -> bool {
             | "types"
             | "yara"
             | "update"
+            | "config"
             | "version"
     )
 }
@@ -967,7 +968,6 @@ fn command_supports_json(command: &str) -> bool {
             | "callers"
             | "locate"
             | "locate-sym"
-            | "explain"
             | "scan"
             | "diff"
             | "index"
@@ -1025,21 +1025,25 @@ fn ffi_help_text() -> String {
         r#"{version}
 
 Native DLL/FFI entry points:
-  RsxRunArgs(argc, argv, out_utf8)
-  RsxRunCommandJson(request_json, out_json)
+  ResxRunArgs(argc, argv, out_utf8)
+  ResxRunCommandJson(request_json, out_json)
+
+Generic command coverage also includes:
+  contracts / ipc / network / crypto / strings / payload
+  driver / ioctl / behavior / entropy
 
 Typed analysis exports:
-  RsxDump / RsxDumpAt / RsxDumpOrdinal
-  RsxCfg / RsxCfgAt / RsxCfgOrdinal
-  RsxReconstructCfg / RsxIntelli
-  RsxPeInfo / RsxSections / RsxPeCheck
-  RsxShowEat / RsxShowIat / RsxShowSyms / RsxTypes
-  RsxFollowCallers / RsxLocate / RsxLocateSymbols / RsxExplain
-  RsxDiff / RsxCfgDiff / RsxIndex / RsxHunt / RsxScan / RsxYara
-  RsxPriority / RsxUpdate
+  ResxDump / ResxDumpAt / ResxDumpOrdinal
+  ResxCfg / ResxCfgAt / ResxCfgOrdinal
+  ResxReconstructCfg / ResxIntelli
+  ResxPeInfo / ResxSections / ResxPeCheck
+  ResxShowEat / ResxShowIat / ResxShowSyms / ResxTypes
+  ResxFollowCallers / ResxLocate / ResxLocateSymbols
+  ResxDiff / ResxCfgDiff / ResxIndex / ResxHunt / ResxScan / ResxYara
+  ResxPriority / ResxUpdate
 
 Memory:
-  All returned char* values are UTF-8 and must be released with RsxFreeString.
+  All returned char* values are UTF-8 and must be released with ResxFreeString.
 
 Options:
   Pass options_json as a JSON object using CLI flag names in snake_case or kebab-case.
@@ -1047,7 +1051,7 @@ Options:
 
 For the full interactive CLI help, run `resx help`.
 "#,
-        version = version_string()
+        version = product_banner()
     )
 }
 

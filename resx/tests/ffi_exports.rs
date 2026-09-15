@@ -8,11 +8,11 @@ use std::ptr;
 use std::time::Instant;
 
 use resx::ffi::{
-    RsxCfg, RsxCfgAt, RsxCfgDiff, RsxCfgOrdinal, RsxDiff, RsxDump, RsxDumpAt, RsxDumpOrdinal,
-    RsxExplain, RsxFollowCallers, RsxFreeString, RsxHelp, RsxHunt, RsxIndex, RsxIntelli, RsxLocate,
-    RsxLocateSymbols, RsxPeCheck, RsxPeInfo, RsxPriority, RsxReconstructCfg, RsxRunArgs,
-    RsxRunCommandJson, RsxScan, RsxSections, RsxShowEat, RsxShowIat, RsxShowSyms, RsxTypes,
-    RsxUpdate, RsxVersion, RsxYara,
+    ResxCfg, ResxCfgAt, ResxCfgDiff, ResxCfgOrdinal, ResxDiff, ResxDump, ResxDumpAt,
+    ResxDumpOrdinal, ResxFollowCallers, ResxFreeString, ResxHelp, ResxHunt, ResxIndex, ResxIntelli,
+    ResxLocate, ResxLocateSymbols, ResxPeCheck, ResxPeInfo, ResxPriority, ResxReconstructCfg,
+    ResxRunArgs, ResxRunCommandJson, ResxScan, ResxSections, ResxShowEat, ResxShowIat,
+    ResxShowSyms, ResxTypes, ResxUpdate, ResxVersion, ResxYara,
 };
 use serde_json::{json, Value};
 
@@ -27,17 +27,17 @@ fn workspace_root() -> PathBuf {
 }
 
 fn corpus_root() -> PathBuf {
-    workspace_root().join("resx-palace")
+    workspace_root().join("resx-fixtures")
 }
 
 fn build_dir() -> PathBuf {
     workspace_root()
         .join("target-resx-tests")
-        .join("resx-palace-test")
+        .join("resx-fixtures-test")
 }
 
 fn build_out_dir_arg() -> String {
-    r"..\target-resx-tests\resx-palace-test".to_owned()
+    r"..\target-resx-tests\resx-fixtures-test".to_owned()
 }
 
 fn sample_path(name: &str) -> PathBuf {
@@ -45,9 +45,9 @@ fn sample_path(name: &str) -> PathBuf {
 }
 
 fn ensure_samples() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    let dll = sample_path("resx_palace.dll");
-    let variant = sample_path("resx_palace_variant.dll");
-    let exe = sample_path("resx_palace_probe.exe");
+    let dll = sample_path("resx_fixtures.dll");
+    let variant = sample_path("resx_fixtures_variant.dll");
+    let exe = sample_path("resx_fixtures_probe.exe");
     if dll.exists() && variant.exists() && exe.exists() {
         return Some((dll, variant, exe));
     }
@@ -66,22 +66,20 @@ fn ensure_samples() -> Option<(PathBuf, PathBuf, PathBuf)> {
         ])
         .current_dir(workspace_root())
         .output()
-        .expect("failed to launch resx-palace build script");
+        .expect("failed to launch resx-fixtures build script");
 
     if !output.status.success() {
-        eprintln!(
-            "skipping RESX FFI test: sample build failed\nstdout:\n{}\nstderr:\n{}",
+        panic!(
+            "RESX FFI test: sample build failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        return None;
     }
 
     if dll.exists() && variant.exists() && exe.exists() {
         Some((dll, variant, exe))
     } else {
-        eprintln!("skipping RESX FFI test: build did not produce expected samples");
-        None
+        panic!("RESX FFI test: build did not produce expected samples");
     }
 }
 
@@ -102,7 +100,7 @@ fn with_out(call: impl FnOnce(*mut *mut c_char) -> i32) -> (i32, String) {
         let text = unsafe { CStr::from_ptr(out) }
             .to_string_lossy()
             .into_owned();
-        RsxFreeString(out);
+        ResxFreeString(out);
         text
     };
     (status, text)
@@ -157,44 +155,43 @@ fn export_rva_and_ordinal(eat_payload: &Value) -> (String, u32) {
 
 #[test]
 fn ffi_export_symbols_are_linkable() {
-    let _ = RsxFreeString as extern "C" fn(*mut c_char);
-    let _ = RsxVersion as extern "C" fn(*mut *mut c_char) -> i32;
-    let _ = RsxHelp as extern "C" fn(*mut *mut c_char) -> i32;
-    let _ = RsxRunArgs as extern "C" fn(usize, *const *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxRunCommandJson as extern "C" fn(*const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxDump
+    let _ = ResxFreeString as extern "C" fn(*mut c_char);
+    let _ = ResxVersion as extern "C" fn(*mut *mut c_char) -> i32;
+    let _ = ResxHelp as extern "C" fn(*mut *mut c_char) -> i32;
+    let _ = ResxRunArgs as extern "C" fn(usize, *const *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxRunCommandJson as extern "C" fn(*const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxDump
         as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxDumpAt
+    let _ = ResxDumpAt
+        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxDumpOrdinal
+        as extern "C" fn(*const c_char, u32, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxCfg
+        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxCfgAt
         as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
     let _ =
-        RsxDumpOrdinal as extern "C" fn(*const c_char, u32, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxCfg
-        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxCfgAt
-        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
+        ResxCfgOrdinal as extern "C" fn(*const c_char, u32, *const c_char, *mut *mut c_char) -> i32;
     let _ =
-        RsxCfgOrdinal as extern "C" fn(*const c_char, u32, *const c_char, *mut *mut c_char) -> i32;
+        ResxReconstructCfg as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxIntelli
+        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxPeInfo as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxSections as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxPeCheck as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxShowEat as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxShowIat as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxShowSyms as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxTypes
+        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxFollowCallers
+        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxLocate as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
     let _ =
-        RsxReconstructCfg as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxIntelli
+        ResxLocateSymbols as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxDiff
         as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxPeInfo as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxSections as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxPeCheck as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxShowEat as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxShowIat as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxShowSyms as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxTypes
-        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxFollowCallers
-        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxLocate as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ =
-        RsxLocateSymbols as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxExplain as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxDiff
-        as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxCfgDiff
+    let _ = ResxCfgDiff
         as extern "C" fn(
             *const c_char,
             *const c_char,
@@ -202,13 +199,13 @@ fn ffi_export_symbols_are_linkable() {
             *const c_char,
             *mut *mut c_char,
         ) -> i32;
-    let _ = RsxIndex as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxHunt as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxScan as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxYara
+    let _ = ResxIndex as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxHunt as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxScan as extern "C" fn(*const c_char, *const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxYara
         as extern "C" fn(*const c_char, *const c_char, *const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxPriority as extern "C" fn(*const c_char, *mut *mut c_char) -> i32;
-    let _ = RsxUpdate as extern "C" fn(*const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxPriority as extern "C" fn(*const c_char, *mut *mut c_char) -> i32;
+    let _ = ResxUpdate as extern "C" fn(*const c_char, *mut *mut c_char) -> i32;
 }
 
 #[test]
@@ -223,13 +220,13 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
     let function = cstr(EXPORT_NAME);
     let no_pdb = options(json!({"no_pdb": true, "max_insns": 128, "max_functions": 256}));
 
-    let (status, version) = trace_step("RsxVersion", || with_out(|out| RsxVersion(out)));
+    let (status, version) = trace_step("ResxVersion", || with_out(|out| ResxVersion(out)));
     assert_eq!(status, RSX_STATUS_OK);
     assert!(version.contains("RESX v"));
 
-    let (status, help) = trace_step("RsxHelp", || with_out(|out| RsxHelp(out)));
+    let (status, help) = trace_step("ResxHelp", || with_out(|out| ResxHelp(out)));
     assert_eq!(status, RSX_STATUS_OK);
-    assert!(help.contains("RsxRunCommandJson"));
+    assert!(help.contains("ResxRunCommandJson"));
 
     let argv = [
         cstr("eat"),
@@ -239,99 +236,101 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
         cstr("--quiet"),
     ];
     let argv_ptrs = argv.iter().map(|s| s.as_ptr()).collect::<Vec<_>>();
-    let (status, raw_eat) = trace_step("RsxRunArgs/eat", || {
-        with_out(|out| RsxRunArgs(argv_ptrs.len(), argv_ptrs.as_ptr(), out))
+    let (status, raw_eat) = trace_step("ResxRunArgs/eat", || {
+        with_out(|out| ResxRunArgs(argv_ptrs.len(), argv_ptrs.as_ptr(), out))
     });
     assert_eq!(status, RSX_STATUS_OK, "{raw_eat}");
-    let raw_eat: Value = serde_json::from_str(&raw_eat).expect("RsxRunArgs should return raw JSON");
+    let raw_eat: Value =
+        serde_json::from_str(&raw_eat).expect("ResxRunArgs should return raw JSON");
     assert_eq!(raw_eat["schema_version"], 1);
 
-    let peinfo = trace_step("RsxPeInfo", || {
-        payload(|out| RsxPeInfo(dll.as_ptr(), no_pdb.as_ptr(), out))
+    let peinfo = trace_step("ResxPeInfo", || {
+        payload(|out| ResxPeInfo(dll.as_ptr(), no_pdb.as_ptr(), out))
     });
-    assert_eq!(peinfo["peinfo"]["file_name"], "resx_palace.dll");
+    assert_eq!(peinfo["peinfo"]["file_name"], "resx_fixtures.dll");
 
-    let eat = trace_step("RsxShowEat", || {
-        payload(|out| RsxShowEat(dll.as_ptr(), no_pdb.as_ptr(), out))
+    let eat = trace_step("ResxShowEat", || {
+        payload(|out| ResxShowEat(dll.as_ptr(), no_pdb.as_ptr(), out))
     });
     let (rva, ordinal) = export_rva_and_ordinal(&eat);
     let rva = cstr(rva);
 
-    let iat = trace_step("RsxShowIat", || {
-        payload(|out| RsxShowIat(dll.as_ptr(), no_pdb.as_ptr(), out))
+    let iat = trace_step("ResxShowIat", || {
+        payload(|out| ResxShowIat(dll.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert!(iat["imports"].is_array());
 
-    let sections = trace_step("RsxSections", || {
-        payload(|out| RsxSections(dll.as_ptr(), no_pdb.as_ptr(), out))
+    let sections = trace_step("ResxSections", || {
+        payload(|out| ResxSections(dll.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert!(sections["dump"]["sections"].is_array());
 
-    let pecheck = trace_step("RsxPeCheck", || {
-        payload(|out| RsxPeCheck(dll.as_ptr(), no_pdb.as_ptr(), out))
+    let pecheck = trace_step("ResxPeCheck", || {
+        payload(|out| ResxPeCheck(dll.as_ptr(), no_pdb.as_ptr(), out))
     });
-    assert!(pecheck["dump"]["header_corrupt"].is_boolean());
+    assert!(pecheck["pechk"]["header_corrupt"].is_boolean());
+    assert!(pecheck["pechk"]["findings"].is_array());
 
-    let dump = trace_step("RsxDump", || {
-        payload(|out| RsxDump(dll.as_ptr(), function.as_ptr(), no_pdb.as_ptr(), out))
+    let dump = trace_step("ResxDump", || {
+        payload(|out| ResxDump(dll.as_ptr(), function.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert_eq!(dump["dump"]["function"], EXPORT_NAME);
 
-    let dump_at = trace_step("RsxDumpAt", || {
-        payload(|out| RsxDumpAt(dll.as_ptr(), rva.as_ptr(), no_pdb.as_ptr(), out))
+    let dump_at = trace_step("ResxDumpAt", || {
+        payload(|out| ResxDumpAt(dll.as_ptr(), rva.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert!(dump_at["dump"]["instructions"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
 
-    let dump_ordinal = trace_step("RsxDumpOrdinal", || {
-        payload(|out| RsxDumpOrdinal(dll.as_ptr(), ordinal, no_pdb.as_ptr(), out))
+    let dump_ordinal = trace_step("ResxDumpOrdinal", || {
+        payload(|out| ResxDumpOrdinal(dll.as_ptr(), ordinal, no_pdb.as_ptr(), out))
     });
     assert!(dump_ordinal["dump"]["instructions"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
 
-    let cfg = trace_step("RsxCfg", || {
-        call_json(|out| RsxCfg(dll.as_ptr(), function.as_ptr(), no_pdb.as_ptr(), out))
+    let cfg = trace_step("ResxCfg", || {
+        call_json(|out| ResxCfg(dll.as_ptr(), function.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert!(cfg["text"].as_str().unwrap_or_default().contains("CFG:"));
 
-    let cfg_at = trace_step("RsxCfgAt", || {
-        call_json(|out| RsxCfgAt(dll.as_ptr(), rva.as_ptr(), no_pdb.as_ptr(), out))
+    let cfg_at = trace_step("ResxCfgAt", || {
+        call_json(|out| ResxCfgAt(dll.as_ptr(), rva.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert!(cfg_at["text"].as_str().unwrap_or_default().contains("CFG:"));
 
-    let cfg_ordinal = trace_step("RsxCfgOrdinal", || {
-        call_json(|out| RsxCfgOrdinal(dll.as_ptr(), ordinal, no_pdb.as_ptr(), out))
+    let cfg_ordinal = trace_step("ResxCfgOrdinal", || {
+        call_json(|out| ResxCfgOrdinal(dll.as_ptr(), ordinal, no_pdb.as_ptr(), out))
     });
     assert!(cfg_ordinal["text"]
         .as_str()
         .unwrap_or_default()
         .contains("CFG:"));
 
-    let intelli = trace_step("RsxIntelli", || {
-        payload(|out| RsxIntelli(dll.as_ptr(), function.as_ptr(), no_pdb.as_ptr(), out))
+    let intelli = trace_step("ResxIntelli", || {
+        payload(|out| ResxIntelli(dll.as_ptr(), function.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert_eq!(intelli["dump"]["function"], EXPORT_NAME);
 
-    let reconstruct = trace_step("RsxReconstructCfg", || {
-        payload(|out| RsxReconstructCfg(exe.as_ptr(), no_pdb.as_ptr(), out))
+    let reconstruct = trace_step("ResxReconstructCfg", || {
+        payload(|out| ResxReconstructCfg(exe.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert_eq!(
         reconstruct["reconstruct_cfg"]["image"],
-        "resx_palace_probe.exe"
+        "resx_fixtures_probe.exe"
     );
 
-    let diff = trace_step("RsxDiff", || {
-        payload(|out| RsxDiff(dll.as_ptr(), variant.as_ptr(), no_pdb.as_ptr(), out))
+    let diff = trace_step("ResxDiff", || {
+        payload(|out| ResxDiff(dll.as_ptr(), variant.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert!(diff["diff"]["summary"]["similarity_score"]
         .as_u64()
         .is_some_and(|score| score > 50));
 
-    let cfg_diff = trace_step("RsxCfgDiff", || {
+    let cfg_diff = trace_step("ResxCfgDiff", || {
         payload(|out| {
-            RsxCfgDiff(
+            ResxCfgDiff(
                 dll.as_ptr(),
                 variant.as_ptr(),
                 function.as_ptr(),
@@ -352,22 +351,22 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
         "max_functions": 256,
         "no_pdb": true
     }));
-    let index = trace_step("RsxIndex", || {
-        payload(|out| RsxIndex(scan_root.as_ptr(), corpus_options.as_ptr(), out))
+    let index = trace_step("ResxIndex", || {
+        payload(|out| ResxIndex(scan_root.as_ptr(), corpus_options.as_ptr(), out))
     });
     assert!(index["index"]["images"]
         .as_array()
         .is_some_and(|images| images.len() >= 3));
 
-    let hunt = trace_step("RsxHunt", || {
-        payload(|out| RsxHunt(variant.as_ptr(), corpus_options.as_ptr(), out))
+    let hunt = trace_step("ResxHunt", || {
+        payload(|out| ResxHunt(variant.as_ptr(), corpus_options.as_ptr(), out))
     });
     assert!(hunt["hunt"]["candidates"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
 
-    let scan = trace_step("RsxScan", || {
-        payload(|out| RsxScan(scan_root.as_ptr(), corpus_options.as_ptr(), out))
+    let scan = trace_step("ResxScan", || {
+        payload(|out| ResxScan(scan_root.as_ptr(), corpus_options.as_ptr(), out))
     });
     assert_eq!(scan["kind"], "scan");
 
@@ -379,20 +378,15 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
         "no_pdb": true,
         "max_total": 32
     }));
-    let locate = trace_step("RsxLocate", || {
-        payload(|out| RsxLocate(function.as_ptr(), locate_options.as_ptr(), out))
+    let locate = trace_step("ResxLocate", || {
+        payload(|out| ResxLocate(function.as_ptr(), locate_options.as_ptr(), out))
     });
     assert!(locate["matches"].as_array().is_some());
 
-    let locate_symbols = trace_step("RsxLocateSymbols", || {
-        payload(|out| RsxLocateSymbols(function.as_ptr(), locate_options.as_ptr(), out))
+    let locate_symbols = trace_step("ResxLocateSymbols", || {
+        payload(|out| ResxLocateSymbols(function.as_ptr(), locate_options.as_ptr(), out))
     });
     assert!(locate_symbols["matches"].as_array().is_some());
-
-    let explain = trace_step("RsxExplain", || {
-        payload(|out| RsxExplain(cstr("Nt").as_ptr(), no_pdb.as_ptr(), out))
-    });
-    assert_eq!(explain["explain"]["query"], "Nt");
 
     let request = cstr(
         json!({
@@ -402,13 +396,13 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
         })
         .to_string(),
     );
-    let generic = trace_step("RsxRunCommandJson/diff", || {
-        payload(|out| RsxRunCommandJson(request.as_ptr(), out))
+    let generic = trace_step("ResxRunCommandJson/diff", || {
+        payload(|out| ResxRunCommandJson(request.as_ptr(), out))
     });
     assert_eq!(generic["diff"]["summary"]["similarity_score"], 100);
 
-    let (types_status, types) = trace_step("RsxTypes", || {
-        call_any_json(|out| RsxTypes(dll.as_ptr(), ptr::null(), no_pdb.as_ptr(), out))
+    let (types_status, types) = trace_step("ResxTypes", || {
+        call_any_json(|out| ResxTypes(dll.as_ptr(), ptr::null(), no_pdb.as_ptr(), out))
     });
     if types_status == RSX_STATUS_OK {
         assert!(types["payload"]["types"].is_array());
@@ -423,9 +417,9 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
         "max_total": 16,
         "no_pdb": true
     }));
-    let (callers_status, callers) = trace_step("RsxFollowCallers", || {
+    let (callers_status, callers) = trace_step("ResxFollowCallers", || {
         call_any_json(|out| {
-            RsxFollowCallers(
+            ResxFollowCallers(
                 dll.as_ptr(),
                 function.as_ptr(),
                 callers_options.as_ptr(),
@@ -438,8 +432,8 @@ fn ffi_wrappers_cover_resx_analysis_surface() {
     }
 
     let missing_rule = cstr(sample_path("missing-rule.yar").to_string_lossy());
-    let (status, yara_error) = trace_step("RsxYara/missing-rule", || {
-        with_out(|out| RsxYara(dll.as_ptr(), missing_rule.as_ptr(), no_pdb.as_ptr(), out))
+    let (status, yara_error) = trace_step("ResxYara/missing-rule", || {
+        with_out(|out| ResxYara(dll.as_ptr(), missing_rule.as_ptr(), no_pdb.as_ptr(), out))
     });
     assert_ne!(status, RSX_STATUS_OK);
     assert!(yara_error.contains("\"status\": \"error\""));
