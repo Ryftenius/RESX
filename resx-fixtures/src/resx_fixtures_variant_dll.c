@@ -1,23 +1,23 @@
 #define WIN32_LEAN_AND_MEAN
-#define RESX_PALACE_EXPORTS
+#define RESX_FIXTURES_EXPORTS
 #include <windows.h>
-#include "resx_palace.h"
+#include "resx_fixtures.h"
 
 static volatile LONG g_resx_variant_sink;
 
-static int palace_add(int value) {
+static int fixtures_add(int value) {
     return value + 19;
 }
 
-static int palace_xor(int value) {
+static int fixtures_xor(int value) {
     return value ^ 0x6B6B;
 }
 
-static int palace_mix(int value) {
+static int fixtures_mix(int value) {
     return (value * 5) - 11;
 }
 
-static int palace_guard_score(const unsigned char *data, unsigned int len) {
+static int fixtures_guard_score(const unsigned char *data, unsigned int len) {
     unsigned int i = 0;
     int score = 7;
 
@@ -31,7 +31,7 @@ static int palace_guard_score(const unsigned char *data, unsigned int len) {
     return score;
 }
 
-RESX_PALACE_API int ResxParsePacket(const unsigned char *data, unsigned int len) {
+RESX_FIXTURES_API int ResxParsePacket(const unsigned char *data, unsigned int len) {
     unsigned int cursor = 0;
     int score = 0;
 
@@ -55,7 +55,7 @@ RESX_PALACE_API int ResxParsePacket(const unsigned char *data, unsigned int len)
             }
             break;
         case 0x20:
-            score += palace_guard_score(data + cursor, size);
+            score += fixtures_guard_score(data + cursor, size);
             break;
         default:
             score -= (int)(tag ^ 0x11);
@@ -68,7 +68,7 @@ RESX_PALACE_API int ResxParsePacket(const unsigned char *data, unsigned int len)
     return score;
 }
 
-RESX_PALACE_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, unsigned int len) {
+RESX_FIXTURES_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, unsigned int len) {
     unsigned char *bytes = (unsigned char *)buffer;
 
     if (buffer == 0 || len == 0) {
@@ -84,7 +84,7 @@ RESX_PALACE_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, uns
     }
     if (code == 0x222008 && len >= 2) {
         bytes[1] = (unsigned char)(bytes[1] + 9);
-        return palace_guard_score(bytes, len);
+        return fixtures_guard_score(bytes, len);
     }
     if ((code & 3) == 3) {
         return (int)(len + code + 4);
@@ -92,13 +92,13 @@ RESX_PALACE_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, uns
     return -3;
 }
 
-RESX_PALACE_API DWORD WINAPI ResxThreadCallbackEntry(void *ctx) {
+RESX_FIXTURES_API DWORD WINAPI ResxThreadCallbackEntry(void *ctx) {
     int value = ctx ? *(int *)ctx : 0;
     InterlockedAdd(&g_resx_variant_sink, value + 2);
     return (DWORD)(value + 2);
 }
 
-RESX_PALACE_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value) {
+RESX_FIXTURES_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value) {
     switch (opcode) {
     case 0:
         return value + 1;
@@ -115,31 +115,31 @@ RESX_PALACE_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value) 
     case 6:
         return value & 0x7F;
     case 7:
-        return value + palace_add(value);
+        return value + fixtures_add(value);
     case 8:
-        return palace_xor(value);
+        return fixtures_xor(value);
     case 9:
-        return palace_mix(value);
+        return fixtures_mix(value);
     case 10:
-        return palace_guard_score((const unsigned char *)&value, sizeof(value));
+        return fixtures_guard_score((const unsigned char *)&value, sizeof(value));
     default:
         return -120;
     }
 }
 
-RESX_PALACE_API int ResxIndirectCallMessage(ResxPalaceCallback callback, int value) {
-    ResxPalaceCallback table[4];
+RESX_FIXTURES_API int ResxIndirectCallMessage(ResxFixturesCallback callback, int value) {
+    ResxFixturesCallback table[4];
     unsigned int index = (unsigned int)value % 4;
 
-    table[0] = palace_add;
-    table[1] = palace_xor;
-    table[2] = callback ? callback : palace_mix;
-    table[3] = palace_mix;
+    table[0] = fixtures_add;
+    table[1] = fixtures_xor;
+    table[2] = callback ? callback : fixtures_mix;
+    table[3] = fixtures_mix;
 
     return table[index](value);
 }
 
-RESX_PALACE_API int ResxBehaviorSignals(unsigned int selector) {
+RESX_FIXTURES_API int ResxBehaviorSignals(unsigned int selector) {
     HMODULE kernel = LoadLibraryA("kernel32.dll");
     FARPROC proc = kernel ? GetProcAddress(kernel, "GetCurrentProcessId") : 0;
     if (kernel != 0) {

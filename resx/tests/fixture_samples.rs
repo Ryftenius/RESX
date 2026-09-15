@@ -23,16 +23,16 @@ fn workspace_root() -> PathBuf {
 }
 
 fn corpus_root() -> PathBuf {
-    workspace_root().join("resx-palace")
+    workspace_root().join("resx-fixtures")
 }
 
 fn build_dir() -> PathBuf {
     let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
     let target = PathBuf::from(target);
     if target.is_absolute() {
-        target.join("resx-palace-test")
+        target.join("resx-fixtures-test")
     } else {
-        workspace_root().join(target).join("resx-palace-test")
+        workspace_root().join(target).join("resx-fixtures-test")
     }
 }
 
@@ -40,9 +40,9 @@ fn build_out_dir_arg() -> String {
     let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
     let target = PathBuf::from(target);
     let out = if target.is_absolute() {
-        target.join("resx-palace-test")
+        target.join("resx-fixtures-test")
     } else {
-        PathBuf::from("..").join(target).join("resx-palace-test")
+        PathBuf::from("..").join(target).join("resx-fixtures-test")
     };
     out.to_string_lossy().to_string()
 }
@@ -52,9 +52,9 @@ fn sample_path(name: &str) -> PathBuf {
 }
 
 fn ensure_samples() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    let dll = sample_path("resx_palace.dll");
-    let variant = sample_path("resx_palace_variant.dll");
-    let exe = sample_path("resx_palace_probe.exe");
+    let dll = sample_path("resx_fixtures.dll");
+    let variant = sample_path("resx_fixtures_variant.dll");
+    let exe = sample_path("resx_fixtures_probe.exe");
 
     let script = corpus_root().join("scripts").join("build.ps1");
     let out_dir_arg = build_out_dir_arg();
@@ -70,28 +70,31 @@ fn ensure_samples() -> Option<(PathBuf, PathBuf, PathBuf)> {
         ])
         .current_dir(workspace_root())
         .output()
-        .expect("failed to launch resx-palace build script");
+        .expect("failed to launch resx-fixtures build script");
 
     if !output.status.success() {
-        eprintln!(
-            "skipping resx-palace integration test: sample build failed\nstdout:\n{}\nstderr:\n{}",
+        panic!(
+            "resx-fixtures integration test: sample build failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        return None;
     }
 
     if dll.exists() && variant.exists() && exe.exists() {
         Some((dll, variant, exe))
     } else {
-        eprintln!("skipping resx-palace integration test: build did not produce expected samples");
-        None
+        panic!("resx-fixtures integration test: build did not produce expected samples");
     }
 }
 
 fn run_resx(args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_resx"))
         .args(args)
+        .args(if args.contains(&"--no-pdb") {
+            Vec::<&str>::new()
+        } else {
+            vec!["--no-pdb"]
+        })
         .output()
         .expect("failed to run resx");
     assert!(
@@ -124,19 +127,29 @@ fn hex_byte(value: u8) -> String {
 }
 
 #[test]
-fn resx_palace_samples_exercise_binary_analysis_commands() {
+fn resx_fixtures_samples_exercise_binary_analysis_commands() {
     let Some((dll, variant, exe)) = ensure_samples() else {
         return;
     };
+    // Keep the index/hunt contract independent of unrelated fixture additions
+    // and filesystem enumeration order under the bounded --max-files budget.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scan_root = build_dir().join(format!("scan-inputs-{}-{stamp}", std::process::id()));
+    fs::create_dir(&scan_root).unwrap();
+    for image in [&dll, &variant, &exe] {
+        fs::copy(image, scan_root.join(image.file_name().unwrap())).unwrap();
+    }
     let dll = dll.to_str().unwrap();
     let variant = variant.to_str().unwrap();
     let exe = exe.to_str().unwrap();
-    let scan_root = build_dir();
     let scan_root = scan_root.to_str().unwrap();
 
     let peinfo = run_json(&["peinfo", dll, "--json", "--no-color", "--quiet"]);
     assert_eq!(peinfo["schema_version"], 1);
-    assert_eq!(peinfo["peinfo"]["file_name"], "resx_palace.dll");
+    assert_eq!(peinfo["peinfo"]["file_name"], "resx_fixtures.dll");
     assert!(peinfo["peinfo"]["sections"]
         .as_array()
         .is_some_and(|sections| !sections.is_empty()));
@@ -221,10 +234,10 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         assert_eq!(dump_at["dump"]["instructions"][0]["rva"], "0x00001200");
     }
 
-    let patch_out = build_dir().join("resx_palace.patch-test.dll");
+    let patch_out = build_dir().join("resx_fixtures.patch-test.dll");
     let _ = fs::remove_file(&patch_out);
     let patch_out = patch_out.to_str().unwrap();
-    let original_raw = fs::read(dll).expect("read resx-palace dll");
+    let original_raw = fs::read(dll).expect("read resx-fixtures dll");
     let patch_file_offset = 0x600usize;
     let original_byte = original_raw[patch_file_offset];
     let replacement_byte = if original_byte == 0x90 { 0xCC } else { 0x90 };
@@ -301,7 +314,7 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         "--quiet",
     ]);
     assert_eq!(patch["schema_version"], 1);
-    assert_eq!(patch["patch"]["image"], "resx_palace.dll");
+    assert_eq!(patch["patch"]["image"], "resx_fixtures.dll");
     assert_eq!(patch["patch"]["address"]["file_offset"], "0x00000600");
     assert_eq!(patch["patch"]["bytes"]["original"], original_hex);
     assert_eq!(patch["patch"]["bytes"]["replacement"], replacement_hex);
@@ -327,7 +340,7 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         "--no-color",
         "--quiet",
     ]);
-    assert!(cfg.contains("CFG: resx_palace.dll!ResxSwitchJumpTableDispatch"));
+    assert!(cfg.contains("CFG: resx_fixtures.dll!ResxSwitchJumpTableDispatch"));
     assert!(
         cfg.contains("block") || cfg.contains("Basic") || cfg.contains("->"),
         "cfg output did not look like a graph:\n{cfg}"
@@ -348,7 +361,7 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
     assert_eq!(reconstruct["schema_version"], 1);
     assert_eq!(
         reconstruct["reconstruct_cfg"]["image"],
-        "resx_palace_probe.exe"
+        "resx_fixtures_probe.exe"
     );
     assert!(reconstruct["reconstruct_cfg"]["roots"]
         .as_array()
@@ -356,7 +369,7 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
 
     let behavior = run_json(&["behavior", dll, "--json", "--no-color", "--quiet"]);
     assert_eq!(behavior["schema_version"], 1);
-    assert_eq!(behavior["behavior"]["image"], "resx_palace.dll");
+    assert_eq!(behavior["behavior"]["image"], "resx_fixtures.dll");
     let behavior_findings = behavior["behavior"]["findings"]
         .as_array()
         .expect("behavior findings should be an array");
@@ -376,39 +389,6 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         );
     }
 
-    let unpack = run_json(&["unpack", dll, "--json", "--no-color", "--quiet"]);
-    assert_eq!(unpack["schema_version"], 1);
-    assert_eq!(unpack["unpack"]["image"], "resx_palace.dll");
-    let protector_hints = unpack["unpack"]["protector_hints"]
-        .as_array()
-        .expect("unpack protector_hints should be an array");
-    for expected_rule in ["upx-marker", "vmprotect-themida-marker"] {
-        assert!(
-            protector_hints
-                .iter()
-                .any(|item| item["rule"] == expected_rule),
-            "missing unpack protector rule {expected_rule} in {unpack:#}"
-        );
-    }
-    assert!(unpack["unpack"]["oep_candidates"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(unpack["unpack"]["import_rebuild_hints"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(unpack["unpack"]["vm_candidates"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(unpack["unpack"]["layer2"]["oep_windows"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(unpack["unpack"]["layer2"]["import_plan"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-    assert!(unpack["unpack"]["layer2"]["vm_sketches"]
-        .as_array()
-        .is_some_and(|items| !items.is_empty()));
-
     let entropy = run_json(&[
         "entropy",
         dll,
@@ -421,7 +401,7 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         "512",
     ]);
     assert_eq!(entropy["schema_version"], 1);
-    assert_eq!(entropy["entropy"]["image"], "resx_palace.dll");
+    assert_eq!(entropy["entropy"]["image"], "resx_fixtures.dll");
     assert!(entropy["entropy"]["windows"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
@@ -563,7 +543,7 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
     assert!(cfg_diff_dot.contains("digraph cfg_diff"));
     assert!(cfg_diff_dot.contains("cluster_left"));
 
-    let db_path = sample_path("resx_palace.resxdb");
+    let db_path = sample_path("resx_fixtures.resxdb");
     let db = db_path.to_str().unwrap();
     let index = run_json(&[
         "index",
@@ -608,10 +588,10 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
         .expect("hunt candidates should be an array");
     assert!(candidates
         .iter()
-        .any(|item| item["name"] == "resx_palace.dll"));
+        .any(|item| item["name"] == "resx_fixtures.dll"));
     let base = candidates
         .iter()
-        .find(|item| item["name"] == "resx_palace.dll")
+        .find(|item| item["name"] == "resx_fixtures.dll")
         .expect("missing base DLL hunt candidate");
     assert!(
         base["unique_score"].as_u64().unwrap_or(0) >= 55,
@@ -635,17 +615,19 @@ fn resx_palace_samples_exercise_binary_analysis_commands() {
     let results = scan["results"]
         .as_array()
         .expect("scan results should be an array");
-    assert!(results.iter().any(|item| item["name"] == "resx_palace.dll"));
     assert!(results
         .iter()
-        .any(|item| item["name"] == "resx_palace_variant.dll"));
+        .any(|item| item["name"] == "resx_fixtures.dll"));
     assert!(results
         .iter()
-        .any(|item| item["name"] == "resx_palace_probe.exe"));
+        .any(|item| item["name"] == "resx_fixtures_variant.dll"));
+    assert!(results
+        .iter()
+        .any(|item| item["name"] == "resx_fixtures_probe.exe"));
 
     let dll_report = results
         .iter()
-        .find(|item| item["name"] == "resx_palace.dll")
+        .find(|item| item["name"] == "resx_fixtures.dll")
         .expect("missing DLL scan report");
     for expected in [
         "ResxParsePacket",

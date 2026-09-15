@@ -1,4 +1,4 @@
-LIBRARY "resx_palace"
+LIBRARY "resx_fixtures"
 EXPORTS
     ResxParsePacket
     ResxDeviceIoctlDispatch

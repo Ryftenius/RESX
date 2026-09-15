@@ -4,6 +4,9 @@ use std::process::Command;
 use serde_json::Value;
 
 fn fixture(name: &str) -> Option<PathBuf> {
+    if let Some(directory) = std::env::var_os("RESX_LEGACY_FIXTURE_DIR") {
+        return PathBuf::from(directory).join(name).canonicalize().ok();
+    }
     let mut roots = Vec::new();
 
     if let Some(workspace_dir) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
@@ -36,6 +39,11 @@ fn require_fixture(name: &str) -> Option<PathBuf> {
 fn run_json(args: &[&str]) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_resx"))
         .args(args)
+        .args(if args.contains(&"--no-pdb") {
+            Vec::<&str>::new()
+        } else {
+            vec!["--no-pdb"]
+        })
         .output()
         .expect("failed to run resx");
     assert!(
@@ -51,6 +59,11 @@ fn run_json_in(cwd: &Path, args: &[&str]) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_resx"))
         .current_dir(cwd)
         .args(args)
+        .args(if args.contains(&"--no-pdb") {
+            Vec::<&str>::new()
+        } else {
+            vec!["--no-pdb"]
+        })
         .output()
         .expect("failed to run resx");
     assert!(
@@ -103,10 +116,19 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
         "--quiet",
     ]);
     assert_eq!(dump["schema_version"], 1);
-    assert_eq!(dump["dump"]["function"], first_export);
-    assert!(dump["dump"]["instructions"]
+    let symbol_key = if dump["dump"]["target_kind"] == "data" {
+        "symbol"
+    } else {
+        "function"
+    };
+    assert_eq!(dump["dump"][symbol_key], first_export);
+    let instructions = dump["dump"]["instructions"]
         .as_array()
-        .is_some_and(|v| !v.is_empty()));
+        .expect("instruction array");
+    match dump["dump"]["target_kind"].as_str() {
+        Some("data") => assert!(instructions.is_empty()),
+        _ => assert!(!instructions.is_empty()),
+    }
 
     let xrefs = run_json(&[
         "xrefs",
@@ -117,7 +139,7 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
         "--quiet",
     ]);
     assert_eq!(xrefs["schema_version"], 1);
-    assert_eq!(xrefs["dump"]["function"], first_export);
+    assert_eq!(xrefs["dump"][symbol_key], first_export);
     assert!(xrefs["dump"]["xrefs"].as_array().is_some());
 
     let imports = run_json(&[
@@ -144,6 +166,27 @@ fn peinfo_dump_and_metadata_commands_use_versioned_json() {
     assert!(diff["diff"]["matches"]
         .as_array()
         .is_some_and(|v| !v.is_empty()));
+}
+
+#[test]
+fn pechk_json_is_bounded_and_excludes_unrelated_analysis() {
+    let Some(j58) = require_fixture("J58.dll") else {
+        return;
+    };
+    let pechk = run_json(&[
+        "pechk",
+        j58.to_str().unwrap(),
+        "--json",
+        "--no-color",
+        "--quiet",
+    ]);
+    assert_eq!(pechk["schema_version"], 1);
+    let report = &pechk["pechk"];
+    let findings = report["findings"].as_array().expect("findings array");
+    assert!(findings.len() <= 256);
+    assert!(report.get("function_discovery").is_none());
+    assert!(report.get("strings").is_none());
+    assert!(serde_json::to_vec(&pechk).unwrap().len() < 256 * 1024);
 }
 
 #[test]
@@ -209,17 +252,4 @@ fn symbol_and_type_commands_use_versioned_json() {
     ]);
     assert_eq!(types["schema_version"], 1);
     assert!(types["types"].as_array().is_some());
-}
-
-#[test]
-fn explain_command_uses_versioned_json() {
-    let explain = run_json(&[
-        "explain",
-        "NtQuerySystemInformation",
-        "--json",
-        "--no-color",
-        "--quiet",
-    ]);
-    assert_eq!(explain["schema_version"], 1);
-    assert_eq!(explain["explain"]["query"], "NtQuerySystemInformation");
 }

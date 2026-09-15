@@ -1,18 +1,18 @@
 #define WIN32_LEAN_AND_MEAN
-#define RESX_PALACE_EXPORTS
+#define RESX_FIXTURES_EXPORTS
 #include <windows.h>
 #include <intrin.h>
-#include "resx_palace.h"
+#include "resx_fixtures.h"
 
 static volatile LONG g_resx_sink;
-static const char g_resx_palace_protector_marker[] =
+static const char g_resx_fixtures_protector_marker[] =
     "UPX! VMProtect Themida virtual machine kernel32.dll GetProcAddress";
 
-static void NTAPI ResxPalaceTlsCallback(PVOID module, DWORD reason, PVOID reserved);
+static void NTAPI ResxFixturesTlsCallback(PVOID module, DWORD reason, PVOID reserved);
 
 #pragma section(".text$resx", execute, read)
 __declspec(allocate(".text$resx")) __declspec(align(16))
-const unsigned char g_resx_palace_syscall_stub_bytes[] = {
+const unsigned char g_resx_fixtures_syscall_stub_bytes[] = {
     0x4C, 0x8B, 0xD1,             /* mov r10, rcx */
     0xB8, 0x34, 0x12, 0x00, 0x00, /* mov eax, 0x1234 */
     0x0F, 0x05,                   /* syscall */
@@ -25,22 +25,22 @@ const unsigned char g_resx_palace_syscall_stub_bytes[] = {
 #else
 #pragma comment(linker, "/INCLUDE:_tls_used")
 #endif
-__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK g_resx_palace_tls_callback =
-    ResxPalaceTlsCallback;
+__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK g_resx_fixtures_tls_callback =
+    ResxFixturesTlsCallback;
 
-static int palace_add(int value) {
+static int fixtures_add(int value) {
     return value + 17;
 }
 
-static int palace_xor(int value) {
+static int fixtures_xor(int value) {
     return value ^ 0x5A5A;
 }
 
-static int palace_mix(int value) {
+static int fixtures_mix(int value) {
     return (value * 3) - 9;
 }
 
-RESX_PALACE_API int ResxParsePacket(const unsigned char *data, unsigned int len) {
+RESX_FIXTURES_API int ResxParsePacket(const unsigned char *data, unsigned int len) {
     unsigned int cursor = 0;
     int score = 0;
 
@@ -74,7 +74,7 @@ RESX_PALACE_API int ResxParsePacket(const unsigned char *data, unsigned int len)
     return score;
 }
 
-RESX_PALACE_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, unsigned int len) {
+RESX_FIXTURES_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, unsigned int len) {
     unsigned char *bytes = (unsigned char *)buffer;
 
     if (buffer == 0 || len == 0) {
@@ -94,13 +94,13 @@ RESX_PALACE_API int ResxDeviceIoctlDispatch(unsigned int code, void *buffer, uns
     return -2;
 }
 
-RESX_PALACE_API DWORD WINAPI ResxThreadCallbackEntry(void *ctx) {
+RESX_FIXTURES_API DWORD WINAPI ResxThreadCallbackEntry(void *ctx) {
     int value = ctx ? *(int *)ctx : 0;
     InterlockedAdd(&g_resx_sink, value);
     return (DWORD)(value + 1);
 }
 
-RESX_PALACE_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value) {
+RESX_FIXTURES_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value) {
     switch (opcode) {
     case 0:
         return value + 1;
@@ -117,28 +117,28 @@ RESX_PALACE_API int ResxSwitchJumpTableDispatch(unsigned int opcode, int value) 
     case 6:
         return value & 0x7F;
     case 7:
-        return value + palace_add(value);
+        return value + fixtures_add(value);
     case 8:
-        return palace_xor(value);
+        return fixtures_xor(value);
     case 9:
-        return palace_mix(value);
+        return fixtures_mix(value);
     default:
         return -100;
     }
 }
 
-RESX_PALACE_API int ResxIndirectCallMessage(ResxPalaceCallback callback, int value) {
-    ResxPalaceCallback table[3];
+RESX_FIXTURES_API int ResxIndirectCallMessage(ResxFixturesCallback callback, int value) {
+    ResxFixturesCallback table[3];
     unsigned int index = (unsigned int)value % 3;
 
-    table[0] = palace_add;
-    table[1] = palace_xor;
-    table[2] = callback ? callback : palace_mix;
+    table[0] = fixtures_add;
+    table[1] = fixtures_xor;
+    table[2] = callback ? callback : fixtures_mix;
 
     return table[index](value);
 }
 
-RESX_PALACE_API int ResxBehaviorSignals(unsigned int selector) {
+RESX_FIXTURES_API int ResxBehaviorSignals(unsigned int selector) {
     int cpu_info[4] = {0, 0, 0, 0};
     DWORD old_protect = 0;
     unsigned char *code = (unsigned char *)VirtualAlloc(
@@ -168,10 +168,10 @@ RESX_PALACE_API int ResxBehaviorSignals(unsigned int selector) {
         FreeLibrary(kernel);
     }
 
-    return cpu_info[0] ^ (tick_proc != 0 ? 0x55 : 0) ^ g_resx_palace_protector_marker[0];
+    return cpu_info[0] ^ (tick_proc != 0 ? 0x55 : 0) ^ g_resx_fixtures_protector_marker[0];
 }
 
-static void NTAPI ResxPalaceTlsCallback(PVOID module, DWORD reason, PVOID reserved) {
+static void NTAPI ResxFixturesTlsCallback(PVOID module, DWORD reason, PVOID reserved) {
     (void)module;
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
