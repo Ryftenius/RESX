@@ -116,7 +116,8 @@ pub fn run(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let mut raw = std::fs::read(&dll_path).map_err(|e| format!("read file: {}", e))?;
+    let mut raw =
+        crate::core::input::read_image(&dll_path).map_err(|e| format!("read file: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let address = resolve_patch_address(address_spec, &pe)?;
     let section = pe

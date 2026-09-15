@@ -2,7 +2,6 @@ use serde::Serialize;
 
 use crate::analysis::discovery::FunctionDiscoveryReport;
 use crate::analysis::edr::EdrCheckResult;
-use crate::analysis::explain::ExplainResult;
 use crate::analysis::indirect::IndirectFlowReport;
 use crate::analysis::intelli::IntelliFinding;
 use crate::analysis::ir::TypedIrSummary;
@@ -98,8 +97,6 @@ pub(crate) struct FuncResult {
     pub(crate) api_call_tree: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) current_syscall: Option<SyscallJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) explain: Option<ExplainResult>,
 }
 
 #[derive(Serialize)]

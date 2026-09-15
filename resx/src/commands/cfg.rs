@@ -8,7 +8,7 @@ use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::load_pdb_symbols;
-use crate::formats::pe::{parse_pe, read_exports};
+use crate::formats::pe::{parse_pe, read_exports, read_imports};
 
 pub fn run(
     dll_arg: &str,
@@ -28,7 +28,7 @@ pub fn run(
         .to_string_lossy()
         .to_string();
     let dll_path_str = dll_path.to_string_lossy().to_string();
-    let raw = std::fs::read(&dll_path).map_err(|e| format!("read file: {}", e))?;
+    let raw = crate::core::input::read_image(&dll_path).map_err(|e| format!("read file: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let arch = cfg.effective_arch(pe.arch);
     let image_base = pe.image_base;
@@ -121,6 +121,11 @@ pub fn run(
     write!(w, "{}", graph).ok();
     if !graph.ends_with('\n') {
         writeln!(w).ok();
+    }
+    if cfg.driver_flow || cfg.funcs_depth > 0 {
+        let imports = read_imports(&pe, &raw);
+        let report = crate::analysis::driver::analyze_driver(&dll_name, &pe, &raw, &imports);
+        super::driver::render_flow_contracts(w, c, &report, cfg.max_subcalls);
     }
     Ok(())
 }

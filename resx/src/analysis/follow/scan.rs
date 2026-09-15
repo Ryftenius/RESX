@@ -792,7 +792,7 @@ fn read_source_meta(path: &Path) -> Option<SourceMeta> {
 }
 
 fn load_scan_data(path: &Path) -> Option<ScanImageData> {
-    let raw = std::fs::read(path).ok()?;
+    let raw = crate::core::input::read_image(path).ok()?;
     let pe = parse_pe(&raw).ok()?;
     let exports = read_exports(&pe, &raw);
     let runtime_functions = read_runtime_functions(&pe, &raw);

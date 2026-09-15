@@ -130,7 +130,8 @@ pub fn run(cli: &Cli, w: &mut dyn Write) -> Result<(), String> {
 }
 
 fn scan_one(path: &Path, max_candidates: usize, cfg: &Config) -> Result<ImageScanReport, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("read '{}': {}", path.display(), e))?;
+    let raw = crate::core::input::read_image(path)
+        .map_err(|e| format!("read '{}': {}", path.display(), e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let exports = read_exports(&pe, &raw);
     let imports = read_imports(&pe, &raw);

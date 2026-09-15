@@ -18,7 +18,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let raw = std::fs::read(&path).map_err(|e| format!("read file: {}", e))?;
+    let raw = crate::core::input::read_image(&path).map_err(|e| format!("read file: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let report = analyze_entropy(
         &image,

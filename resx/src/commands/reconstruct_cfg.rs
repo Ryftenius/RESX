@@ -7,7 +7,7 @@ use crate::core::config::Config;
 use crate::core::json::versioned_object;
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::load_pdb_symbols;
-use crate::formats::pe::{find_startup_routines, parse_pe, read_exports};
+use crate::formats::pe::{find_startup_routines, parse_pe, read_exports, read_imports};
 
 pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     if dll_arg.is_empty() {
@@ -36,7 +36,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         .ok();
     }
 
-    let raw = std::fs::read(&dll_path).map_err(|e| format!("read file: {}", e))?;
+    let raw = crate::core::input::read_image(&dll_path).map_err(|e| format!("read file: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let arch = cfg.effective_arch(pe.arch);
     let exports = read_exports(&pe, &raw);
@@ -90,6 +90,11 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         .ok();
     } else {
         write!(w, "{}", render_ascii(&report, c, cfg)).ok();
+        if cfg.driver_flow || cfg.funcs_depth > 0 {
+            let imports = read_imports(&pe, &raw);
+            let driver = crate::analysis::driver::analyze_driver(&dll_name, &pe, &raw, &imports);
+            super::driver::render_flow_contracts(w, c, &driver, cfg.max_subcalls);
+        }
     }
 
     Ok(())

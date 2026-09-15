@@ -30,7 +30,7 @@ pub fn run(
         writeln!(w, "{}", c.ok(&format!("Found: {}", dll_path.display()))).ok();
     }
 
-    let raw = std::fs::read(&dll_path).map_err(|e| format!("read: {}", e))?;
+    let raw = crate::core::input::read_image(&dll_path).map_err(|e| format!("read: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let exports = read_exports(&pe, &raw);
 
@@ -141,7 +141,7 @@ pub fn run(
             )
             .ok();
             if cfg.verbose {
-                writeln!(w, "{}", c.bold(&c.b_blue("Verbose Work Summary:"))).ok();
+                writeln!(w, "{}", c.bold(&c.b_blue("Extension:"))).ok();
                 writeln!(
                     w,
                     "  {:<20} {}",
@@ -214,9 +214,13 @@ fn resolve_target(
 
     if !cfg.no_pdb {
         if !cfg.quiet {
-            writeln!(w, "{}", c.info("Not found in EAT, trying PDB symbols...")).ok();
+            writeln!(w, "{}", c.info("Not found in EAT; checking PDB symbols")).ok();
         }
-        if let Some(rva) = load_pdb_symbol(
+        w.flush().ok();
+        let progress = crate::core::progress::Dots::start(
+            !cfg.quiet && !cfg.json && !cfg.verbose && cfg.out_file.is_empty(),
+        );
+        let resolved = load_pdb_symbol(
             dll_path,
             func_arg,
             &cfg.sym_path,
@@ -225,7 +229,9 @@ fn resolve_target(
             image_base,
             cfg.verbose,
             cfg.reload,
-        ) {
+        );
+        drop(progress);
+        if let Some(rva) = resolved {
             if !cfg.quiet {
                 writeln!(
                     w,

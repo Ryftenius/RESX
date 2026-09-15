@@ -13,6 +13,55 @@ pub fn dispatch(
 ) -> Result<(), String> {
     let dll_arg = cfg.dll.clone();
     let func_arg = cfg.function.clone();
+    if cfg.resx_config {
+        return commands::settings::run(cli, w, c);
+    }
+    let is_payload = raw_args
+        .get(1)
+        .is_some_and(|s| s.eq_ignore_ascii_case("payload"));
+    if !is_payload
+        && (cli.payload_dir.is_some()
+            || cli.codec.is_some()
+            || cli.payload_offset.is_some()
+            || cli.payload_length.is_some()
+            || cli.key_file.is_some()
+            || cli.iv_hex.is_some()
+            || cli.pkcs7)
+    {
+        return Err("Payload options are only accepted by payload".into());
+    }
+    if is_payload {
+        if !cfg.function.is_empty() || !cfg.extra_diff_images.is_empty() {
+            return Err("payload accepts one input file".into());
+        }
+        return commands::payload::run(cli, cfg, w);
+    }
+    if raw_args
+        .get(1)
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("yara"))
+    {
+        if !cfg.function.is_empty() || !cfg.extra_diff_images.is_empty() {
+            return Err("yara accepts one image and one or more rule inputs".into());
+        }
+        return commands::yara::run(&dll_arg, cfg, w, c);
+    }
+    if let Some(category) = raw_args.get(1).map(|s| s.to_ascii_lowercase()).filter(|s| {
+        matches!(
+            s.as_str(),
+            "contracts" | "ipc" | "network" | "crypto" | "strings"
+        )
+    }) {
+        if !cfg.function.is_empty() || !cfg.extra_diff_images.is_empty() {
+            return Err("Contract analysis accepts one image".into());
+        }
+        return commands::contracts::run(cfg, &category, w);
+    }
+    if raw_args
+        .get(1)
+        .is_some_and(|arg| arg.eq_ignore_ascii_case("driver") || arg.eq_ignore_ascii_case("ioctl"))
+    {
+        return commands::driver::run(cfg, raw_args[1].eq_ignore_ascii_case("ioctl"), w, c);
+    }
     let is_peinfo_shorthand = dll_arg.eq_ignore_ascii_case("peinfo") && !func_arg.is_empty();
 
     if cli.priority {
@@ -25,6 +74,9 @@ pub fn dispatch(
 
     if cli.resx_scan {
         return commands::scan::run(cli, w);
+    }
+    if cfg.resx_find {
+        return commands::find::run(&dll_arg, cfg, w, c);
     }
 
     if cfg.resx_diff {
@@ -63,18 +115,6 @@ pub fn dispatch(
 
     if cfg.reconstruct_cfg {
         return commands::reconstruct_cfg::run(&dll_arg, cfg, w, c);
-    }
-
-    if cfg.explain {
-        let term = if !func_arg.is_empty() {
-            &func_arg
-        } else {
-            &dll_arg
-        };
-        if term.is_empty() {
-            return Err("Specify a symbol or prefix to explain".to_owned());
-        }
-        return commands::explain::run(term, cfg, w, c);
     }
 
     if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("types") {
@@ -117,8 +157,11 @@ pub fn dispatch(
     if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("behavior") {
         return commands::behavior::run(&dll_arg, cfg, w, c);
     }
-    if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("unpack") {
-        return commands::unpack::run(&dll_arg, cfg, w, c);
+    if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("pechk") {
+        if !func_arg.is_empty() {
+            return Err("pechk accepts one image".into());
+        }
+        return commands::pechk::run(&dll_arg, cfg, w, c);
     }
     if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("entropy") {
         return commands::entropy::run(&dll_arg, cfg, w, c);
@@ -128,9 +171,6 @@ pub fn dispatch(
     }
     if cfg.behavior && !dll_arg.is_empty() && func_arg.is_empty() {
         return commands::behavior::run(&dll_arg, cfg, w, c);
-    }
-    if cfg.unpack && !dll_arg.is_empty() && func_arg.is_empty() {
-        return commands::unpack::run(&dll_arg, cfg, w, c);
     }
     if cfg.entropy && !dll_arg.is_empty() && func_arg.is_empty() {
         return commands::entropy::run(&dll_arg, cfg, w, c);
@@ -152,12 +192,12 @@ pub fn dispatch(
     }
     if dll_arg.is_empty() {
         return Err(
-            "Specify a command such as dump, cfg, reconstruct-cfg, intelli, behavior, unpack, entropy, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, scan, yara, update, or help".to_owned(),
+            "Specify a command such as dump, cfg, reconstruct-cfg, intelli, behavior, entropy, types, peinfo, sections, eat, iat, syms, pechk, priority, callers, locate, locate-sym, scan, yara, update, or help".to_owned(),
         );
     }
 
     Err(
-        "Incomplete command. Use `resx dump <dll> <function>`, `resx unpack <dll>`, `resx entropy <dll>`, `resx reconstruct-cfg <dll>`, `resx callers <dll> <function>`, `resx scan <path>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
+        "Incomplete command. Use `resx dump <dll> <function>`, `resx entropy <dll>`, `resx reconstruct-cfg <dll>`, `resx callers <dll> <function>`, `resx scan <path>`, `resx locate <name>`, `resx priority`, `resx update`, or `resx help`".to_owned(),
     )
 }
 
@@ -200,16 +240,15 @@ fn is_locate_mode(cfg: &Config, dll_arg: &str, func_arg: &str) -> bool {
             && !cfg.hookchk
             && !cfg.intelli
             && !cfg.behavior
-            && !cfg.unpack
             && !cfg.entropy
             && !cfg.patch
             && !cfg.reconstruct_cfg
             && !cfg.resx_diff
             && !cfg.resx_index
             && !cfg.resx_hunt
-            && !cfg.explain
             && cfg.cfg_view.is_empty()
-            && cfg.yara.is_empty())
+            && cfg.yara.is_empty()
+            && !cfg.resx_find)
 }
 
 fn should_dump(cfg: &Config, func_arg: &str) -> bool {
@@ -223,7 +262,6 @@ fn should_dump(cfg: &Config, func_arg: &str) -> bool {
         || cfg.hookchk
         || cfg.intelli
         || cfg.behavior
-        || cfg.unpack
         || cfg.entropy
         || cfg.patch
         || cfg.reconstruct_cfg
