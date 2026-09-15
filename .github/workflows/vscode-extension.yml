@@ -1,5 +1,8 @@
 name: VS Code Extension
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -24,12 +27,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 26
           cache: npm
           cache-dependency-path: resx-vscode/package-lock.json
 
@@ -39,11 +42,17 @@ jobs:
       - name: Compile extension
         run: npm run compile
 
+      - name: Test webview
+        run: npm run test:webview
+
+      - name: Dependency vulnerability audit
+        run: npm audit --audit-level=high
+
       - name: Package VSIX
         run: npx --yes @vscode/vsce package --no-dependencies
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: resx-vscode-vsix
           path: resx-vscode/*.vsix

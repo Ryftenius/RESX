@@ -1,5 +1,6 @@
-[build]
-rustflags = ["-C", "target-cpu=native"]
-
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+crt-static", "-C", "link-args=/SUBSYSTEM:CONSOLE"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "control-flow-guard=yes",
+    "-C", "link-args=/SUBSYSTEM:CONSOLE",
+]

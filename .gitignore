@@ -15,4 +15,5 @@
 /resx-demo/
 *.dll
 *.sys
-/resx-palace/target-resx-tests/
+/resx-fixtures/target-resx-tests/
+/resx-fixtures/.internal_fixtures/
