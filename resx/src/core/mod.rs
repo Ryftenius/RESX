@@ -1,3 +1,4 @@
+pub mod address;
 pub mod config;
 pub mod debug_report;
 pub mod diagnostic;
