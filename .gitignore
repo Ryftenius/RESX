@@ -20,7 +20,6 @@ __pycache__/
 /resx-demo/
 *.dll
 *.sys
-/resx-fixtures/target-resx-tests/
 /resx-fixtures/.internal_fixtures/
 /.task-work/
 /isc_etw_01/
