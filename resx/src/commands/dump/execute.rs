@@ -76,7 +76,7 @@ fn run_with_chain(
         .to_string();
     let dll_path_str = dll_path.to_string_lossy().to_string();
 
-    if cfg.verbose && !cfg.quiet {
+    if cfg.verbose && !cfg.quiet && !cfg.json {
         writeln!(w, "{}", c.ok(&format!("Found: {}", dll_path_str))).ok();
     }
 
@@ -91,7 +91,7 @@ fn run_with_chain(
     let image_base = pe.image_base;
     let rebase = cfg.rebase_addr()?;
 
-    if cfg.verbose && !cfg.quiet {
+    if cfg.verbose && !cfg.quiet && !cfg.json {
         let mut line = format!(
             "Architecture: {}  |  ImageBase: 0x{:X}",
             arch_str, image_base
@@ -104,7 +104,7 @@ fn run_with_chain(
 
     let exports = read_exports(&pe, &raw);
     progress.tick("reading export table");
-    if cfg.verbose && !cfg.quiet && !exports.is_empty() {
+    if cfg.verbose && !cfg.quiet && !cfg.json && !exports.is_empty() {
         writeln!(w, "{}", c.info(&format!("Exports: {}", exports.len()))).ok();
     }
 
@@ -121,7 +121,7 @@ fn run_with_chain(
         ) {
             Ok(symbols) => symbols,
             Err(err) => {
-                if cfg.verbose && !cfg.quiet {
+                if cfg.verbose && !cfg.quiet && !cfg.json {
                     writeln!(
                         w,
                         "{}",
@@ -234,6 +234,8 @@ fn run_with_chain(
                 function_discovery,
                 recursive_cfg: None,
                 typed_ir: None,
+                signature: None,
+                decode_conflicts: None,
                 indirect_flow: Some(analyze_indirect_flow(
                     &pe,
                     &imports,
@@ -413,7 +415,7 @@ fn run_with_chain(
                     yara_matches: yara_matches.iter().map(to_yara_json).collect(),
                     size_bytes: 0,
                     insn_count: 0,
-                    pdb_loaded,
+                    pdb_loaded: pdb_loaded || !pdb_symbols.is_empty(),
                     followed_jmp: String::new(),
                     is_import_slot: true,
                     import_target_dll: import_dll.clone(),
@@ -425,6 +427,8 @@ fn run_with_chain(
                     function_discovery,
                     recursive_cfg: None,
                     typed_ir: None,
+                    signature: None,
+                    decode_conflicts: None,
                     indirect_flow: None,
                     intelli_findings: Vec::new(),
                     recomp: String::new(),
@@ -481,7 +485,7 @@ fn run_with_chain(
         if let Some(res) = entry_thunk.as_ref() {
             match &res {
                 ThunkResolution::Iat { dll, func, .. } if !dll.is_empty() => {
-                    if !cfg.quiet {
+                    if !cfg.quiet && !cfg.json {
                         writeln!(w).ok();
                         let title = format!(
                             "{}!{}  [RVA 0x{:08X}]  — STUB",
@@ -523,13 +527,13 @@ fn run_with_chain(
                     file_off = pe
                         .rva_to_offset(target_rva)
                         .ok_or_else(|| format!("RVA 0x{:08X}: not in any section", target_rva))?;
-                    if !cfg.quiet {
+                    if !cfg.quiet && !cfg.json {
                         writeln!(w, "{}", c.info(&format!("Following: {}", res.desc()))).ok();
                     }
                 }
                 ThunkResolution::IatUnresolved { .. } => {
                     followed_desc = res.desc();
-                    if !cfg.quiet {
+                    if !cfg.quiet && !cfg.json {
                         writeln!(
                             w,
                             "{}",
@@ -544,7 +548,7 @@ fn run_with_chain(
                     followed_desc = res.desc();
                     match final_target.as_ref() {
                         ThunkResolution::Iat { dll, func, .. } if !dll.is_empty() => {
-                            if !cfg.quiet {
+                            if !cfg.quiet && !cfg.json {
                                 writeln!(w, "{}", c.info(&format!("Thunk chain: {}", res.desc())))
                                     .ok();
                             }
@@ -558,7 +562,7 @@ fn run_with_chain(
                             file_off = pe.rva_to_offset(target_rva).ok_or_else(|| {
                                 format!("RVA 0x{:08X}: not in any section", target_rva)
                             })?;
-                            if !cfg.quiet {
+                            if !cfg.quiet && !cfg.json {
                                 writeln!(
                                     w,
                                     "{}",
@@ -568,7 +572,7 @@ fn run_with_chain(
                             }
                         }
                         _ => {
-                            if !cfg.quiet {
+                            if !cfg.quiet && !cfg.json {
                                 writeln!(w, "{}", c.info(&format!("Thunk chain: {}", res.desc())))
                                     .ok();
                             }
@@ -592,7 +596,7 @@ fn run_with_chain(
         cfg,
     )
     .map_err(|e| format!("disassembly: {}", e))?;
-    let insns = recover_reachable_function_insns(
+    let mut insns = recover_reachable_function_insns(
         &raw,
         &pe,
         target_rva,
@@ -602,8 +606,10 @@ fn run_with_chain(
         Some(&symbol_index),
         cfg,
     )
-    .filter(|recovered| recovered.len() > linear_insns.len())
     .unwrap_or(linear_insns);
+    if cfg.ssa {
+        crate::analysis::reconstruction::dataflow::annotate(&mut insns, arch);
+    }
     progress.tick("disassembling function");
 
     if !cfg.at_rva.is_empty() {
@@ -745,6 +751,17 @@ fn run_with_chain(
         .exact(image_base + target_rva as u64)
         .map(|sym| sym.type_name)
         .unwrap_or_default();
+    let signature = crate::analysis::reconstruction::signature::infer(
+        &insns,
+        target_rva,
+        arch,
+        &resolved_name,
+        &prototype,
+    );
+    let decode_conflicts = crate::analysis::reconstruction::decode_conflicts::inspect(&insns, arch);
+    if cfg.verbose {
+        crate::analysis::reconstruction::decode_conflicts::annotate(&mut insns, &decode_conflicts);
+    }
     let typed_ir_summary = if cfg.json {
         Some(summarize_typed_ir(
             &insns,
@@ -807,7 +824,7 @@ fn run_with_chain(
         if !cfg.c_out.is_empty() {
             std::fs::write(&cfg.c_out, &s)
                 .map_err(|e| format!("write C output '{}': {}", cfg.c_out, e))?;
-            if !cfg.quiet {
+            if !cfg.quiet && !cfg.json {
                 writeln!(
                     w,
                     "{}",
@@ -861,6 +878,91 @@ fn run_with_chain(
                     target_rva,
                     image_base + target_rva as u64
                 ))
+            )
+            .ok();
+        }
+        writeln!(
+            w,
+            "  {}",
+            c.b_blue(&format!(
+                "Signature [{}]: {}",
+                signature.source, signature.prototype
+            ))
+        )
+        .ok();
+        if cfg.verbose && signature.source != "pdb" {
+            writeln!(
+                w,
+                "  {}",
+                c.dim(&format!(
+                    "{}; tentative; visited={} truncated={} unresolved-flow={}",
+                    signature.calling_convention,
+                    signature.instructions_visited,
+                    signature.analysis_truncated,
+                    signature.unresolved_flow
+                ))
+            )
+            .ok();
+        }
+        if cfg.verbose {
+            for param in &signature.parameters {
+                writeln!(
+                    w,
+                    "  {}",
+                    c.dim(&format!(
+                        "param_{} {}: {} read={} write={} evidence={:X?}",
+                        param.index + 1,
+                        param.location,
+                        param.inferred_type,
+                        param.pointer_read,
+                        param.pointer_write,
+                        param.evidence_rvas
+                    ))
+                )
+                .ok();
+            }
+        }
+        if cfg.verbose && !decode_conflicts.findings.is_empty() {
+            writeln!(
+                w,
+                "  {}",
+                c.b_yellow(&format!(
+                    "Overlapping decode streams: {} finding(s), {} shown",
+                    decode_conflicts.findings.len(),
+                    decode_conflicts.findings.len().min(16)
+                ))
+            )
+            .ok();
+        }
+        for conflict in decode_conflicts
+            .findings
+            .iter()
+            .take(if cfg.verbose { 16 } else { 0 })
+        {
+            writeln!(
+                w,
+                "  {}",
+                c.b_yellow(&format!(
+                    "[INFO] {}: stream 0x{:08x} enters 0x{:08x} inside stream instruction 0x{:08x}",
+                    conflict.kind,
+                    conflict.source_rva,
+                    conflict.target_rva,
+                    conflict.covering_instruction_rva
+                ))
+            )
+            .ok();
+            writeln!(
+                w,
+                "    {} | {} | alternate: {}",
+                conflict.covering_bytes, conflict.covering_text, conflict.alternative_text
+            )
+            .ok();
+        }
+        if cfg.verbose && decode_conflicts.analysis_truncated {
+            writeln!(
+                w,
+                "  {}",
+                c.b_yellow("[WARN] overlapping-stream analysis/report budget reached")
             )
             .ok();
         }
@@ -1032,7 +1134,7 @@ fn run_with_chain(
             yara_matches: yara_matches.iter().map(to_yara_json).collect(),
             size_bytes: func_size_bytes,
             insn_count: insns.len(),
-            pdb_loaded,
+            pdb_loaded: pdb_loaded || !pdb_symbols.is_empty(),
             followed_jmp: followed_desc,
             is_import_slot: import_slot_target.is_some(),
             import_target_dll: import_slot_target
@@ -1046,15 +1148,16 @@ fn run_with_chain(
             instructions: insns
                 .iter()
                 .map(|i| InsnJson {
-                    rva: format!("0x{:08X}", i.rva),
-                    va: format!("0x{:016X}", i.va),
+                    block_start: format!("0x{:08x}", i.block_start),
+                    rva: format!("0x{:08x}", i.rva),
+                    va: format!("0x{:016x}", i.va),
                     rebased_va: rebase
-                        .map(|base| format!("0x{:016X}", base + i.rva as u64))
+                        .map(|base| format!("0x{:016x}", base + i.rva as u64))
                         .unwrap_or_default(),
                     bytes: i
                         .bytes
                         .iter()
-                        .map(|b| format!("{:02X}", b))
+                        .map(|b| format!("{:02x}", b))
                         .collect::<Vec<_>>()
                         .join(" "),
                     text: i.text.clone(),
@@ -1067,6 +1170,8 @@ fn run_with_chain(
             function_discovery,
             recursive_cfg,
             typed_ir: typed_ir_summary,
+            signature: Some(signature),
+            decode_conflicts: Some(decode_conflicts),
             indirect_flow,
             intelli_findings: if only_metadata {
                 metadata_intelli

@@ -191,7 +191,7 @@ struct TypeSeed {
 const TI_GET_SYMNAME: u32 = 1;
 const TI_GET_LENGTH: u32 = 2;
 const TI_GET_TYPE: u32 = 3;
-const TI_GET_TYPEID: u32 = 4;
+const TI_GET_CALLING_CONVENTION: u32 = 26;
 const TI_GET_BASETYPE: u32 = 5;
 const TI_FINDCHILDREN: u32 = 7;
 const TI_GET_OFFSET: u32 = 10;

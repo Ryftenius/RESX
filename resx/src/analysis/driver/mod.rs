@@ -11,7 +11,7 @@ pub use calls::{
 pub use capabilities::{DriverCapability, DriverCapabilityReference};
 pub use hypervisor::{HypervisorImport, HypervisorIndicator, HypervisorReport, HypervisorSite};
 
-use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter, Mnemonic, OpKind};
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, Mnemonic, OpKind};
 use serde::Serialize;
 
 use crate::formats::pe::{
@@ -352,6 +352,7 @@ fn decode_executable(
         let ip = pe.image_base + section.virtual_address as u64;
         let mut decoder = Decoder::with_ip(pe.arch, bytes, ip, DecoderOptions::NONE);
         let mut formatter = IntelFormatter::new();
+        let mut leaf_export_owner: Option<(u32, String)> = None;
         while decoder.can_decode() {
             if out.len() >= 65_536 {
                 return out;
@@ -361,16 +362,39 @@ fn decode_executable(
                 break;
             }
             let rva = instr.ip().wrapping_sub(pe.image_base) as u32;
-            let (owner_rva, owner_name) = owner_for_rva(rva, exports, &sorted_runtime);
+            let mut owner = owner_for_rva(rva, exports, &sorted_runtime);
+            let begins_export = exports
+                .iter()
+                .find(|export| export.rva == rva && export.forward_to.is_empty());
+            if let Some(export) = begins_export {
+                leaf_export_owner = Some((export.rva, export.name.clone()));
+            } else if owner.0 == rva {
+                if let Some(export_owner) = &leaf_export_owner {
+                    owner = export_owner.clone();
+                }
+            } else {
+                leaf_export_owner = None;
+            }
             let mut text = String::new();
             formatter.format(&instr, &mut text);
             out.push(DecodedInsn {
                 rva,
                 text,
                 instr,
-                owner_rva,
-                owner_name,
+                owner_rva: owner.0,
+                owner_name: owner.1,
             });
+            if matches!(
+                out.last().map(|decoded| decoded.instr.flow_control()),
+                Some(
+                    FlowControl::Return
+                        | FlowControl::UnconditionalBranch
+                        | FlowControl::IndirectBranch
+                        | FlowControl::Exception
+                )
+            ) {
+                leaf_export_owner = None;
+            }
         }
     }
     out

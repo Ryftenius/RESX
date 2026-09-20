@@ -190,6 +190,10 @@ pub struct Cli {
     #[arg(long = "nodis", aliases = ["no-dis", "no-disassembly"])]
     pub no_disassembly: bool,
 
+    /// Add bounded lightweight SSA, stack-slot, and control-transfer annotations.
+    #[arg(long = "ssa")]
+    pub ssa: bool,
+
     #[arg(long = "intel", default_value_t = true, action = clap::ArgAction::SetTrue)]
     pub intel: bool,
 
@@ -205,10 +209,10 @@ pub struct Cli {
     #[arg(long = "no-follow-forward")]
     pub no_follow_forward: bool,
 
-    #[arg(long = "show-offsets")]
+    #[arg(long = "offset", alias = "show-offsets")]
     pub show_offsets: bool,
 
-    #[arg(long = "show-rva")]
+    #[arg(long = "rva", alias = "show-rva")]
     pub show_rva: bool,
 
     #[arg(long = "addr-width", default_value_t = 8)]
@@ -295,6 +299,10 @@ pub struct Cli {
     /// Recursively trace internal sub_XXXXXXXX calls N levels deep (implies --funcs).
     #[arg(long = "funcs-depth", alias = "call-depth", value_name = "N")]
     pub funcs_depth: Option<u32>,
+
+    /// Highlight calls whose name contains this case-insensitive text.
+    #[arg(long = "highlight", value_name = "NAME")]
+    pub highlight: Option<String>,
 
     /// Maximum calls rendered for each function in recursive call views.
     #[arg(long = "max-subcalls", default_value_t = 64)]
@@ -562,6 +570,7 @@ pub struct Config {
     pub max_bytes: usize,
     pub show_bytes: bool,
     pub no_disassembly: bool,
+    pub ssa: bool,
     pub intel_syntax: bool,
     pub follow_jmp: bool,
     pub no_follow_fwd: bool,
@@ -590,6 +599,7 @@ pub struct Config {
     pub strings_tag: String,
     pub strings_raw_wide: bool,
     pub funcs_depth: u32,
+    pub highlight: String,
     pub max_subcalls: usize,
     pub driver_flow: bool,
     pub cfg_view: String,
@@ -710,6 +720,7 @@ impl Config {
                 .unwrap_or(cli.max_bytes),
             show_bytes: cli.bytes.is_some() && !cli.no_bytes,
             no_disassembly: cli.no_disassembly,
+            ssa: cli.ssa,
             intel_syntax: !cli.att || cli.intel,
             follow_jmp: cli.follow_jmp && !cli.no_follow_jmp,
             no_follow_fwd: cli.no_follow_forward,
@@ -739,6 +750,7 @@ impl Config {
             strings_tag: cli.strings_tag.clone().unwrap_or_default(),
             strings_raw_wide: cli.strings_raw_wide,
             funcs_depth: cli.funcs_depth.unwrap_or(if cli.funcs { 1 } else { 0 }),
+            highlight: cli.highlight.clone().unwrap_or_default(),
             max_subcalls: cli.max_subcalls.clamp(1, 4096),
             driver_flow: cli.driver_flow,
             cfg_view: cli.cfg_view.clone().unwrap_or_default(),
@@ -821,5 +833,26 @@ impl Config {
         s.parse::<u64>()
             .map(Some)
             .map_err(|_| format!("invalid --rebase value: {}", self.rebase))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cli;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn lightweight_ssa_is_explicitly_opt_in() {
+        assert!(!parse_cli(args(&["resx"])).unwrap().ssa);
+        assert!(parse_cli(args(&["resx", "--ssa"])).unwrap().ssa);
+    }
+
+    #[test]
+    fn removed_flow_line_options_are_rejected() {
+        assert!(parse_cli(args(&["resx", "--flow-lines"])).is_err());
+        assert!(parse_cli(args(&["resx", "--branch-arrows"])).is_err());
     }
 }

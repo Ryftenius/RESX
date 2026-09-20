@@ -213,40 +213,26 @@ pub fn recomp_c(
         }
     }
 
-    let (default_cc, param_regs): (&str, &[&str]) = if arch == 64 {
-        ("__fastcall", &["rcx", "rdx", "r8", "r9"])
+    let default_cc = if arch == 64 {
+        "__fastcall"
     } else {
-        ("__stdcall", &[])
+        "/* ABI unresolved */"
     };
     let prototype = symbols
         .and_then(|idx| idx.exact(image_base + exp.rva as u64))
         .and_then(|sym| parse_pdb_prototype(&sym.type_name, default_cc));
-
-    let mut used_params = 0usize;
-    for insn in insns {
-        for op_idx in 0..insn.iced.op_count() {
-            if insn.iced.op_kind(op_idx) == OpKind::Register {
-                let reg_name = format!("{:?}", insn.iced.op_register(op_idx)).to_lowercase();
-                for (i, &pr) in param_regs.iter().enumerate() {
-                    if reg_name == pr && i >= used_params {
-                        used_params = i + 1;
-                    }
-                }
-            }
-        }
-    }
-    if used_params == 0 && arch == 32 {
-        used_params = 4;
-    }
-
+    let inferred = super::signature::infer(insns, exp.rva, arch, &exp.name, "");
     let ret_type = prototype
         .as_ref()
         .map(|p| p.return_type.as_str())
-        .unwrap_or("NTSTATUS");
+        .unwrap_or(&inferred.return_type);
     let cc = prototype
         .as_ref()
         .map(|p| p.calling_convention.as_str())
         .unwrap_or(default_cc);
+    if prototype.is_none() {
+        sb.push_str("// Tentative ABI inference; bitsN denotes width, not signedness. Unknown types/arguments remain unresolved.\n");
+    }
 
     if let Some(proto) = prototype.as_ref() {
         sb.push_str(&format!("// PDB type: {}\n", proto.raw_type_name));
@@ -285,13 +271,21 @@ pub fn recomp_c(
                 sb.push_str(&format!("    {}{} \n", param, sep));
             }
         }
-    } else if used_params == 0 {
-        sb.push_str("    void\n");
     } else {
-        for i in 0..used_params {
-            let sep = if i + 1 == used_params { "" } else { "," };
-            sb.push_str(&format!("    void* param_{}{} \n", i + 1, sep));
+        for (i, param) in inferred.parameters.iter().enumerate() {
+            let sep = if i + 1 == inferred.parameters.len() {
+                ""
+            } else {
+                ","
+            };
+            sb.push_str(&format!(
+                "    {} param_{}{}\n",
+                param.inferred_type,
+                i + 1,
+                sep
+            ));
         }
+        sb.push_str("    /* further arguments unknown */\n");
     }
     sb.push_str(") {\n");
 
@@ -461,7 +455,7 @@ fn parse_pdb_prototype(type_name: &str, default_cc: &str) -> Option<RecompProtot
 
     Some(RecompPrototype {
         return_type: if return_type.is_empty() {
-            "NTSTATUS".to_owned()
+            "unknown".to_owned()
         } else {
             return_type
         },

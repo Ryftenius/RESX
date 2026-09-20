@@ -41,6 +41,8 @@ pub struct PeInfoJson {
     pub sections: Vec<SectionJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub anomalies: Vec<AnomalyJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub triage: Vec<super::triage::TriageFinding>,
 }
 
 #[derive(Serialize)]

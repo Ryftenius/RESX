@@ -214,7 +214,7 @@ SECTION     PURPOSE          COMMANDS
   options   Shared flags     output, symbols, verbosity and saved preferences
 
 EXAMPLES
-  resx peinfo .\blackbird.sys
+  resx peinfo .\driver.sys
   resx ioctl .\J58.dll --json
   resx dump kernel32.dll CreateFileW --recomp
   resx /dump kernel32.dll entry /bytes:96
@@ -540,7 +540,7 @@ unknown; reports include instruction/call budgets. No target execution."
 Usage: resx ipc <image> [--json] [-v]
 
 Examples:
-  resx ipc .\BlackbirdController.exe --json
+  resx ipc .\service.exe --json
   resx ipc .\sample.exe -v --out ipc.json
 
 Static names, arguments and producer references. Live peers and shared kernel
@@ -616,7 +616,7 @@ is sent."
   syms / types                Symbols and PDB types
 
 Examples:
-  resx peinfo .\blackbird.sys
+  resx peinfo .\driver.sys
   resx eat .\J58.dll --json
   resx types .\driver.sys DEVICE_OBJECT --pdb .\driver.pdb"
         }
@@ -641,7 +641,7 @@ Examples:
   entropy / yara / find       Byte statistics, YARA, and instruction patterns
 
 Examples:
-  resx driver .\blackbird.sys --json
+  resx driver .\driver.sys --json
   resx ioctl .\J58.dll --verbose
   resx network .\sample.exe --json --out endpoints.json
   resx yara .\sample.exe .\rules.yar
@@ -705,7 +705,7 @@ Function macros:
 
 Examples:
   resx contracts .\J58.dll --json -v --out contracts.json
-  resx peinfo .\blackbird.sys --json -q
+  resx peinfo .\driver.sys --json -q
 
 Command-specific flags: resx help dump, resx help payload, etc."
         }

@@ -4,7 +4,7 @@
   "description": "VS Code PE and Windows binary analysis viewer for EXE, DLL, SYS, and PE-style BIN files powered by RESX",
   "version": "2.0.0",
   "publisher": "ryftenius",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/Ryftenius/RESX.git"

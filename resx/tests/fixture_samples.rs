@@ -127,6 +127,7 @@ fn hex_byte(value: u8) -> String {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn resx_fixtures_samples_exercise_binary_analysis_commands() {
     let Some((dll, variant, exe)) = ensure_samples() else {
         return;

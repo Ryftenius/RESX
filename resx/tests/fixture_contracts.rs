@@ -63,6 +63,7 @@ fn analyze_path(command: &str, path: PathBuf, extra: &[&str]) -> Value {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn exported_read_only_data_is_not_presented_as_a_function() {
     let path = fixture().with_file_name("data_exports.dll");
     assert!(
@@ -112,6 +113,7 @@ fn exported_read_only_data_is_not_presented_as_a_function() {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn exports_match_the_linker_definition() {
     let definition = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resx-fixtures/src/resx_fixtures.def"),
@@ -136,6 +138,7 @@ fn exports_match_the_linker_definition() {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn an_import_slot_is_data_not_the_imported_function_body() {
     let report = analyze("xrefs", &["CreateFileW"]);
     let dump = &report["dump"];
@@ -151,6 +154,7 @@ fn an_import_slot_is_data_not_the_imported_function_body() {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn direct_import_slot_dump_does_not_decode_the_pointer_as_code() {
     let report = analyze("dump", &["CreateFileW"]);
     assert_eq!(report["dump"]["is_import_slot"], true);
@@ -163,6 +167,7 @@ fn direct_import_slot_dump_does_not_decode_the_pointer_as_code() {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn named_export_disassembly_has_instructions_without_pdbs() {
     let report = analyze("dump", &["ResxParsePacket", "--max-insns", "32"]);
     assert_eq!(report["dump"]["function"], "ResxParsePacket");
@@ -172,6 +177,7 @@ fn named_export_disassembly_has_instructions_without_pdbs() {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn ioctl_calls_recover_arguments_without_treating_every_constant_as_a_call() {
     let path = fixture().parent().unwrap().join("api_arguments.dll");
     let report = analyze_path("ioctl", path, &[]);

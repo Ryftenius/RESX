@@ -1,8 +1,0 @@
-LIBRARY "resx_fixtures"
-EXPORTS
-    ResxParsePacket
-    ResxDeviceIoctlDispatch
-    ResxThreadCallbackEntry
-    ResxSwitchJumpTableDispatch
-    ResxIndirectCallMessage
-    ResxBehaviorSignals

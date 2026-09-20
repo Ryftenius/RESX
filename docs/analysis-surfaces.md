@@ -16,12 +16,22 @@ metadata, direct call targets, validated thunks, and bounded executable fallback
 Disassembly uses exact RVA/file mappings and separates import slots from imported
 function bodies.
 
+PDB function types are preserved when available. Otherwise, bounded static ABI
+analysis may infer machine-width arguments, pointer access, and return values;
+unknown signedness, names, layouts, and unused arguments remain unknown. Optional
+lightweight SSA annotations are enabled only with `--ssa`.
+
 ## Control flow
 
 RESX builds function CFGs, follows bounded direct control flow, recovers common
 switch forms, records unresolved indirect edges, and reconstructs loader-visible
 startup roots such as the image entry point and TLS callbacks. Traversal budgets
 and incomplete edges are included in output.
+
+Conflicting instruction streams are retained as separate decode evidence when
+direct control flow enters overlapping bytes. Detailed conflict evidence is
+shown only with `--verbose` or in structured dump output and does not establish
+obfuscation or intent.
 
 ## Static behavior
 

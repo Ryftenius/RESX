@@ -20,6 +20,7 @@ use crate::formats::pe::{
 
 use super::detect::{machine_name, subsystem_name};
 use super::model::{debug_types, safe_seh, BuildAssessment};
+use super::triage::TriageFinding;
 
 pub struct TextReport<'a> {
     pub dll_path_str: &'a str,
@@ -37,6 +38,7 @@ pub struct TextReport<'a> {
     pub veh_imports: &'a [String],
     pub metadata: &'a FileMetadata,
     pub known_names: &'a [String],
+    pub triage: &'a [TriageFinding],
 }
 
 pub fn render_text(w: &mut dyn Write, c: &Colors, report: &TextReport<'_>) {
@@ -493,7 +495,42 @@ pub fn render_text(w: &mut dyn Write, c: &Colors, report: &TextReport<'_>) {
 
     crate::core::table::print(w, &["Field", "Value"], &rows, c);
     print_sections(w, report.pe, c);
+    print_triage(w, report.triage, c);
     print_pe_anomalies(w, &report.pe.anomalies, c);
+}
+
+fn print_triage(w: &mut dyn Write, findings: &[TriageFinding], c: &Colors) {
+    if findings.is_empty() {
+        return;
+    }
+    writeln!(w, "\n{}", c.bold(&c.b_yellow("Analyst Triage:"))).ok();
+    for finding in findings {
+        let marker = if finding.severity == "warn" {
+            c.b_yellow("!")
+        } else {
+            c.b_cyan("i")
+        };
+        writeln!(
+            w,
+            "  {} {} {}",
+            marker,
+            c.bold(&finding.title),
+            c.dim(&format!("[{} confidence]", finding.confidence))
+        )
+        .ok();
+        for evidence in &finding.evidence {
+            writeln!(w, "    {} {}", c.cyan("observed:"), evidence).ok();
+        }
+        if !finding.interpretation.is_empty() {
+            writeln!(
+                w,
+                "    {} {}",
+                c.b_mag("interpretation:"),
+                finding.interpretation
+            )
+            .ok();
+        }
+    }
 }
 
 fn print_kv(rows: &mut Vec<Vec<String>>, _c: &Colors, key: &str, value: &str) {

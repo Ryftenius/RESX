@@ -197,8 +197,18 @@ Examples:
 
 Useful options:
   --hostile, --funcs, --funcs-depth <n>, --max-subcalls <n>, --driver-flow,
-  --bytes/--hex/--opcode, --nodis, --cfg text, --recomp, --xrefs, --strings,
+  --bytes/--hex/--opcode, --nodis, --ssa, --cfg text, --recomp,
+  --xrefs, --strings,
   --edrchk, --hookchk, --pdb <file>, --verbose
+
+Dump evidence:
+  --ssa adds bounded lightweight SSA, stack-slot and control-transfer annotations.
+  PDB prototypes are retained when available. Otherwise a bounded ABI analysis
+  infers machine-width scalar values, pointer reads/writes and float returns.
+  bitsN means N-bit value, not signedness. Unknown args/types stay unknown.
+  --verbose includes argument evidence RVAs and conflicting decode windows.
+  --json includes signature and decode_conflicts reports with coverage limits.
+  Overlapping instructions are findings, not proof of malicious intent.
 
 QOL aliases:
   --limit/--insns, --byte-limit, --fast, --refs, --strrefs,
@@ -254,7 +264,7 @@ Usage:
   resx peinfo <image> [--json]
 
 Examples:
-  resx peinfo .\blackbird.sys
+  resx peinfo .\driver.sys
   resx peinfo ntdll.dll
   resx peinfo .\sample.exe --json
   resx peinfo .\packed.dll --no-pdb --json --out .\packed.peinfo.json
@@ -272,7 +282,7 @@ Usage:
 
 Examples:
   resx sections ntdll.dll
-  resx sections .\blackbird.sys
+  resx sections .\driver.sys
   resx sections .\sample.dll --json
   resx sections .\packed.dll --no-color --quiet
 

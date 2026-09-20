@@ -24,6 +24,15 @@ unless explicitly requested. Addresses, opcode bytes, mnemonics, operands,
 selected instructions, warnings, errors, success markers, and confidence labels
 use distinct semantic styles.
 
+## Dump analysis
+
+`dump` prints compact lowercase Intel-style disassembly and a function signature.
+When PDB type information is unavailable, the signature is a bounded static ABI
+inference and unknown types remain explicit. `--verbose` adds inference evidence
+and conflicting-decode details. `--ssa` separately enables lightweight data-flow
+annotations; it is off by default. `--rva` and `--offset` select call-map
+coordinates, and `--highlight <name>` emphasizes matching calls.
+
 ## Address forms
 
 - `rva:0x1234`

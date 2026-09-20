@@ -1,5 +1,6 @@
 mod recovery;
 mod render;
+mod startup_profile;
 
 use recovery::*;
 pub use render::render_ascii;
@@ -452,6 +453,8 @@ impl<'a> TraceContext<'a> {
             }
         }
 
+        startup_profile::classify(&mut node);
+
         path_stack.remove(&rva);
         node
     }
@@ -500,7 +503,7 @@ impl<'a> TraceContext<'a> {
                     "unknown".to_owned()
                 }
             });
-        let target_category =
+        let mut target_category =
             classify_edge_target(&target_name, &target_source, target_meta.as_ref());
         let mut relation = "callee".to_owned();
         let mut child = None;
@@ -572,6 +575,17 @@ impl<'a> TraceContext<'a> {
                     lane,
                     path_stack,
                 )));
+            }
+        }
+
+        if let Some(profiled) = child
+            .as_ref()
+            .filter(|child| child.symbol_category == "internal-crt")
+        {
+            target_category = profiled.symbol_category.clone();
+            tags.push("crt-startup".to_owned());
+            if !profiled.note.is_empty() {
+                detail_parts.push(profiled.note.clone());
             }
         }
 

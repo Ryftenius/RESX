@@ -253,6 +253,42 @@ struct TraceImageView<'a> {
     image_base: u64,
 }
 
+fn call_location(call: &ApiCall, image: &TraceImageView<'_>, cfg: &Config) -> String {
+    if !cfg.show_rva && !cfg.show_offsets {
+        return format!("0x{:X}", call.rva);
+    }
+
+    let mut parts = Vec::with_capacity(2);
+    if cfg.show_rva {
+        parts.push(format!("RVA 0x{:08X}", call.rva));
+    }
+    if cfg.show_offsets {
+        if let Some(offset) = image.pe.rva_to_offset(call.rva) {
+            parts.push(format!("off 0x{offset:X}"));
+        } else {
+            parts.push("off ?".to_owned());
+        }
+    }
+    parts.join(" ")
+}
+
+fn plain_call_target(call: &ApiCall) -> String {
+    if call.dll.is_empty() {
+        call.label.clone()
+    } else {
+        format!("{}!{}", short_dll_name(&call.dll), call.label)
+    }
+}
+
+fn is_highlighted(call: &ApiCall, cfg: &Config) -> bool {
+    let needle = cfg.highlight.trim();
+    !needle.is_empty()
+        && call
+            .label
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase())
+}
+
 struct LoadedTraceImage {
     dll_name: String,
     dll_path: String,
@@ -344,14 +380,19 @@ fn print_calls_recursive(
             }
         };
 
-        let colored_target = color_target(call, c, dll_map);
+        let colored_target = if is_highlighted(call, cfg) {
+            c.selected_marker(&plain_call_target(call))
+        } else {
+            color_target(call, c, dll_map)
+        };
+        let location = call_location(call, image, cfg);
 
         writeln!(
             w,
             "{}{} {}  {}  {}{}",
             line_prefix,
             branch,
-            c.dim(&format!("0x{:X}", call.rva)),
+            c.dim(&location),
             color_kind(&call.kind, c),
             colored_target,
             tag,
@@ -545,8 +586,13 @@ fn write_calls_recursive_text(
         };
         let _ = writeln!(
             out,
-            "{}{} 0x{:X}  {}  {} {}",
-            line_prefix, branch, call.rva, call.kind, target, tag
+            "{}{} {}  {}  {} {}",
+            line_prefix,
+            branch,
+            call_location(call, image, cfg),
+            call.kind,
+            target,
+            tag
         );
 
         if !call.switch_cases.is_empty() {

@@ -11,6 +11,7 @@ use crate::formats::pe::{PeAnomaly, PeDataSummary, PeSection, PeStartupRoutine};
 
 #[derive(Serialize)]
 pub(crate) struct InsnJson {
+    pub(crate) block_start: String,
     pub(crate) rva: String,
     pub(crate) va: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -79,6 +80,11 @@ pub(crate) struct FuncResult {
     pub(crate) recursive_cfg: Option<RecursiveCfg>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) typed_ir: Option<TypedIrSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) signature: Option<crate::analysis::reconstruction::signature::FunctionSignature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) decode_conflicts:
+        Option<crate::analysis::reconstruction::decode_conflicts::DecodeConflicts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) indirect_flow: Option<IndirectFlowReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

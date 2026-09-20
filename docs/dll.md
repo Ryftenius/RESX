@@ -331,21 +331,6 @@ int status = ResxRunCommandJson(request, &json);
 ResxFreeString(json);
 ```
 
-## PowerShell Smoke Test
-
-The repository includes a DLL smoke test scaffold:
-
-```text
-examples/resx_dll_smoke.c
-examples/run-resx-dll-smoke.ps1
-```
-
-Run it after building the release DLL:
-
-```powershell
-.\examples\run-resx-dll-smoke.ps1
-```
-
 ## Threading and Reentrancy
 
 The FFI layer catches panics at the boundary and returns `RSX_STATUS_PANIC`. It initializes Rayon once if worker options require it. Calls are intended to be independent; callers should not mutate or free output buffers except through `ResxFreeString`.

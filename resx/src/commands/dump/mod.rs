@@ -414,10 +414,15 @@ fn recover_reachable_function_insns(
                 .saturating_add(section.virtual_size.max(section.raw_size))
         })
         .unwrap_or_else(|| start_rva.saturating_add(cfg.max_bytes.max(512) as u32));
-    let function_end = start_rva
-        .saturating_add(cfg.max_bytes.max(512) as u32)
-        .min(section_end)
-        .max(start_rva.saturating_add(1));
+    let function_end = read_runtime_function(pe, raw, start_rva)
+        .map(|runtime| runtime.end_rva.min(section_end))
+        .filter(|end| *end > start_rva)
+        .unwrap_or_else(|| {
+            start_rva
+                .saturating_add(cfg.max_bytes.max(512) as u32)
+                .min(section_end)
+                .max(start_rva.saturating_add(1))
+        });
 
     let mut queue = std::collections::VecDeque::from([start_rva]);
     let mut seen_blocks = std::collections::BTreeSet::new();
@@ -477,6 +482,19 @@ fn recover_reachable_function_insns(
 
         if block.is_empty() {
             continue;
+        }
+
+        if let Some(last) = block.last_mut() {
+            if last.is_jmp {
+                if let Some(target) = direct_branch_rva(last, image_base) {
+                    if !rva_in_function_window(target, start_rva, function_end) {
+                        append_comment(
+                            &mut last.comment,
+                            &format!("tail call leaves current function for rva 0x{target:08x}"),
+                        );
+                    }
+                }
+            }
         }
 
         enqueue_block_successors(&block, image_base, start_rva, function_end, &mut queue);
@@ -539,6 +557,13 @@ fn direct_branch_rva(insn: &Instruction, image_base: u64) -> Option<u32> {
 
 fn next_insn_rva(insn: &Instruction) -> Option<u32> {
     insn.rva.checked_add(insn.bytes.len() as u32)
+}
+
+fn append_comment(comment: &mut String, note: &str) {
+    if !comment.is_empty() {
+        comment.push_str(" | ");
+    }
+    comment.push_str(note);
 }
 
 fn count_dump_steps(cfg: &Config, only_metadata: bool, want_recomp: bool) -> usize {

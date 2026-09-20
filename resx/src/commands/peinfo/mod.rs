@@ -33,6 +33,7 @@ use self::render::{blank_as_unknown, render_text, TextReport};
 mod detect;
 mod model;
 mod render;
+pub(crate) mod triage;
 
 pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     let mut progress = StageProgress::new(9, !cfg.quiet && !cfg.json, c.on);
@@ -92,6 +93,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
     let veh_imports = detect_veh_imports(&imports);
     let startup_routines = find_startup_routines(&pe, &raw);
     let data_summary = read_data_summary(&pe, &raw);
+    let triage = triage::assess(&pe);
 
     if cfg.json {
         let out = PeInfoJson {
@@ -155,6 +157,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
             startup_routines: startup_routines.iter().map(to_startup_json).collect(),
             sections: pe.sections.iter().map(to_section_json).collect(),
             anomalies: pe.anomalies.iter().map(to_anomaly_json).collect(),
+            triage: triage.clone(),
         };
         writeln!(
             w,
@@ -184,6 +187,7 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
             veh_imports: &veh_imports,
             metadata: &metadata,
             known_names: &known_names,
+            triage: &triage,
         },
     );
     Ok(())

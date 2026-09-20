@@ -209,6 +209,7 @@ fn ffi_export_symbols_are_linkable() {
 }
 
 #[test]
+#[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn ffi_wrappers_cover_resx_analysis_surface() {
     let Some((dll, variant, exe)) = ensure_samples() else {
         return;

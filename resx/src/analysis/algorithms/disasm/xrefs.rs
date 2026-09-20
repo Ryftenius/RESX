@@ -55,6 +55,7 @@ pub fn find_xrefs(
             let site_rva = section.virtual_address + pos as u32;
             let pc = image_base + site_rva as u64;
             insns.push(Instruction {
+                block_start: section.virtual_address,
                 rva: site_rva,
                 va: pc,
                 file_off: (start + pos) as u64,

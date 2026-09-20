@@ -18,8 +18,8 @@ The command-specific object key matches `kind`. Current command kinds include
 
 ## Stability rules
 
-- Numeric RVAs, VAs, file offsets, sizes, counts, and limits remain numeric.
-- Human-readable formatted addresses may be included separately.
+- A field retains its established representation. Numeric coordinates remain
+  numeric; formatted coordinates use `0x`-prefixed strings.
 - Missing evidence is null, absent, or explicitly unavailable. It is not replaced
   with zero.
 - Reports that hit a bound expose the applicable limit and truncation state.
@@ -30,6 +30,19 @@ The command-specific object key matches `kind`. Current command kinds include
 
 Use `--json` for one document and `--jsonl` for streaming corpus commands.
 Diagnostics remain on stderr and are not mixed into the JSON document.
+
+## Dump reports
+
+The `dump` object includes `signature` and `decode_conflicts`. Signature reports
+identify their source, inferred parameters, completeness, and traversal limits.
+Conflict reports retain bounded overlapping-decode evidence without assigning
+intent. Instruction coordinates (`block_start`, `rva`, `va`, and optional
+`rebased_va`) are formatted hexadecimal strings; opcode bytes are lowercase hex.
+
+## PE triage
+
+`peinfo` may include a bounded `triage` array. Each item separates observed
+evidence from interpretation and includes severity, confidence, and kind.
 
 ## PE validation
 

@@ -405,6 +405,7 @@ mod tests {
             _ => 0,
         };
         Instruction {
+            block_start: rva,
             rva,
             va: IMAGE_BASE + rva as u64,
             file_off: 0,

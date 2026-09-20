@@ -11,7 +11,8 @@ pub use strings::find_string_refs;
 pub use xrefs::find_xrefs;
 
 use iced_x86::{
-    Decoder, DecoderOptions, Formatter, GasFormatter, IntelFormatter, Mnemonic, OpKind, Register,
+    Decoder, DecoderOptions, Formatter, GasFormatter, IntelFormatter, MemorySizeOptions, Mnemonic,
+    OpKind, Register,
 };
 
 use crate::analysis::symbols::SymbolIndex;
@@ -21,6 +22,9 @@ use crate::formats::pe::{Export, PeFile};
 
 #[derive(Debug, Clone)]
 pub struct Instruction {
+    /// Basic-block entry used to decode this instruction. This disambiguates
+    /// valid overlapping instruction streams.
+    pub block_start: u32,
     pub rva: u32,
     pub va: u64,
     pub file_off: u64,
@@ -228,6 +232,8 @@ fn disassemble_at_inner(
         })),
         None,
     );
+    configure_formatter(intel_fmt.options_mut());
+    configure_formatter(gas_fmt.options_mut());
 
     let mut decoder = Decoder::with_ip(arch, chunk, ip, DecoderOptions::NONE);
     let mut iced = iced_x86::Instruction::default();
@@ -278,20 +284,42 @@ fn disassemble_at_inner(
         }
 
         let (mnem, ops) = if let Some(sp) = text.find(' ') {
-            (text[..sp].to_uppercase(), text[sp + 1..].trim().to_owned())
+            (
+                text[..sp].to_ascii_lowercase(),
+                text[sp + 1..].trim().to_owned(),
+            )
         } else {
-            (text.to_uppercase(), String::new())
+            (text.to_ascii_lowercase(), String::new())
         };
 
         let mut comment_parts: Vec<String> = Vec::new();
         let call_target = if m == Mnemonic::Call || is_jmp(m) || is_jcc(m) {
             let tgt = resolve_call_target(&iced);
             if tgt != 0 {
-                if let Some(desc) = symbol_index.describe(tgt) {
-                    comment_parts.push(desc);
+                let t_rva = tgt.wrapping_sub(image_base) as u32;
+                let destination = symbol_index
+                    .describe(tgt)
+                    .unwrap_or_else(|| format!("loc_{t_rva:08x}"));
+                if cfg.verbose {
+                    let flow = if m == Mnemonic::Call {
+                        "call"
+                    } else if is_jmp(m) {
+                        "jump"
+                    } else {
+                        "taken"
+                    };
+                    comment_parts.push(format!(
+                        "{flow} to {destination} (rva 0x{t_rva:08x}, va 0x{tgt:x})"
+                    ));
                 } else {
-                    let t_rva = tgt.wrapping_sub(image_base) as u32;
-                    comment_parts.push(format!("→ RVA 0x{:08X}", t_rva));
+                    comment_parts.push(format!("→ {destination}"));
+                }
+                if cfg.verbose && is_jcc(m) {
+                    let fallthrough = pc.saturating_add(i_len as u64);
+                    let fallthrough_rva = fallthrough.wrapping_sub(image_base) as u32;
+                    comment_parts.push(format!(
+                        "fallthrough to loc_{fallthrough_rva:08x} (rva 0x{fallthrough_rva:08x}, va 0x{fallthrough:x})"
+                    ));
                 }
             }
             tgt
@@ -308,7 +336,10 @@ fn disassemble_at_inner(
                         .flatten()
                 })
             {
-                if !comment_parts.iter().any(|p| p == &desc) {
+                if !comment_parts
+                    .iter()
+                    .any(|part| part == &desc || part.strip_prefix("→ ") == Some(desc.as_str()))
+                {
                     comment_parts.push(desc);
                 }
             }
@@ -338,6 +369,7 @@ fn disassemble_at_inner(
         let is_all_pad = i_bytes.iter().all(|&b| b == 0xCC || b == 0x90 || b == 0x00);
 
         let insn = Instruction {
+            block_start: start_rva,
             rva: current_rva,
             va: pc,
             file_off: (file_off + pos) as u64,
@@ -382,4 +414,42 @@ fn disassemble_at_inner(
     }
 
     Ok(insns)
+}
+
+fn configure_formatter(options: &mut iced_x86::FormatterOptions) {
+    options.set_uppercase_mnemonics(false);
+    options.set_uppercase_registers(false);
+    options.set_uppercase_keywords(false);
+    options.set_uppercase_decorators(false);
+    options.set_uppercase_prefixes(false);
+    options.set_uppercase_hex(false);
+    options.set_hex_prefix("0x");
+    options.set_hex_suffix("");
+    options.set_space_after_operand_separator(true);
+    options.set_branch_leading_zeros(false);
+    options.set_displacement_leading_zeros(false);
+    options.set_memory_size_options(MemorySizeOptions::Always);
+}
+
+#[cfg(test)]
+mod formatting_tests {
+    use super::*;
+
+    #[test]
+    fn intel_output_is_lowercase_prefixed_hex() {
+        let mut decoder = Decoder::with_ip(
+            64,
+            &[0x4d, 0x8b, 0x5a, 0x28],
+            0x140048399,
+            DecoderOptions::NONE,
+        );
+        let instruction = decoder.decode();
+        let mut formatter = IntelFormatter::new();
+        configure_formatter(formatter.options_mut());
+        let mut text = String::new();
+        formatter.format(&instruction, &mut text);
+        assert_eq!(text, "mov r11, qword ptr [r10+0x28]");
+        assert!(!text.contains('h'));
+        assert!(!text.chars().any(|ch| ch.is_ascii_uppercase()));
+    }
 }

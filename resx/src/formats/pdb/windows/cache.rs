@@ -68,18 +68,29 @@ pub(super) unsafe extern "system" fn enum_symbol_cb(
     let name_len = info.name_len as usize;
     let name = String::from_utf8_lossy(&info.name[..name_len.min(info.name.len())]).into_owned();
     if !name.is_empty() {
-        let type_id = get_type_id(
-            ctx.h_proc,
-            ctx.module_base,
-            info.type_index,
-            ctx.sym_get_type_info,
-        );
+        // SYMBOL_INFO.TypeIndex already identifies the symbol's type. Asking
+        // TI_GET_TYPEID again can unwrap a function into its return type.
+        let type_id = (info.type_index != 0).then_some(info.type_index);
         let type_name = type_id
-            .and_then(|id| get_type_name(ctx.h_proc, ctx.module_base, id, ctx.sym_get_type_info))
+            .map(|id| {
+                describe_type(
+                    ctx.h_proc,
+                    ctx.module_base,
+                    id,
+                    ctx.sym_get_type_info,
+                    &mut Vec::new(),
+                )
+            })
             .unwrap_or_default();
-        let size = type_id
-            .and_then(|id| get_type_size(ctx.h_proc, ctx.module_base, id, ctx.sym_get_type_info))
-            .unwrap_or(info.size as u64);
+        let size = if info.tag == SYM_TAG_FUNCTION || info.tag == SYM_TAG_PUBLIC {
+            info.size as u64
+        } else {
+            type_id
+                .and_then(|id| {
+                    get_type_size(ctx.h_proc, ctx.module_base, id, ctx.sym_get_type_info)
+                })
+                .unwrap_or(info.size as u64)
+        };
         let rva = info.address.saturating_sub(info.mod_base) as u32;
         vec.push(PdbSymbol {
             name,
@@ -127,29 +138,6 @@ pub(super) unsafe extern "system" fn enum_type_cb(
         });
     }
     1
-}
-
-unsafe fn get_type_id(
-    h_proc: *mut c_void,
-    module_base: u64,
-    type_index: u32,
-    sym_get_type_info: FnSymGetTypeInfo,
-) -> Option<u32> {
-    if type_index == 0 {
-        return None;
-    }
-    let mut type_id = 0u32;
-    if sym_get_type_info(
-        h_proc,
-        module_base,
-        type_index,
-        TI_GET_TYPEID,
-        &mut type_id as *mut _ as *mut c_void,
-    ) == 0
-    {
-        return Some(type_index);
-    }
-    Some(type_id)
 }
 
 pub(super) unsafe fn get_type_size(
@@ -259,11 +247,11 @@ unsafe fn get_children_ids(
     ) else {
         return Vec::new();
     };
-    if count == 0 {
+    if count == 0 || count > 4096 {
         return Vec::new();
     }
-    let bytes = std::mem::size_of::<TiFindChildrenHeader>() + count as usize * 4;
-    let mut buf = vec![0u8; bytes];
+    // u32 backing storage meets the Windows structure's alignment requirement.
+    let mut buf = vec![0u32; 2 + count as usize];
     let hdr = buf.as_mut_ptr() as *mut TiFindChildrenHeader;
     (*hdr).count = count;
     (*hdr).start = 0;
@@ -277,10 +265,7 @@ unsafe fn get_children_ids(
     {
         return Vec::new();
     }
-    let ids_ptr = buf
-        .as_ptr()
-        .add(std::mem::size_of::<TiFindChildrenHeader>()) as *const u32;
-    slice::from_raw_parts(ids_ptr, count as usize).to_vec()
+    buf[2..].to_vec()
 }
 
 pub(super) unsafe fn build_type_info(
@@ -416,8 +401,33 @@ unsafe fn describe_type(
     sym_get_type_info: FnSymGetTypeInfo,
     seen: &mut Vec<u32>,
 ) -> String {
+    describe_type_bounded(
+        h_proc,
+        module_base,
+        type_id,
+        sym_get_type_info,
+        seen,
+        &mut 512,
+    )
+}
+
+unsafe fn describe_type_bounded(
+    h_proc: *mut c_void,
+    module_base: u64,
+    type_id: u32,
+    sym_get_type_info: FnSymGetTypeInfo,
+    seen: &mut Vec<u32>,
+    budget: &mut usize,
+) -> String {
+    if *budget == 0 {
+        return "unknown /* type node limit */".into();
+    }
+    *budget -= 1;
     if type_id == 0 {
         return "void".to_owned();
+    }
+    if seen.len() >= 24 {
+        return "unknown /* type depth limit */".into();
     }
     if seen.contains(&type_id) {
         return get_type_name(h_proc, module_base, type_id, sym_get_type_info)
@@ -439,7 +449,9 @@ unsafe fn describe_type(
         }
         SYM_TAG_POINTER_TYPE => {
             let inner = get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
-                .map(|id| describe_type(h_proc, module_base, id, sym_get_type_info, seen))
+                .map(|id| {
+                    describe_type_bounded(h_proc, module_base, id, sym_get_type_info, seen, budget)
+                })
                 .unwrap_or_else(|| "void".to_owned());
             let suffix = if get_type_u32(
                 h_proc,
@@ -461,7 +473,14 @@ unsafe fn describe_type(
             let inner_id =
                 get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
                     .unwrap_or(0);
-            let inner = describe_type(h_proc, module_base, inner_id, sym_get_type_info, seen);
+            let inner = describe_type_bounded(
+                h_proc,
+                module_base,
+                inner_id,
+                sym_get_type_info,
+                seen,
+                budget,
+            );
             let total = get_type_size(h_proc, module_base, type_id, sym_get_type_info).unwrap_or(0);
             let elem = get_type_size(h_proc, module_base, inner_id, sym_get_type_info).unwrap_or(0);
             if elem > 0 && total >= elem {
@@ -482,7 +501,76 @@ unsafe fn describe_type(
             let len = get_type_size(h_proc, module_base, type_id, sym_get_type_info).unwrap_or(0);
             base_type_name(base, len).to_owned()
         }
-        SYM_TAG_FUNCTION_TYPE => "function".to_owned(),
+        SYM_TAG_FUNCTION_TYPE => {
+            let ret = get_type_u32(h_proc, module_base, type_id, TI_GET_TYPE, sym_get_type_info)
+                .map(|id| {
+                    describe_type_bounded(h_proc, module_base, id, sym_get_type_info, seen, budget)
+                })
+                .unwrap_or_else(|| "unknown".into());
+            let cc = get_type_u32(
+                h_proc,
+                module_base,
+                type_id,
+                TI_GET_CALLING_CONVENTION,
+                sym_get_type_info,
+            );
+            let convention = match cc {
+                Some(0) => "__cdecl",
+                Some(4) => "__fastcall",
+                Some(7) => "__stdcall",
+                Some(11) => "__thiscall",
+                Some(24) => "__vectorcall",
+                _ => "/* ABI unknown */",
+            };
+            let count = get_type_u32(
+                h_proc,
+                module_base,
+                type_id,
+                TI_GET_CHILDRENCOUNT,
+                sym_get_type_info,
+            );
+            let args = match count {
+                Some(0) => "void".to_owned(),
+                Some(n) if n <= 128 => {
+                    let children =
+                        get_children_ids(h_proc, module_base, type_id, sym_get_type_info);
+                    if children.len() != n as usize {
+                        "/* arguments unavailable */".into()
+                    } else {
+                        children
+                            .into_iter()
+                            .map(|id| {
+                                get_type_u32(
+                                    h_proc,
+                                    module_base,
+                                    id,
+                                    TI_GET_TYPE,
+                                    sym_get_type_info,
+                                )
+                                .map(|ty| {
+                                    if ty == 0 {
+                                        "...".into()
+                                    } else {
+                                        describe_type_bounded(
+                                            h_proc,
+                                            module_base,
+                                            ty,
+                                            sym_get_type_info,
+                                            seen,
+                                            budget,
+                                        )
+                                    }
+                                })
+                                .unwrap_or_else(|| "unknown".into())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                }
+                _ => "/* arguments unavailable or over limit */".into(),
+            };
+            format!("{ret} {convention}({args})")
+        }
         _ => get_type_name(h_proc, module_base, type_id, sym_get_type_info)
             .unwrap_or_else(|| format!("{}#{:X}", type_tag_name(tag), type_id)),
     };

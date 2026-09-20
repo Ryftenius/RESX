@@ -526,10 +526,10 @@ pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &C
     };
 
     for insn in insns {
-        let addr = c.cyan(&format!("{:0>width$X}", insn.rva, width = addr_w));
+        let addr = c.cyan(&format!("{:0>width$x}", insn.rva, width = addr_w));
 
         let byte_str = if cfg.show_bytes {
-            let hex: Vec<String> = insn.bytes.iter().map(|b| format!("{:02X}", b)).collect();
+            let hex: Vec<String> = insn.bytes.iter().map(|b| format!("{:02x}", b)).collect();
             let raw = hex.join(" ");
             let pad_w = byte_col_w * 3 - 1;
             let padded = if raw.len() < pad_w {
@@ -554,7 +554,7 @@ pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &C
             ));
         }
         if cfg.show_offsets {
-            line.push_str(&c.dim(&format!("  [off: 0x{:X}]", insn.file_off)));
+            line.push_str(&c.dim(&format!("  [off: 0x{:x}]", insn.file_off)));
         }
         writeln!(w, "{}", line).ok();
     }

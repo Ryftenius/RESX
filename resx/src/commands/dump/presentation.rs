@@ -43,7 +43,7 @@ pub(crate) fn resolve_function(
             raw,
             image_base,
         )?;
-        if !cfg.quiet {
+        if !cfg.quiet && !cfg.json {
             print_address_resolution(w, c, &target);
         }
         return Ok((target.target_rva, target.name, false));
@@ -62,7 +62,7 @@ pub(crate) fn resolve_function(
         if pe.entry_point == 0 || pe.rva_to_offset(pe.entry_point).is_none() {
             return Err("the PE entrypoint is absent or not file-backed".to_owned());
         }
-        if !cfg.quiet {
+        if !cfg.quiet && !cfg.json {
             writeln!(
                 w,
                 "{}",
@@ -90,7 +90,7 @@ pub(crate) fn resolve_function(
         if rva == 0 || pe.rva_to_offset(rva).is_none() {
             return Err("RESX did not recover a file-backed real-entry candidate".to_owned());
         }
-        if !cfg.quiet {
+        if !cfg.quiet && !cfg.json {
             writeln!(
                 w,
                 "{}",
@@ -103,7 +103,7 @@ pub(crate) fn resolve_function(
 
     for e in exports {
         if e.name == func_arg {
-            if !cfg.quiet {
+            if !cfg.quiet && !cfg.json {
                 writeln!(
                     w,
                     "{}",
@@ -139,18 +139,18 @@ pub(crate) fn resolve_function(
             raw,
             image_base,
         )?;
-        if !cfg.quiet {
+        if !cfg.quiet && !cfg.json {
             print_address_resolution(w, c, &target);
         }
         return Ok((target.target_rva, target.name, false));
     }
 
     if !cfg.no_pdb {
-        if !cfg.quiet {
+        if !cfg.quiet && !cfg.json {
             writeln!(w, "{}", c.info("Not found in EAT; checking PDB symbols")).ok();
         }
         if let Some(sym) = find_cached_pdb_symbol(pdb_symbols, func_arg) {
-            if !cfg.quiet {
+            if !cfg.quiet && !cfg.json {
                 writeln!(
                     w,
                     "{}",
@@ -179,7 +179,7 @@ pub(crate) fn resolve_function(
         );
         drop(progress);
         if let Some(rva) = resolved {
-            if !cfg.quiet {
+            if !cfg.quiet && !cfg.json {
                 writeln!(
                     w,
                     "{}",
@@ -193,7 +193,7 @@ pub(crate) fn resolve_function(
 
     let iat_slots = find_iat_slots_by_name(pe, raw, func_arg);
     if let Some((slot_rva, dll_name, import_name)) = iat_slots.first() {
-        if !cfg.quiet {
+        if !cfg.quiet && !cfg.json {
             writeln!(
                 w,
                 "{}",
@@ -209,7 +209,7 @@ pub(crate) fn resolve_function(
 
     if cfg.show_xrefs {
         if let Some(func) = crate::analysis::wdf::function_by_name(func_arg) {
-            if !cfg.quiet {
+            if !cfg.quiet && !cfg.json {
                 writeln!(
                     w,
                     "{}",
