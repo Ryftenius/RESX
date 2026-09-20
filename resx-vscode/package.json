@@ -152,7 +152,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "npm run compile:webview && tsc -p ./",
-    "compile:webview": "tsc -p ./tsconfig.webview.json",
+    "compile:webview": "node ./scripts/sync-webview-shared.mjs && tsc -p ./tsconfig.webview.json",
     "test:webview": "npm run compile:webview && node ./test/run-tests.mjs",
     "watch": "tsc -watch -p ./",
     "package": "npx --yes @vscode/vsce package",
