@@ -22,29 +22,29 @@
 
 ## Features
 
+- Reachable multi-stream decoding for overlapping x86/x64 instruction streams.
+- Bounded Win64 ABI prototype recovery for register, stack, integer, floating-point, pointer, and return-value evidence.
+- Kernel-driver, WDF, NDIS, and hypervisor-oriented analysis with IOCTL and dispatch recovery.
+- Static behavior triage for syscall stubs, anti-analysis instructions, TLS callbacks, loader APIs, executable-memory setup, IPC, networking, and cryptography.
+- Reverse caller tracing across priority modules and custom scan scopes.
+- Startup-flow reconstruction from entry points, TLS callbacks, thread and work-pool callbacks, import calls, indirect edges, and x64 unwind or exception-handler evidence.
+- Structural diffing, CFG diff views, code and control heatmaps, corpus indexing, and sample hunting.
+- Integrated VS Code binary viewer for navigation, triage, flow, symbols, types, scans, and function analysis.
+- Protected-file triage for packer markers, OEP handoff candidates, import-rebuild leads, VM dispatcher or handler candidates, and bounded payload recovery.
+- C-like reconstruction and bounded CFG rendering for selected functions.
 - Hardened PE32+ metadata, section, data-directory, debug, CLR, TLS, load-configuration, certificate, version, and anomaly inspection.
-- Export Address Table and Import Address Table browsing.
 - Export and PDB symbol loading, type browsing, and symbol-backed navigation.
 - Targeted disassembly by name, RVA, VA, file offset, or ordinal.
-- Reachable multi-stream decoding for overlapping x86/x64 instruction streams.
-- Lowercase Intel-style disassembly with stack-frame aliases and optional lightweight SSA annotations through `--ssa`.
-- Bounded Win64 ABI prototype recovery for register, stack, integer, floating-point, pointer, and return-value evidence.
 - Incoming call and jump xrefs for functions and imports.
-- C-like reconstruction and bounded CFG rendering for selected functions.
-- Startup-flow reconstruction from entry points, TLS callbacks, thread and work-pool callbacks, import calls, indirect edges, and x64 unwind or exception-handler evidence.
 - Static triage with hook and thunk indicators, string references, API-call maps, suspicious control-flow hints, and explicit decode-conflict records.
-- Static behavior triage for syscall stubs, anti-analysis instructions, TLS callbacks, loader APIs, executable-memory setup, IPC, networking, and cryptography.
-- Protected-file triage for packer markers, OEP handoff candidates, import-rebuild leads, VM dispatcher or handler candidates, and bounded payload recovery.
-- Terminal entropy maps over executable code with ASCII, zero-byte, unique-byte, and high or low entropy flags.
 - Hostile-mode tracing for packed or deliberately confusing binaries.
-- Reverse caller tracing across priority modules and custom scan scopes.
-- Structural diffing, CFG diff views, code and control heatmaps, corpus indexing, and sample hunting.
-- Kernel-driver, WDF, NDIS, and hypervisor-oriented analysis with IOCTL and dispatch recovery.
 - Guarded byte patching by RVA, VA, or file offset.
-- Folder scanning with fuzz-target candidate ranking.
 - YARA-compatible scanning and bounded string, byte-pattern, instruction, and symbol search.
+- Folder scanning with fuzz-target candidate ranking.
+- Terminal entropy maps over executable code with ASCII, zero-byte, unique-byte, and high or low entropy flags.
+- Export Address Table and Import Address Table browsing.
+- Native C ABI for embedding RESX analysis in other tools.
 - Versioned JSON output for automation.
-- Native C ABI and VS Code binary viewer.
 
 RESX operates on file bytes and optional symbol data. It does not load or execute the analyzed image.
 
