@@ -133,6 +133,8 @@ All notable public changes to RESX are recorded here.
 - Split dump execution, presentation, JSON construction, and call-map handling.
 - Split structural diff output into CFG, heatmap, and text components.
 - Moved terminal color, progress, table, and output behavior into a dedicated presentation layer.
+- Centralized address-source parsing and integer-literal handling for dump and patch commands.
+- Centralized editor payload-envelope types and generation for extension and webview builds.
 - Consolidated command examples and option parsing while retaining focused help pages.
 - Replaced ad hoc messages with bounded structured diagnostics.
 
