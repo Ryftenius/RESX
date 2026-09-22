@@ -99,6 +99,7 @@ pub struct ReconstructStats {
     pub indirect_edges: usize,
     pub thread_edges: usize,
     pub workpool_edges: usize,
+    pub apc_edges: usize,
     pub thread_api_edges: usize,
     pub exception_edges: usize,
     pub cycle_edges: usize,
@@ -146,6 +147,45 @@ struct CallbackSpec {
     relation: &'static str,
     tag: &'static str,
     arg_index: usize,
+}
+
+/// A callback entry point recovered from a bounded API-call argument trace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveredApiCallback {
+    pub target_rva: u32,
+    pub method: String,
+    pub relation: &'static str,
+    pub tag: &'static str,
+    /// One-based API argument index, matching platform API documentation.
+    pub argument_index: usize,
+}
+
+/// Returns the documented one-based callback argument for APIs understood by
+/// reconstruction. This is intentionally limited to callback-taking APIs with
+/// explicit backend recovery rules.
+pub fn callback_argument_index(api_name: &str) -> Option<usize> {
+    callback_spec(api_name).map(|spec| spec.arg_index)
+}
+
+/// Recovers an in-image callback target using the same bounded register/stack
+/// analysis as the reconstruction renderer.
+pub fn recover_api_callback(
+    instructions: &[Instruction],
+    call_rva: u32,
+    api_name: &str,
+    pe: &PeFile,
+    raw: &[u8],
+) -> Option<RecoveredApiCallback> {
+    let spec = callback_spec(api_name)?;
+    let (target_rva, method) =
+        recover_callback_target(instructions, call_rva, spec.arg_index, pe, raw)?;
+    Some(RecoveredApiCallback {
+        target_rva,
+        method,
+        relation: spec.relation,
+        tag: spec.tag,
+        argument_index: spec.arg_index,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -524,8 +564,10 @@ impl<'a> TraceContext<'a> {
             relation = spec.relation.to_owned();
             if spec.tag == "thread-spawn" {
                 self.stats.thread_edges += 1;
-            } else {
+            } else if spec.tag == "workpool" {
                 self.stats.workpool_edges += 1;
+            } else if spec.tag == "apc" {
+                self.stats.apc_edges += 1;
             }
 
             match recover_callback_target(insns, call.rva, spec.arg_index, self.pe, self.raw) {
@@ -665,8 +707,8 @@ impl<'a> TraceContext<'a> {
 mod tests {
     use super::render::color_function_kind;
     use super::{
-        callback_spec, classify_edge_target, classify_function_symbol, normalize_api_name,
-        thread_api_intent,
+        callback_argument_index, callback_spec, classify_edge_target, classify_function_symbol,
+        normalize_api_name, thread_api_intent,
     };
     use crate::core::color::Colors;
 
@@ -690,6 +732,9 @@ mod tests {
         let work = callback_spec("CreateThreadpoolWork").unwrap();
         assert_eq!(work.relation, "work-callback");
         assert_eq!(work.arg_index, 1);
+        assert_eq!(callback_argument_index("KERNEL32!CreateThread"), Some(3));
+        assert_eq!(callback_argument_index("SleepEx"), None);
+        assert_eq!(callback_argument_index("QueueUserAPC"), Some(1));
     }
 
     #[test]

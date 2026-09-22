@@ -61,6 +61,11 @@ pub(super) fn callback_spec(name: &str) -> Option<CallbackSpec> {
             tag: "workpool",
             arg_index: 3,
         },
+        "queueuserapc" => CallbackSpec {
+            relation: "apc-callback",
+            tag: "apc",
+            arg_index: 1,
+        },
         _ => return None,
     };
     Some(spec)
@@ -462,6 +467,7 @@ pub(super) fn relation_title(relation: &str) -> String {
     match relation {
         "thread-start" => "Thread Start".to_owned(),
         "work-callback" => "Workpool Callback".to_owned(),
+        "apc-callback" => "APC Callback".to_owned(),
         _ => "Callback".to_owned(),
     }
 }
