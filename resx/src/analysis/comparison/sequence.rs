@@ -181,11 +181,12 @@ pub fn align_instruction_sequences(
         }
     }
     let denominator = left.len().max(right.len());
-    result.similarity = if denominator == 0 {
-        100
-    } else {
-        ((result.equal * 100) / denominator).min(100) as u8
-    };
+    result.similarity = result
+        .equal
+        .saturating_mul(100)
+        .checked_div(denominator)
+        .unwrap_or(100)
+        .min(100) as u8;
     result
 }
 
