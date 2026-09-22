@@ -36,6 +36,36 @@ pub fn annotate(insns: &mut [Instruction], arch: u32) {
         entry,
         State {
             sp: Some(0),
+            regs: BTreeMap::from([
+                (
+                    Register::RCX,
+                    Value {
+                        expr: "arg0".into(),
+                        ..Value::default()
+                    },
+                ),
+                (
+                    Register::RDX,
+                    Value {
+                        expr: "arg1".into(),
+                        ..Value::default()
+                    },
+                ),
+                (
+                    Register::R8,
+                    Value {
+                        expr: "arg2".into(),
+                        ..Value::default()
+                    },
+                ),
+                (
+                    Register::R9,
+                    Value {
+                        expr: "arg3".into(),
+                        ..Value::default()
+                    },
+                ),
+            ]),
             ..State::default()
         },
     )]);
@@ -98,7 +128,7 @@ fn transfer(insn: &Instruction, state: &mut State, notes: &mut BTreeSet<String>)
             let reg = iced.op0_register().full_register();
             let expr = stack
                 .map(|offset| format!("&{}", stack_name(offset)))
-                .unwrap_or_else(|| insn.operands.clone());
+                .unwrap_or_else(|| effective_address_name(state, iced));
             let value = Value {
                 expr: expr.clone(),
                 stack_addr: stack,
@@ -106,6 +136,7 @@ fn transfer(insn: &Instruction, state: &mut State, notes: &mut BTreeSet<String>)
             };
             state.regs.insert(reg, value);
             notes.insert(format!("ssa: {}@{:08x} = {expr}", reg_name(reg), insn.rva));
+            notes.insert(format!("operation: {expr}"));
         }
         Mnemonic::Mov if iced.op0_kind() == OpKind::Register => {
             let reg = iced.op0_register().full_register();
@@ -121,7 +152,7 @@ fn transfer(insn: &Instruction, state: &mut State, notes: &mut BTreeSet<String>)
         Mnemonic::Mov if iced.op0_kind() == OpKind::Memory => {
             let destination = stack
                 .map(stack_name)
-                .unwrap_or_else(|| insn.operands.clone());
+                .unwrap_or_else(|| memory_name(state, iced));
             let source = if iced.op1_kind() == OpKind::Register {
                 state
                     .regs
@@ -132,6 +163,59 @@ fn transfer(insn: &Instruction, state: &mut State, notes: &mut BTreeSet<String>)
                 "value".to_owned()
             };
             notes.insert(format!("ssa: {destination}@{:08x} = {source}", insn.rva));
+            notes.insert(format!("operation: {destination} = {source}"));
+        }
+        Mnemonic::Add | Mnemonic::Sub | Mnemonic::Imul
+            if iced.op0_kind() == OpKind::Register
+                && iced.op0_register().full_register() != Register::RSP =>
+        {
+            let reg = iced.op0_register().full_register();
+            let lhs = state
+                .regs
+                .get(&reg)
+                .map(display_value)
+                .unwrap_or_else(|| reg_name(reg));
+            let rhs = operand_value(state, iced, 1, stack);
+            let operator = match iced.mnemonic() {
+                Mnemonic::Add => "+",
+                Mnemonic::Sub => "-",
+                _ => "*",
+            };
+            let expr = format!("({lhs} {operator} {})", display_value(&rhs));
+            state.regs.insert(
+                reg,
+                Value {
+                    expr: expr.clone(),
+                    ..Value::default()
+                },
+            );
+            notes.insert(format!("ssa: {}@{:08x} = {expr}", reg_name(reg), insn.rva));
+            notes.insert(format!("operation: {expr}"));
+        }
+        Mnemonic::Idiv => {
+            let divisor = operand_value(state, iced, 0, stack);
+            let dividend = state
+                .regs
+                .get(&Register::RAX)
+                .map(display_value)
+                .unwrap_or_else(|| "rax".into());
+            let expr = format!("({dividend} / {})", display_value(&divisor));
+            state.regs.insert(
+                Register::RAX,
+                Value {
+                    expr: expr.clone(),
+                    ..Value::default()
+                },
+            );
+            state.regs.insert(
+                Register::RDX,
+                Value {
+                    expr: format!("remainder({expr})"),
+                    ..Value::default()
+                },
+            );
+            notes.insert(format!("ssa: rax@{:08x} = {expr}", insn.rva));
+            notes.insert(format!("operation: {expr}"));
         }
         Mnemonic::Xor
             if iced.op0_kind() == OpKind::Register
@@ -222,21 +306,32 @@ fn transfer(insn: &Instruction, state: &mut State, notes: &mut BTreeSet<String>)
 }
 
 fn source_value(state: &State, iced: &iced_x86::Instruction, stack: Option<i64>) -> Value {
-    match iced.op1_kind() {
+    operand_value(state, iced, 1, stack)
+}
+
+fn operand_value(
+    state: &State,
+    iced: &iced_x86::Instruction,
+    operand: u32,
+    stack: Option<i64>,
+) -> Value {
+    match iced.op_kind(operand) {
         OpKind::Register => state
             .regs
-            .get(&iced.op1_register().full_register())
+            .get(&iced.op_register(operand).full_register())
             .cloned()
             .unwrap_or_else(|| Value {
-                expr: reg_name(iced.op1_register()),
+                expr: reg_name(iced.op_register(operand)),
                 ..Value::default()
             }),
         OpKind::Memory => Value {
-            expr: stack.map(stack_name).unwrap_or_else(|| "memory".to_owned()),
+            expr: stack
+                .map(stack_name)
+                .unwrap_or_else(|| memory_name(state, iced)),
             ..Value::default()
         },
         OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32 | OpKind::Immediate64 => {
-            let constant = iced.immediate(1);
+            let constant = iced.immediate(operand);
             Value {
                 expr: format!("0x{constant:x}"),
                 constant: Some(constant),
@@ -248,6 +343,41 @@ fn source_value(state: &State, iced: &iced_x86::Instruction, stack: Option<i64>)
             ..Value::default()
         },
     }
+}
+
+fn memory_name(state: &State, iced: &iced_x86::Instruction) -> String {
+    format!("*({})", effective_address_name(state, iced))
+}
+
+fn effective_address_name(state: &State, iced: &iced_x86::Instruction) -> String {
+    let base_register = iced.memory_base().full_register();
+    let base = state
+        .regs
+        .get(&base_register)
+        .map(display_value)
+        .unwrap_or_else(|| reg_name(base_register));
+    let index_register = iced.memory_index().full_register();
+    let index = (index_register != Register::None).then(|| {
+        let value = state
+            .regs
+            .get(&index_register)
+            .map(display_value)
+            .unwrap_or_else(|| reg_name(index_register));
+        if iced.memory_index_scale() > 1 {
+            format!(" + {value}*{}", iced.memory_index_scale())
+        } else {
+            format!(" + {value}")
+        }
+    });
+    let displacement = iced.memory_displacement64() as i64;
+    let displacement = if displacement > 0 {
+        format!(" + 0x{displacement:x}")
+    } else if displacement < 0 {
+        format!(" - 0x{:x}", displacement.unsigned_abs())
+    } else {
+        String::new()
+    };
+    format!("{base}{}{displacement}", index.unwrap_or_default())
 }
 
 fn stack_address(state: &State, iced: &iced_x86::Instruction) -> Option<i64> {
@@ -386,5 +516,27 @@ mod tests {
         assert!(rows[2].comment.contains("{arg1}"));
         assert!(rows[2].comment.contains("ssa: r11@"));
         assert!(rows[3].comment.contains("return to {__return_addr}"));
+    }
+
+    #[test]
+    fn recovers_arithmetic_expressions_and_stack_destinations() {
+        let mut rows = decode(&[
+            0x8b, 0x41, 0x20, // mov eax,[rcx+20h]
+            0x03, 0x41, 0x24, // add eax,[rcx+24h]
+            0x89, 0x45, 0xb4, // mov [rbp-4Ch],eax
+            0x8b, 0x41, 0x20, // mov eax,[rcx+20h]
+            0x0f, 0xaf, 0x41, 0x24, // imul eax,[rcx+24h]
+            0xc3,
+        ]);
+        annotate(&mut rows, 64);
+        assert!(rows[1]
+            .comment
+            .contains("operation: (*(arg0 + 0x20) + *(arg0 + 0x24))"));
+        assert!(rows[2]
+            .comment
+            .contains("operation: *(rbp - 0x4c) = (*(arg0 + 0x20) + *(arg0 + 0x24))"));
+        assert!(rows[4]
+            .comment
+            .contains("operation: (*(arg0 + 0x20) * *(arg0 + 0x24))"));
     }
 }

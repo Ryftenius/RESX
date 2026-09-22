@@ -5,6 +5,7 @@ pub mod ir;
 pub mod recomp;
 pub mod reconstruct;
 pub mod recursive_cfg;
+pub mod semantics;
 pub mod thunk;
 
 pub mod dataflow;
