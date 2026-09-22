@@ -5,6 +5,7 @@ mod normalize;
 mod orchestration;
 mod profile;
 mod reporting;
+mod sequence;
 
 use cfg::*;
 use classification::*;
@@ -13,6 +14,7 @@ use normalize::*;
 pub use orchestration::*;
 use profile::*;
 use reporting::*;
+pub use sequence::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
