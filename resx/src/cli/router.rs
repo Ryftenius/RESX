@@ -148,7 +148,9 @@ pub fn dispatch(
     if is_peinfo_shorthand {
         return commands::peinfo::run(&func_arg, cfg, w, c);
     }
-    if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("cfg") {
+    // The cfg view renders text only; with --json it falls through to dump,
+    // whose JSON carries the same graph (`cfg`) and its recovered structure.
+    if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("cfg") && !cfg.json {
         return commands::cfg::run(&dll_arg, &func_arg, cfg, w, c);
     }
     if raw_args.len() >= 2 && raw_args[1].eq_ignore_ascii_case("intelli") {
