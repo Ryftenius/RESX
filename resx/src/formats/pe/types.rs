@@ -296,6 +296,8 @@ pub struct PeLoadConfigInfo {
     pub size: u32,
     pub security_cookie: u64,
     pub se_handler_count: u64,
+    /// VA of the slot holding `__guard_dispatch_icall_fptr`; zero without CFG.
+    pub guard_cf_dispatch_function_pointer: u64,
     pub guard_cf_function_count: u64,
     pub guard_flags: u32,
     pub guard_eh_continuation_count: u64,

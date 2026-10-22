@@ -17,6 +17,7 @@ pub fn find_xrefs(
     let mut budget = 65_536usize;
     let mut seen = std::collections::HashSet::new();
     let image_base = pe.image_base;
+    let dispatch_slot = super::api::guard_dispatch_slot(pe, raw);
 
     for section in &pe.sections {
         if section.characteristics & 0x2000_0000 == 0 {
@@ -134,8 +135,8 @@ pub fn find_xrefs(
             }
 
             if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
-                if let Some(symbol_index) = symbols {
-                    if is_guard_dispatch_call(insn, symbol_index) {
+                {
+                    if is_guard_dispatch_call(insn, symbols, dispatch_slot) {
                         if let Some(src) =
                             track_wdf_table_register(&insns, idx, Register::RAX, symbols, pe)
                                 .or_else(|| {
@@ -146,7 +147,7 @@ pub fn find_xrefs(
                                         image_base,
                                         pe,
                                         raw,
-                                        Some(symbol_index),
+                                        symbols,
                                     )
                                 })
                         {

@@ -90,20 +90,32 @@ pub fn read_load_config(pe: &PeFile, raw: &[u8]) -> Option<PeLoadConfigInfo> {
     let (
         security_cookie_off,
         se_handler_count_off,
+        guard_cf_dispatch_off,
         guard_cf_count_off,
         guard_flags_off,
         guard_eh_count_off,
         guard_xfg_check_off,
     ) = if pe.arch == 64 {
-        (88usize, 104usize, 136usize, 144usize, 272usize, 280usize)
+        (
+            88usize, 104usize, 120usize, 136usize, 144usize, 272usize, 280usize,
+        )
     } else {
-        (60usize, 68usize, 84usize, 88usize, 168usize, 172usize)
+        (
+            60usize, 68usize, 76usize, 84usize, 88usize, 168usize, 172usize,
+        )
     };
 
     Some(PeLoadConfigInfo {
         size,
         security_cookie: read_load_config_value(raw, off, size, security_cookie_off, pe.arch),
         se_handler_count: read_load_config_value(raw, off, size, se_handler_count_off, pe.arch),
+        guard_cf_dispatch_function_pointer: read_load_config_value(
+            raw,
+            off,
+            size,
+            guard_cf_dispatch_off,
+            pe.arch,
+        ),
         guard_cf_function_count: read_load_config_value(
             raw,
             off,

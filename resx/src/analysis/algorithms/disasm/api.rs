@@ -411,7 +411,10 @@ pub(super) fn track_wdf_table_register(
             || insn.iced.op0_kind() != OpKind::Register
             || insn.iced.op0_register().full_register() != full_reg
             || insn.iced.op1_kind() != OpKind::Memory
-            || insn.iced.memory_base().full_register() != full_reg
+            || matches!(
+                insn.iced.memory_base(),
+                Register::None | Register::RIP | Register::EIP
+            )
             || insn.iced.memory_index() != Register::None
         {
             continue;
@@ -423,12 +426,15 @@ pub(super) fn track_wdf_table_register(
         else {
             continue;
         };
+        // MSVC often loads the table into one register and the slot into
+        // another: `mov rcx, [table]; mov rax, [rcx+off]; call rax`.
+        let table_reg = insn.iced.memory_base().full_register();
 
         for root in insns[scan_start..table_idx].iter().rev().take(32) {
             if root.iced.mnemonic() != Mnemonic::Mov
                 || root.iced.op_count() < 2
                 || root.iced.op0_kind() != OpKind::Register
-                || root.iced.op0_register().full_register() != full_reg
+                || root.iced.op0_register().full_register() != table_reg
                 || root.iced.op1_kind() != OpKind::Memory
                 || !matches!(root.iced.memory_base(), Register::RIP | Register::EIP)
             {
@@ -447,7 +453,13 @@ pub(super) fn track_wdf_table_register(
                         .map(|hit| hit.symbol.name)
                         .filter(|name| crate::analysis::wdf::is_wdf_table_symbol(name))
                 })
-                .or_else(|| has_wdf_globals_arg.then(|| "WdfFunctions".to_owned()))?;
+                // Without a symbol, a cross-register slot load is only taken as
+                // WDF in native drivers: elsewhere it is an ordinary call
+                // through a global function-pointer structure.
+                .or_else(|| {
+                    (has_wdf_globals_arg && (table_reg == full_reg || pe.subsystem == 1))
+                        .then(|| "WdfFunctions".to_owned())
+                })?;
             if !crate::analysis::wdf::is_wdf_table_symbol(&table_name) {
                 return None;
             }
@@ -509,6 +521,7 @@ pub fn collect_api_calls(
     hostile: bool,
 ) -> Vec<ApiCall> {
     let mut results = Vec::new();
+    let dispatch_slot = guard_dispatch_slot(pe, raw);
 
     for (idx, insn) in insns.iter().enumerate() {
         if !insn.is_call && !insn.is_jmp {
@@ -537,7 +550,7 @@ pub fn collect_api_calls(
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
             // Indirect call/jmp — most commonly `call [rip+rel32]` through the IAT.
-            if is_guard_dispatch_call(insn, symbol_index) {
+            if is_guard_dispatch_call(insn, Some(symbol_index), dispatch_slot) {
                 if let Some(src) =
                     track_wdf_table_register(insns, idx, Register::RAX, Some(symbol_index), pe)
                         .or_else(|| {
@@ -692,7 +705,18 @@ pub fn collect_api_calls(
     results
 }
 
-pub(super) fn is_guard_dispatch_call(insn: &Instruction, symbol_index: &SymbolIndex) -> bool {
+/// VA of the image's `__guard_dispatch_icall_fptr` slot from its load config,
+/// so CFG dispatch is recognised without symbols. Zero without CFG.
+pub(super) fn guard_dispatch_slot(pe: &PeFile, raw: &[u8]) -> u64 {
+    crate::formats::pe::read_load_config(pe, raw)
+        .map_or(0, |load| load.guard_cf_dispatch_function_pointer)
+}
+
+pub(super) fn is_guard_dispatch_call(
+    insn: &Instruction,
+    symbol_index: Option<&SymbolIndex>,
+    dispatch_slot: u64,
+) -> bool {
     if !insn.is_call || insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Memory {
         return false;
     }
@@ -706,10 +730,10 @@ pub(super) fn is_guard_dispatch_call(insn: &Instruction, symbol_index: &SymbolIn
         0
     };
     slot_va != 0
-        && symbol_index
-            .describe(slot_va)
-            .map(|desc| desc.contains("__guard_dispatch_icall"))
-            .unwrap_or(false)
+        && (slot_va == dispatch_slot
+            || symbol_index
+                .and_then(|index| index.describe(slot_va))
+                .is_some_and(|desc| desc.contains("__guard_dispatch_icall")))
 }
 
 pub(super) fn collect_data_refs(instr: &iced_x86::Instruction) -> Vec<u64> {

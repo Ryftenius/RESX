@@ -16,7 +16,8 @@ use crate::formats::pe::{
     PeRuntimeFunctionInfo,
 };
 
-const REVERSE_CALL_INDEX_VERSION: u32 = 3;
+/// Bump whenever indexed call resolution changes, including the WDF table.
+const REVERSE_CALL_INDEX_VERSION: u32 = 4;
 
 #[derive(Debug, Clone)]
 pub struct FollowScanConfig {
@@ -546,7 +547,10 @@ fn index_wdf_table_calls(
                 || table_load.op0_kind() != OpKind::Register
                 || table_load.op0_register().full_register() != full
                 || table_load.op1_kind() != OpKind::Memory
-                || table_load.memory_base().full_register() != full
+                || matches!(
+                    table_load.memory_base(),
+                    Register::None | Register::RIP | Register::EIP
+                )
                 || table_load.memory_index() != Register::None
             {
                 continue;
@@ -556,6 +560,8 @@ fn index_wdf_table_calls(
             let Some(func) = crate::analysis::wdf::function_from_offset(offset, 8) else {
                 continue;
             };
+            // The table may sit in a different register than the slot.
+            let table_reg = table_load.memory_base().full_register();
             let found_table_root = insns[scan_start..table_idx]
                 .iter()
                 .rev()
@@ -564,7 +570,7 @@ fn index_wdf_table_calls(
                     insn.mnemonic() == Mnemonic::Mov
                         && insn.op_count() >= 2
                         && insn.op0_kind() == OpKind::Register
-                        && insn.op0_register().full_register() == full
+                        && insn.op0_register().full_register() == table_reg
                         && insn.op1_kind() == OpKind::Memory
                         && matches!(insn.memory_base(), Register::RIP | Register::EIP)
                 });
