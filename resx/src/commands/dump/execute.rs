@@ -142,7 +142,12 @@ fn run_with_chain(
     let import_count: usize = imports.iter().map(|dll| dll.entries.len()).sum();
     let startup_routines = find_startup_routines(&pe, &raw);
     let load_config = read_load_config(&pe, &raw);
-    let function_discovery = if cfg.json {
+    // Table views (sections, pechk, eat, iat, syms) reuse this metadata report;
+    // whole-image discovery and data summaries are not part of them and reach
+    // tens of MB on large images.
+    let table_view = only_metadata
+        && (cfg.sections || cfg.pechk || cfg.show_eat || cfg.show_iat || cfg.show_syms);
+    let function_discovery = if cfg.json && !table_view {
         Some(discover_functions(
             &raw,
             &pe,
@@ -230,19 +235,22 @@ fn run_with_chain(
                 instructions: Vec::new(),
                 xrefs: Vec::new(),
                 strings: Vec::new(),
-                data: Some(to_data_summary_json(&read_data_summary(&pe, &raw))),
+                data: (!table_view)
+                    .then(|| to_data_summary_json(&read_data_summary(&pe, &raw))),
                 function_discovery,
                 recursive_cfg: None,
                 typed_ir: None,
                 signature: None,
                 decode_conflicts: None,
-                indirect_flow: Some(analyze_indirect_flow(
-                    &pe,
-                    &imports,
-                    &read_data_summary(&pe, &raw),
-                    &[],
-                    load_config.as_ref(),
-                )),
+                indirect_flow: (!table_view).then(|| {
+                    analyze_indirect_flow(
+                        &pe,
+                        &imports,
+                        &read_data_summary(&pe, &raw),
+                        &[],
+                        load_config.as_ref(),
+                    )
+                }),
                 intelli_findings: metadata_intelli,
                 recomp: String::new(),
                 cfg: String::new(),
