@@ -268,6 +268,14 @@ fn resolve_reg_expr(
                                 func,
                                 slot_rva,
                             }
+                        } else if let Some(func) = crate::analysis::wdf::bound_table_cached(pe, raw)
+                            .and_then(|table| table.slot(slot_va))
+                        {
+                            RegExpr::WdfFunction {
+                                func: func.name.to_owned(),
+                                table: "WdfFunctions".to_owned(),
+                                offset: func.offset(8),
+                            }
                         } else {
                             RegExpr::Va(slot_va)
                         }
@@ -614,6 +622,22 @@ pub fn collect_api_calls(
                         is_import: true,
                         is_indirect: true,
                         indirect_method: Some(iat_method),
+                        switch_cases: Vec::new(),
+                    });
+                    continue;
+                }
+                if let Some(func) = crate::analysis::wdf::bound_table_cached(pe, raw)
+                    .and_then(|table| table.slot(slot_va))
+                {
+                    results.push(ApiCall {
+                        rva: insn.rva,
+                        kind,
+                        target_rva: 0,
+                        label: func.name.to_owned(),
+                        dll: "WDF".to_owned(),
+                        is_import: true,
+                        is_indirect: true,
+                        indirect_method: Some(format!("WdfFunctions[0x{:X}]", func.offset(8))),
                         switch_cases: Vec::new(),
                     });
                     continue;

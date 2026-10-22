@@ -521,8 +521,122 @@ mod tests {
             );
         }
         assert!(function_from_offset(WDF_FUNCTIONS.len() as u64 * 8, 8).is_none());
+
+        // gdrv3.sys binds KMDF 1.9 with 396 in-image slots; 1.15+ binds a pointer.
+        let old = BoundTable {
+            table: 0x1_4000_7130,
+            count: 396,
+            minor: 9,
+        };
+        assert_eq!(old.slot(0x1_4000_74D0).unwrap().name, "WdfDriverCreate");
+        assert_eq!(
+            old.slot(0x1_4000_71F8).unwrap().name,
+            "WdfControlDeviceInitAllocate"
+        );
+        assert!(old.slot(0x1_4000_7130 + 396 * 8).is_none());
+        assert!(BoundTable { minor: 15, ..old }
+            .slot(0x1_4000_74D0)
+            .is_none());
         assert!(function_from_offset(0x86C, 8).is_none());
     }
+}
+
+/// A KMDF client's function table from its `WDF_BIND_INFO` (x64). Clients built
+/// against KMDF 1.13 and earlier bind an in-image array of `count` slots at
+/// `table` and read slots in place; later clients bind a pointer variable
+/// there and index through it.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundTable {
+    pub table: u64,
+    pub count: u64,
+    pub minor: u32,
+}
+
+impl BoundTable {
+    pub fn in_image(&self) -> bool {
+        self.minor < 15
+    }
+
+    /// The function whose in-image slot is at `va`.
+    pub fn slot(&self, va: u64) -> Option<WdfFunction> {
+        let offset = va.checked_sub(self.table)?;
+        if !self.in_image() || offset >= self.count * 8 {
+            return None;
+        }
+        function_from_offset(offset, 8)
+    }
+}
+
+/// Finds `WDF_BIND_INFO` by its `Component` pointer to the UTF-16
+/// "KmdfLibrary" name, checking `Size` and major version 1.
+pub fn bound_table(pe: &crate::formats::pe::PeFile, raw: &[u8]) -> Option<BoundTable> {
+    if pe.arch != 64 {
+        return None;
+    }
+    let name: Vec<u8> = "KmdfLibrary\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let data: Vec<(u32, &[u8])> = pe
+        .sections
+        .iter()
+        .filter(|section| !section.is_executable() && section.raw_size != 0)
+        .filter_map(|section| {
+            let bytes = pe.rva_bytes(raw, section.virtual_address)?;
+            Some((
+                section.virtual_address,
+                &bytes[..bytes.len().min(section.raw_size as usize)],
+            ))
+        })
+        .collect();
+    let component = data.iter().find_map(|(rva, bytes)| {
+        let at = bytes
+            .windows(name.len())
+            .position(|window| window == name)?;
+        Some(pe.image_base + u64::from(*rva) + at as u64)
+    })?;
+    data.iter().find_map(|(_, bytes)| {
+        (8..bytes.len().saturating_sub(40))
+            .step_by(8)
+            .find_map(|at| {
+                let field =
+                    |offset: usize, len: usize| &bytes[at - 8 + offset..at - 8 + offset + len];
+                let u32_at = |offset| u32::from_le_bytes(field(offset, 4).try_into().unwrap());
+                let u64_at = |offset| u64::from_le_bytes(field(offset, 8).try_into().unwrap());
+                (u64_at(8) == component && (0x28..=0x40).contains(&u32_at(0)) && u32_at(16) == 1)
+                    .then(|| BoundTable {
+                        table: u64_at(32),
+                        count: u64::from(u32_at(28)),
+                        minor: u32_at(20),
+                    })
+            })
+    })
+}
+
+/// `bound_table` for the image last asked about on this thread; slot
+/// resolution runs per instruction.
+pub fn bound_table_cached(pe: &crate::formats::pe::PeFile, raw: &[u8]) -> Option<BoundTable> {
+    type Key = (usize, usize, u64, u32, u32);
+    thread_local! {
+        static LAST: std::cell::Cell<Option<(Key, Option<BoundTable>)>> =
+            const { std::cell::Cell::new(None) };
+    }
+    // A freed buffer can be reused for another image, so identity is included.
+    let key = (
+        raw.as_ptr() as usize,
+        raw.len(),
+        pe.image_base,
+        pe.timestamp,
+        pe.entry_point,
+    );
+    LAST.with(|last| match last.get() {
+        Some((cached, table)) if cached == key => table,
+        _ => {
+            let table = bound_table(pe, raw);
+            last.set(Some((key, table)));
+            table
+        }
+    })
 }
 
 pub fn is_wdf_table_symbol(name: &str) -> bool {
