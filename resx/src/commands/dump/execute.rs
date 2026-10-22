@@ -235,8 +235,7 @@ fn run_with_chain(
                 instructions: Vec::new(),
                 xrefs: Vec::new(),
                 strings: Vec::new(),
-                data: (!table_view)
-                    .then(|| to_data_summary_json(&read_data_summary(&pe, &raw))),
+                data: (!table_view).then(|| to_data_summary_json(&read_data_summary(&pe, &raw))),
                 function_discovery,
                 recursive_cfg: None,
                 typed_ir: None,
