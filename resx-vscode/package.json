@@ -163,5 +163,13 @@
     "@types/vscode": "^1.137.0",
     "@vscode/vsce": "3.9.2",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "@azure/identity": "4.13.0"
+    },
+    "@azure/msal-node": {
+      "uuid": "11.1.1"
+    }
   }
 }
