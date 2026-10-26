@@ -26,65 +26,63 @@ to look next, depending on the program this can also reveal a significant amount
 a disassembler;
 
 ```powershell
->  resx /calls "SAMPLE.exe" ENTRY --depth 4 --only winapi --no-pdb --time
+> resx /calls "SAMPLE.exe" ENTRY --depth 4 --only winapi --no-pdb --time
 SAMPLE.exe!entry  [RVA 0x000023E0, VA 0x1400023E0]
-  Base0/RVA: 0x000023E0  |  VA: 0x1400023E0
-  Signature [static-abi-inference]: unknown entry(/* arguments unknown */)
 
 API Call Map for entry  [2 of 2 call site(s) · filter: winapi]:
-  ├── 0x23E4  CALL  sub_00002770 [internal]
-  │   ├── 0x279E  CALL  KERNEL32!GetSystemTimeAsFileTime [import · IAT [rip+0x140003020]]
-  │   ├── 0x27AE  CALL  KERNEL32!GetCurrentThreadId [import · IAT [rip+0x140003028]]
-  │   ├── 0x27BB  CALL  KERNEL32!GetCurrentProcessId [import · IAT [rip+0x140003030]]
-  │   └── 0x27CD  CALL  KERNEL32!QueryPerformanceCounter [import · IAT [rip+0x140003038]]
+  ├── 0x23E4  CALL  sub_00002770
+  │   ├── 0x279E  CALL  KERNEL32!GetSystemTimeAsFileTime
+  │   ├── 0x27AE  CALL  KERNEL32!GetCurrentThreadId
+  │   ├── 0x27BB  CALL  KERNEL32!GetCurrentProcessId
+  │   └── 0x27CD  CALL  KERNEL32!QueryPerformanceCounter
   └── 0x23ED  JMP  sub_00002260 [tail call]
-      ├── 0x236A  CALL  sub_000019E0 [internal]
-      │   ├── 0x1A23  CALL  KERNEL32!InitializeSRWLock [import · IAT [rip+0x140003058]]
-      │   ├── 0x1A2E  CALL  KERNEL32!InitializeConditionVariable [import · IAT [rip+0x140003070]]
-      │   ├── 0x1A39  CALL  sub_00001160 [internal]
-      │   │   ├── 0x1179  CALL  KERNEL32!CreateWaitableTimerExW [import · IAT [rip+0x1400030A0]]
-      │   │   └── 0x11B6  CALL  KERNEL32!SetWaitableTimer [import · IAT [rip+0x140003090]]
-      │   ├── 0x1A47  CALL  sub_000015B0 [internal]
-      │   │   ├── 0x15D0  CALL  KERNEL32!VirtualAlloc [import · IAT [rip+0x1400030B0]]
-      │   │   ├── 0x15F2  CALL  KERNEL32!VirtualAlloc [import · IAT [rip+0x1400030B0]]
-      │   │   └── 0x1608  CALL  KERNEL32!VirtualFree [import · IAT [rip+0x140003000]]
-      │   ├── 0x1A55  CALL  sub_00001630 [internal]
-      │   │   ├── 0x165C  CALL  KERNEL32!CreateThread [import · IAT [rip+0x1400030A8]]
-      │   │   ├── 0x1672  CALL  KERNEL32!AcquireSRWLockExclusive [import · IAT [rip+0x140003068]]
-      │   │   ├── 0x167F  CALL  KERNEL32!ReleaseSRWLockExclusive [import · IAT [rip+0x140003060]]
-      │   │   ├── 0x1689  CALL  KERNEL32!WakeConditionVariable [import · IAT [rip+0x140003078]]
-      │   │   ├── 0x1697  CALL  KERNEL32!WaitForSingleObject [import · IAT [rip+0x140003088]]
-      │   │   └── 0x16A2  CALL  KERNEL32!CloseHandle [import · IAT [rip+0x140003048]]
-      │   ├── 0x1A63  CALL  sub_00001770 [internal]
-      │   │   ├── 0x1795  CALL  KERNEL32!VirtualProtect [import · IAT [rip+0x1400030B8]]
-      │   │   └── 0x17C4  CALL  KERNEL32!VirtualProtect [import · IAT [rip+0x1400030B8]]
-      │   ├── 0x1A71  CALL  sub_000017F0 [internal]
-      │   │   ├── 0x1820  CALL  KERNEL32!CreateFileMappingW [import · IAT [rip+0x1400030D0]]
-      │   │   ├── 0x185A  CALL  KERNEL32!MapViewOfFile [import · IAT [rip+0x1400030D8]]
-      │   │   ├── 0x1884  CALL  KERNEL32!FlushViewOfFile [import · IAT [rip+0x1400030E0]]
-      │   │   ├── 0x18A9  CALL  KERNEL32!UnmapViewOfFile [import · IAT [rip+0x1400030C0]]
-      │   │   └── 0x18B2  CALL  KERNEL32!CloseHandle [import · IAT [rip+0x140003048]]
-      │   ├── 0x1A7F  CALL  sub_000013A0 [internal]
-      │   │   ├── 0x13BF  CALL  bcrypt!BCryptGenRandom [import · IAT thunk 0x1BE0]
-      │   │   ├── 0x13E7  CALL  bcrypt!BCryptOpenAlgorithmProvider [import · IAT thunk 0x1BBC]
-      │   │   ├── 0x142D  CALL  bcrypt!BCryptCreateHash [import · IAT thunk 0x1BC8]
-      │   │   ├── 0x1478  CALL  bcrypt!BCryptFinishHash [import · IAT thunk 0x1BD4]
-      │   │   ├── 0x1488  CALL  bcrypt!BCryptDestroyHash [import · IAT thunk 0x1BDA]
-      │   │   └── 0x1494  CALL  bcrypt!BCryptCloseAlgorithmProvider [import · IAT thunk 0x1BC2]
-      │   ├── 0x1A8D  CALL  sub_00001920 [internal]
-      │   │   ├── 0x1936  CALL  KERNEL32!WaitForSingleObject [import · IAT [rip+0x140003088]]
-      │   │   └── 0x1945  CALL  KERNEL32!CancelWaitableTimer [import · IAT [rip+0x140003098]]
-      │   ├── 0x1AA4  CALL  KERNEL32!GetLastError [import · IAT [rip+0x140003050]]
-      │   └── 0x1AD3  CALL  sub_000018D0 [internal]
-      │       ├── 0x18EA  CALL  KERNEL32!VirtualFree [import · IAT [rip+0x140003000]]
-      │       └── 0x1901  CALL  KERNEL32!CloseHandle [import · IAT [rip+0x140003048]]
-      ├── 0x2371  CALL  sub_00002910 [internal]
-      │   └── 0x2916  CALL  KERNEL32!GetModuleHandleW [import · IAT [rip+0x140003008]]
-      └── 0x2393  CALL  sub_00002910 [internal] [expanded above]
-RESX: completed in 24ms
+      ├── 0x236A  CALL  sub_000019E0
+      │   ├── 0x1A23  CALL  KERNEL32!InitializeSRWLock
+      │   ├── 0x1A2E  CALL  KERNEL32!InitializeConditionVariable
+      │   ├── 0x1A39  CALL  sub_00001160
+      │   │   ├── 0x1179  CALL  KERNEL32!CreateWaitableTimerExW
+      │   │   └── 0x11B6  CALL  KERNEL32!SetWaitableTimer
+      │   ├── 0x1A47  CALL  sub_000015B0
+      │   │   ├── 0x15D0  CALL  KERNEL32!VirtualAlloc
+      │   │   ├── 0x15F2  CALL  KERNEL32!VirtualAlloc
+      │   │   └── 0x1608  CALL  KERNEL32!VirtualFree
+      │   ├── 0x1A55  CALL  sub_00001630
+      │   │   ├── 0x165C  CALL  KERNEL32!CreateThread
+      │   │   ├── 0x1672  CALL  KERNEL32!AcquireSRWLockExclusive
+      │   │   ├── 0x167F  CALL  KERNEL32!ReleaseSRWLockExclusive
+      │   │   ├── 0x1689  CALL  KERNEL32!WakeConditionVariable
+      │   │   ├── 0x1697  CALL  KERNEL32!WaitForSingleObject
+      │   │   └── 0x16A2  CALL  KERNEL32!CloseHandle
+      │   ├── 0x1A63  CALL  sub_00001770
+      │   │   ├── 0x1795  CALL  KERNEL32!VirtualProtect
+      │   │   └── 0x17C4  CALL  KERNEL32!VirtualProtect
+      │   ├── 0x1A71  CALL  sub_000017F0
+      │   │   ├── 0x1820  CALL  KERNEL32!CreateFileMappingW
+      │   │   ├── 0x185A  CALL  KERNEL32!MapViewOfFile
+      │   │   ├── 0x1884  CALL  KERNEL32!FlushViewOfFile
+      │   │   ├── 0x18A9  CALL  KERNEL32!UnmapViewOfFile
+      │   │   └── 0x18B2  CALL  KERNEL32!CloseHandle
+      │   ├── 0x1A7F  CALL  sub_000013A0
+      │   │   ├── 0x13BF  CALL  bcrypt!BCryptGenRandom
+      │   │   ├── 0x13E7  CALL  bcrypt!BCryptOpenAlgorithmProvider
+      │   │   ├── 0x142D  CALL  bcrypt!BCryptCreateHash
+      │   │   ├── 0x1478  CALL  bcrypt!BCryptFinishHash
+      │   │   ├── 0x1488  CALL  bcrypt!BCryptDestroyHash
+      │   │   └── 0x1494  CALL  bcrypt!BCryptCloseAlgorithmProvider
+      │   ├── 0x1A8D  CALL  sub_00001920
+      │   │   ├── 0x1936  CALL  KERNEL32!WaitForSingleObject
+      │   │   └── 0x1945  CALL  KERNEL32!CancelWaitableTimer
+      │   ├── 0x1AA4  CALL  KERNEL32!GetLastError
+      │   └── 0x1AD3  CALL  sub_000018D0
+      │       ├── 0x18EA  CALL  KERNEL32!VirtualFree
+      │       └── 0x1901  CALL  KERNEL32!CloseHandle
+      ├── 0x2371  CALL  sub_00002910
+      │   └── 0x2916  CALL  KERNEL32!GetModuleHandleW
+      └── 0x2393  CALL  sub_00002910 [expanded above]
+RESX: completed in 10ms
 ```
 
-Now in just 24ms, we've mapped out a significant amount of the programs functionality, and we can infer a lot just from this:
+With one command, we've mapped out a significant amount of the program's functionality:
 
 - **`VirtualAlloc`, `VirtualFree`, `VirtualProtect`**: Dynamic memory allocation and protection manipulation.
 - **`CreateThread`, `WaitForSingleObject`, `SRWLock`**: Multithreaded execution and synchronization.
@@ -192,7 +190,7 @@ RESX identifies the underlying Windows APIs and their resolution mechanisms, tur
 <details>
 <summary><h3 style="display: inline;">Windows Internals, Syscalls &amp; Function Disassembly</h3></summary>
 
-RESX can also help significanly with windows-internals, as it can locate and trace any Windows API.
+RESX can also help with Windows internals. Let's locate VirtualAlloc and follow it into the kernel.
 
 ```powershell
 >  resx /locate VirtualAlloc
@@ -210,21 +208,18 @@ through the `ntdll` syscall stub into the kernel routine that services it, in on
 >  resx /calls KernelBase.dll VirtualAlloc --depth 2
 
 KernelBase.dll!VirtualAlloc  [RVA 0x000B6650, VA 0x1800B6650]
-  Base0/RVA: 0x000B6650  |  VA: 0x1800B6650
-  Signature [static-abi-inference]: unknown VirtualAlloc(int64_t arg1, int64_t arg2, int32_t arg3, int32_t arg4, /*
-further arguments unknown */)
 
 API Call Map for VirtualAlloc  [3 call site(s)]:
   ├── 0xB668D  CALL  ntdll!NtAllocateVirtualMemory [syscall]
   │   kernel: ntoskrnl!NtAllocateVirtualMemory
-  │   ├── 0x882EAE  CALL  MiAllocateVirtualMemoryPrepare [internal]
-  │   ├── 0x882EFA  CALL  MiAllocateVirtualMemory [internal]
-  │   ├── 0x882F49  CALL  ObfDereferenceObjectWithTag [internal]
-  │   └── 0x882FE6  CALL  PsDereferencePartition [internal]
-  ├── 0xB66AD  CALL  ntdll!RtlSetLastWin32Error [import · IAT [rip+0x180298F50]]
-  └── 0xB66BF  CALL  BaseSetLastNTError [internal]
-      ├── 0x22E56  CALL  ntdll!RtlNtStatusToDosError [import · IAT [rip+0x180299020]]
-      └── 0x22E66  CALL  ntdll!RtlSetLastWin32Error [import · IAT [rip+0x180298F50]]
+  │   ├── 0x882EAE  CALL  MiAllocateVirtualMemoryPrepare
+  │   ├── 0x882EFA  CALL  MiAllocateVirtualMemory
+  │   ├── 0x882F49  CALL  ObfDereferenceObjectWithTag
+  │   └── 0x882FE6  CALL  PsDereferencePartition
+  ├── 0xB66AD  CALL  ntdll!RtlSetLastWin32Error
+  └── 0xB66BF  CALL  BaseSetLastNTError
+      ├── 0x22E56  CALL  ntdll!RtlNtStatusToDosError
+      └── 0x22E66  CALL  ntdll!RtlSetLastWin32Error
 ```
 
 And of course, you can dump functions aswell:
