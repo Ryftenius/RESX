@@ -997,6 +997,12 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<Cal
                 state.stack.insert(offset, stored);
             }
             for (offset, value) in outputs {
+                // Pointer-sized API outputs invalidate every overlapping snapshot,
+                // including fields beginning inside the written range.
+                state.stack.retain(|&start, old| {
+                    start.saturating_add(old.width as i64) <= offset
+                        || start >= offset.saturating_add(8)
+                });
                 state.stack.insert(offset, Stored { width: 8, value });
             }
             if return_value != Value::Unknown {

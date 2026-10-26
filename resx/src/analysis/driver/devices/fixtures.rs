@@ -66,6 +66,14 @@ fn call(code: &mut Vec<u8>, slot: u32) {
     code.extend(slot.wrapping_sub(next).to_le_bytes());
 }
 fn fixture(provider: &str, unknown_init: bool, corrupt_sddl: bool) -> super::super::DriverReport {
+    fixture_with_output(provider, unknown_init, corrupt_sddl, false)
+}
+fn fixture_with_output(
+    provider: &str,
+    unknown_init: bool,
+    corrupt_sddl: bool,
+    alias_output: bool,
+) -> super::super::DriverReport {
     let (mut pe, mut raw) = image(&[]);
     pe.data_dirs[1] = (0x2000, 40);
     pe.data_dirs[3] = (0x2380, 12);
@@ -115,8 +123,25 @@ fn fixture(provider: &str, unknown_init: bool, corrupt_sddl: bool) -> super::sup
     code.extend(0x140002210u64.to_le_bytes());
     code.extend([0x48, 0x89, 0x44, 0x24, 0x30]);
     code.extend([
-        0x48, 0xc7, 0x44, 0x24, 0x38, 0, 0, 0, 0, 0x48, 0x8d, 0x44, 0x24, 0x68, 0x48, 0x89, 0x44,
-        0x24, 0x40,
+        0x48,
+        0xc7,
+        0x44,
+        0x24,
+        0x38,
+        0,
+        0,
+        0,
+        0,
+        0x48,
+        0x8d,
+        0x44,
+        0x24,
+        if alias_output { 0x54 } else { 0x68 },
+        0x48,
+        0x89,
+        0x44,
+        0x24,
+        0x40,
     ]);
     call(&mut code, 0x20c8);
     code.extend([0x48, 0xb9]);
@@ -154,4 +179,15 @@ fn unrelated_strings_wrong_provider_and_unknown_initializer_do_not_establish_end
     assert!(report.ioctl.devices.endpoints[0].aliases.is_empty());
     let report = fixture("ntoskrnl.exe", false, true);
     assert!(report.ioctl.devices.endpoints[0].default_sddl.is_none());
+}
+
+#[test]
+fn constructor_output_overlapping_a_local_string_invalidates_its_pointer() {
+    let report = fixture_with_output("ntoskrnl.exe", false, false, true);
+    assert_eq!(
+        report.ioctl.devices.endpoints[0].device_name.as_deref(),
+        Some("\\Device\\Fixture")
+    );
+    assert!(report.ioctl.devices.endpoints[0].aliases.is_empty());
+    assert!(report.ioctl.devices.symbolic_links[0].target.is_none());
 }

@@ -2,38 +2,42 @@
 use super::{semantic, PeFile, State, Stored, Value};
 use crate::analysis::apis::Spec;
 
+const CATEGORY: &str = "device-registration";
+const CREATE_ARGS: &[(&str, usize)] = &[
+    ("driver_object", 8),
+    ("extension_size", 4),
+    ("device_name", 8),
+    ("device_type", 4),
+    ("characteristics", 4),
+    ("exclusive", 1),
+    ("device_object_out", 8),
+];
+const SECURE_ARGS: &[(&str, usize)] = &[
+    ("driver_object", 8),
+    ("extension_size", 4),
+    ("device_name", 8),
+    ("device_type", 4),
+    ("characteristics", 4),
+    ("exclusive", 1),
+    ("default_sddl", 8),
+    ("device_class_guid", 8),
+    ("device_object_out", 8),
+];
+const LINK_ARGS: &[(&str, usize)] = &[("symbolic_link", 8), ("target_name", 8)];
+const INIT_ARGS: &[(&str, usize)] = &[("destination", 8), ("source", 8)];
+
 pub(super) fn spec(dll: &str, name: &str) -> Option<Spec> {
     let kernel = dll.eq_ignore_ascii_case("ntoskrnl.exe");
     let secure = kernel || dll.eq_ignore_ascii_case("wdmsec.sys");
-    let args: &'static [(&'static str, usize)] = match name {
-        "IoCreateDevice" if kernel => &[
-            ("driver_object", 8),
-            ("extension_size", 4),
-            ("device_name", 8),
-            ("device_type", 4),
-            ("characteristics", 4),
-            ("exclusive", 1),
-            ("device_object_out", 8),
-        ],
-        "IoCreateDeviceSecure" | "WdmlibIoCreateDeviceSecure" if secure => &[
-            ("driver_object", 8),
-            ("extension_size", 4),
-            ("device_name", 8),
-            ("device_type", 4),
-            ("characteristics", 4),
-            ("exclusive", 1),
-            ("default_sddl", 8),
-            ("device_class_guid", 8),
-            ("device_object_out", 8),
-        ],
-        "IoCreateSymbolicLink" | "IoCreateUnprotectedSymbolicLink" if kernel => {
-            &[("symbolic_link", 8), ("target_name", 8)]
-        }
-        "RtlInitUnicodeString" if kernel => &[("destination", 8), ("source", 8)],
+    let args = match name {
+        "IoCreateDevice" if kernel => CREATE_ARGS,
+        "IoCreateDeviceSecure" | "WdmlibIoCreateDeviceSecure" if secure => SECURE_ARGS,
+        "IoCreateSymbolicLink" | "IoCreateUnprotectedSymbolicLink" if kernel => LINK_ARGS,
+        "RtlInitUnicodeString" if kernel => INIT_ARGS,
         _ => return None,
     };
     Some(Spec {
-        category: "device-registration",
+        category: CATEGORY,
         args,
         text: &[],
         returns_handle: false,
