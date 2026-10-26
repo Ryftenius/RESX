@@ -106,6 +106,13 @@ empty argument blocks are omitted and routine IAT provenance is hidden. Add
 
 ## Shared options
 
+Recovered call arguments require `--args` (or `/args`) across `dump`, `calls`,
+`intelli`, `xrefs`, `cfg`, `behavior`, `driver`, `ioctl`, `contracts`, `ipc`,
+`network`, and `crypto`, including JSON output where supported. Main findings
+and flow summaries remain visible without it. `--no-headers` disables SDK
+enrichment only; it does not disable the older driver/contract argument reports.
+Explicit prototype/type lookups such as `api` still show the requested information.
+
 Every command accepts the output options, before or after the command:
 
 - `--json`, `--out <file>`; `scan` also takes `--jsonl`

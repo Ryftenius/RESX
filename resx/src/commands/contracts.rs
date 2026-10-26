@@ -113,6 +113,9 @@ pub fn run(cfg: &Config, category: &str, output: &mut dyn Write) -> Result<(), S
                 .filter(|v| v.category == "network")
                 .collect::<Vec<_>>());
     }
+    if !cfg.api_args {
+        crate::core::json::omit_call_arguments(&mut report["calls"]);
+    }
     writeln!(
         output,
         "{}",

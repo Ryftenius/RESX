@@ -38,11 +38,19 @@ pub fn run(
     }
 
     if cfg.json {
-        let value = if ioctls_only {
+        let mut value = if ioctls_only {
             versioned_object("ioctl", &report.ioctl)
         } else {
             versioned_object("driver", &report)
         };
+        if !cfg.api_args {
+            let ioctl = if ioctls_only {
+                &mut value["ioctl"]
+            } else {
+                &mut value["driver"]["ioctl"]
+            };
+            crate::core::json::omit_call_arguments(&mut ioctl["call_sites"]);
+        }
         writeln!(
             output,
             "{}",
@@ -50,14 +58,20 @@ pub fn run(
         )
         .map_err(|e| e.to_string())?;
     } else if ioctls_only {
-        render_ioctl(output, colors, &report.ioctl, cfg.verbose);
+        render_ioctl(output, colors, &report.ioctl, cfg.verbose, cfg.api_args);
     } else {
-        render_driver(output, colors, &report, cfg.verbose);
+        render_driver(output, colors, &report, cfg.verbose, cfg.api_args);
     }
     Ok(())
 }
 
-fn render_driver(w: &mut dyn Write, c: &Colors, report: &DriverReport, verbose: bool) {
+fn render_driver(
+    w: &mut dyn Write,
+    c: &Colors,
+    report: &DriverReport,
+    verbose: bool,
+    show_args: bool,
+) {
     writeln!(w, "{}", c.bold("Driver analysis")).ok();
     crate::core::table::print(
         w,
@@ -174,7 +188,7 @@ fn render_driver(w: &mut dyn Write, c: &Colors, report: &DriverReport, verbose: 
     }
     if !report.ioctl.codes.is_empty() || !report.ioctl.call_sites.is_empty() {
         writeln!(w).ok();
-        render_ioctl(w, c, &report.ioctl, verbose);
+        render_ioctl(w, c, &report.ioctl, verbose, show_args);
     }
 
     let mut api_rows = Vec::new();
@@ -265,7 +279,13 @@ pub fn render_flow_contracts(
     }
 }
 
-fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bool) {
+fn render_ioctl(
+    w: &mut dyn Write,
+    c: &Colors,
+    report: &IoctlReport,
+    verbose: bool,
+    show_args: bool,
+) {
     writeln!(w, "{}", c.bold("IOCTL and NDIS recovery")).ok();
     writeln!(w, "{}  {}", c.dim("Image:"), report.image).ok();
     writeln!(w, "{}  {}", c.dim("Result:"), report.summary).ok();
@@ -447,7 +467,7 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
         .ok();
     }
 
-    if !report.call_sites.is_empty() {
+    if show_args && !report.call_sites.is_empty() {
         writeln!(w, "\n{}", c.bold("Recovered call arguments")).ok();
         render_call_arguments(w, c, &report.call_sites, verbose);
     }
