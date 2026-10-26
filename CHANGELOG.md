@@ -69,6 +69,7 @@ All notable public changes to RESX are recorded here.
 ### Documentation
 
 - Expanded the README into workflow dropdowns with captured API-resolution, callback, comparison, corpus, PowerShell, PE and RESX-to-SKUGGA examples.
+- Refreshed compact call-tree output and documented SDK lookups and opt-in arguments for CLI and DLL callers.
 
 ### Validation additions
 

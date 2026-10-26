@@ -12,7 +12,7 @@ The Rust crate exposes an `rlib` and `cdylib`:
 
 ```toml
 [lib]
-name = "resx"
+name = "resx_ffi"
 crate-type = ["rlib", "cdylib"]
 ```
 
@@ -78,7 +78,7 @@ Typed analysis functions return JSON by default. The success envelope contains:
   "status_code": 0,
   "command": "peinfo",
   "args": ["sample.dll", "--json", "--no-color", "--quiet"],
-  "resx_version": "2.0.0",
+  "resx_version": "2.1.0",
   "payload": {}
 }
 ```
@@ -94,7 +94,7 @@ Error envelopes contain:
   "status": "error",
   "status_code": 5,
   "error": "message",
-  "resx_version": "2.0.0"
+  "resx_version": "2.1.0"
 }
 ```
 
@@ -149,6 +149,15 @@ or:
 ```
 
 It returns a JSON envelope, parsing command JSON into `payload` when possible.
+
+SDK API lookup is also available through `ResxRunCommandJson`:
+
+```json
+{"command":"api","args":["VirtualAlloc"],"options":{"json":true}}
+```
+
+Use `"cli_args": ["--args"]` in an analysis call's options to include recovered arguments.
+SDK lookup uses the header directory configured with `resx config --headers`.
 
 ## Typed Analysis Exports
 

@@ -71,6 +71,20 @@ and conflicting-decode details. `--ssa` separately enables lightweight data-flow
 annotations; it is off by default. Report sections such as `--xrefs`,
 `--strings`, `--cfg text`, `--recomp` and `--calls` add to the same document.
 
+## API arguments
+
+Want to see what gets passed to an API? Add `--args`. Arguments stay hidden by
+default in text and JSON, including `driver`, `ioctl`, and the contract commands.
+
+```powershell
+resx calls sample.exe ENTRY --only winapi --args --no-pdb
+resx api VirtualAlloc
+```
+
+Set your Windows SDK Include directory with `resx config --headers <directory>`.
+`api` looks up the SDK declaration; `--args` recovers call-site values.
+Use `--no-headers` to skip SDK enrichment for one run.
+
 ## Call trees
 
 `resx calls <image> <target>` prints the recursive API call tree for one
