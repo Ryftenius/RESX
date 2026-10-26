@@ -64,7 +64,7 @@ fn run_with_chain(
     let compact_calls = cfg.no_disassembly && cfg.funcs_depth > 0 && !cfg.verbose;
     let mut progress = StageProgress::new(
         count_dump_steps(cfg, only_metadata, want_recomp),
-        !cfg.quiet && !cfg.json && !compact_calls,
+        !cfg.quiet && !cfg.json && !cfg.verbose && !compact_calls,
         c.on,
     );
 
@@ -267,6 +267,9 @@ fn run_with_chain(
         return Ok(());
     }
 
+    // Target resolution can write a permanent address/name line to stdout.
+    // Erase the transient stderr line before that output advances the cursor.
+    progress.finish();
     let (target_rva, mut resolved_name, pdb_loaded) = match resolve_function(
         func_arg,
         &exports,

@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Mutex,
@@ -238,7 +238,7 @@ impl StageProgress {
         Self {
             total: total.max(1),
             done: 0,
-            active,
+            active: active && std::io::stderr().is_terminal() && std::io::stdout().is_terminal(),
             color,
         }
     }
