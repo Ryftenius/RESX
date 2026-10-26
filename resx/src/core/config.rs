@@ -314,7 +314,11 @@ pub struct Cli {
     /// Query one local device endpoint's SDDL and non-elevated access evidence (no IOCTL sent)
     #[arg(long = "device-security", value_name = "PATH")]
     pub device_security: Option<String>,
-    #[arg(long = "device-security-worker", hide = true, requires = "device_security")]
+    #[arg(
+        long = "device-security-worker",
+        hide = true,
+        requires = "device_security"
+    )]
     pub device_security_worker: bool,
 
     #[arg(long = "cfg", value_name = "FMT")]
