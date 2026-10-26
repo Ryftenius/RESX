@@ -6,6 +6,9 @@ use iced_x86::{
     IntelFormatter, Mnemonic, OpAccess, OpKind, Register,
 };
 use serde::Serialize;
+mod lengths;
+use lengths::Buffer;
+pub use lengths::LengthCheck;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const ROOT_LIMIT: usize = 64;
@@ -34,6 +37,8 @@ pub struct Coverage {
     pub decoded_dispatch_instructions: usize,
     pub dispatch_analysis_truncated: bool,
     pub unsupported_indirect_branches: usize,
+    pub length_probe_instructions: usize,
+    pub length_analysis_truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,6 +51,7 @@ struct Index {
 enum Value {
     Irp,
     IoStack,
+    Length(Buffer, usize),
     Local(i64),
     Constant(u64),
     // Original 32-bit request plus a wrapping offset; never a generic integer.
@@ -175,7 +181,7 @@ impl State {
         match (reg.size(), value) {
             (8, _) => Some(value),
             (4, Value::Constant(n)) => Some(Value::Constant(n & u32::MAX as u64)),
-            (4, Value::Code(_) | Value::Index(_)) => Some(value),
+            (4, Value::Code(_) | Value::Index(_) | Value::Length(_, 4)) => Some(value),
             _ => None,
         }
     }
@@ -265,6 +271,12 @@ fn operand(pe: &PeFile, s: &State, i: &Instruction, op: u32) -> Option<Value> {
                 match (s.reg(i.memory_base()), i.memory_displacement64(), width) {
                     (Some(Value::Irp), 0xb8, 8) => return Some(Value::IoStack),
                     (Some(Value::IoStack), 0x18, 4) => return Some(Value::Code(0)),
+                    (Some(Value::IoStack), 0x10, 4) => {
+                        return Some(Value::Length(Buffer::Input, 4))
+                    }
+                    (Some(Value::IoStack), 0x08, 4) => {
+                        return Some(Value::Length(Buffer::Output, 4))
+                    }
                     _ => {}
                 }
             }
@@ -310,7 +322,7 @@ fn emit(
         evidence_status: if table.is_some() { "static-request-code-table; execution-unobserved" } else { "static-request-code-comparison; execution-unobserved" }.into(),
         arguments: Some(format!("{}; IoControlCode derived from IRP.CurrentStackLocation; success and access checks unproven",root.reason)),
         handler_rva: table.map(|(_,handler)|format!("0x{handler:08X}")),
-        device_object_identity: None, ndis_oid: None,
+        device_object_identity: None, ndis_oid: None, length_checks: Vec::new(),
     });
 }
 
@@ -395,6 +407,7 @@ pub(super) fn recover(
     coverage: &mut Coverage,
 ) -> Vec<IoctlCodeCandidate> {
     let mut out = Vec::new();
+    let mut length_checks: BTreeMap<(u32, u32), Vec<LengthCheck>> = BTreeMap::new();
     coverage.architecture_supported = pe.machine == 0x8664;
     coverage.dispatch_roots = roots.len();
     if pe.machine != 0x8664 {
@@ -443,6 +456,20 @@ pub(super) fn recover(
                     }
                     FlowControl::ConditionalBranch => {
                         let condition = s.flags.clone();
+                        if let (Some(code), Some(condition)) = (s.equal, condition.as_ref()) {
+                            if let Some(check) =
+                                lengths::check(pe, raw, &s, &i, condition, coverage)
+                            {
+                                let checks = length_checks.entry((root.rva, code)).or_default();
+                                if !checks.contains(&check) {
+                                    if checks.len() < 32 {
+                                        checks.push(check);
+                                    } else {
+                                        coverage.length_analysis_truncated = true;
+                                    }
+                                }
+                            }
+                        }
                         let choice = s.known_flags.and_then(|f| known_branch(f, i.mnemonic()));
                         if matches!(i.mnemonic(), Mnemonic::Je | Mnemonic::Jne) {
                             if let Some(condition) = &condition {
@@ -481,7 +508,15 @@ pub(super) fn recover(
                     FlowControl::Call | FlowControl::IndirectCall => {
                         let args = [Register::RCX, Register::RDX, Register::R8, Register::R9];
                         let relevant = args.iter().any(|&r| {
-                            matches!(s.reg(r), Some(Value::Irp | Value::IoStack | Value::Code(_)))
+                            matches!(
+                                s.reg(r),
+                                Some(
+                                    Value::Irp
+                                        | Value::IoStack
+                                        | Value::Code(_)
+                                        | Value::Length(_, _)
+                                )
+                            )
                         });
                         if i.flow_control() == FlowControl::Call && relevant {
                             if s.depth < 2 && pending.len() < PENDING_LIMIT {
@@ -712,8 +747,20 @@ pub(super) fn recover(
                     )
                 });
                 if writes {
-                    if let Some(offset) = local_address(&s, &i) {
-                        let size = i.memory_size().size();
+                    // PUSH writes an implicit stack slot, not unknown memory.
+                    let write = if i.mnemonic() == Mnemonic::Push {
+                        match s.reg(Register::RSP) {
+                            Some(Value::Local(sp)) => sp
+                                .checked_add(i.stack_pointer_increment() as i64)
+                                .map(|offset| {
+                                    (offset, i.stack_pointer_increment().unsigned_abs() as usize)
+                                }),
+                            _ => None,
+                        }
+                    } else {
+                        local_address(&s, &i).map(|offset| (offset, i.memory_size().size()))
+                    };
+                    if let Some((offset, size)) = write {
                         s.locals.retain(|&start, (width, _)| {
                             start.saturating_add(*width as i64) <= offset
                                 || start >= offset.saturating_add(size as i64)
@@ -727,7 +774,7 @@ pub(super) fn recover(
                         s.locals.clear();
                         let field = match s.reg(i.memory_base()) {
                             Some(Value::Irp) => Some((0xb8u64, 8)),
-                            Some(Value::IoStack) => Some((0x18u64, 4)),
+                            Some(Value::IoStack) => Some((0x08u64, 0x14)),
                             _ => None,
                         };
                         if let Some((offset, size)) = field {
@@ -757,7 +804,7 @@ pub(super) fn recover(
                     if reg.size() == 4 {
                         v = match v {
                             Value::Constant(n) => Value::Constant(n & u32::MAX as u64),
-                            Value::Code(_) | Value::Index(_) => v,
+                            Value::Code(_) | Value::Index(_) | Value::Length(_, _) => v,
                             _ => {
                                 s.pc = next;
                                 continue;
@@ -770,11 +817,7 @@ pub(super) fn recover(
                 }
                 if matches!(i.mnemonic(), Mnemonic::Push | Mnemonic::Pop) {
                     if let Some(Value::Local(sp)) = old_sp {
-                        let delta = if i.mnemonic() == Mnemonic::Push {
-                            -8
-                        } else {
-                            8
-                        };
+                        let delta = i.stack_pointer_increment() as i64;
                         if let Some(sp) = sp.checked_add(delta) {
                             s.regs.insert(Register::RSP, Value::Local(sp));
                             s.locals.remove(&sp);
@@ -793,6 +836,17 @@ pub(super) fn recover(
         }
         if coverage.decoded_dispatch_instructions >= TOTAL_STEPS {
             break;
+        }
+    }
+    for candidate in &mut out {
+        if let (Ok(root), Ok(code)) = (
+            u32::from_str_radix(candidate.owner_rva.trim_start_matches("0x"), 16),
+            u32::from_str_radix(candidate.code.trim_start_matches("0x"), 16),
+        ) {
+            candidate.length_checks = length_checks
+                .get(&(root, code))
+                .cloned()
+                .unwrap_or_default();
         }
     }
     out

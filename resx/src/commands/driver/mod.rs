@@ -1,5 +1,6 @@
 use crate::analysis::driver::{
-    DriverReport, IoctlCallEvidence, IoctlReport, IoctlValue, MajorFunctionAssignment,
+    DriverReport, IoctlCallEvidence, IoctlCodeCandidate, IoctlReport, IoctlValue,
+    MajorFunctionAssignment,
 };
 use crate::core::color::Colors;
 use crate::core::config::Config;
@@ -292,13 +293,14 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
             });
             vec![
                 code.code.clone(),
+                format!("{} ({})", code.device_type, code.device_type_name),
                 code.function.clone(),
                 short_access(&code.access).into(),
                 short_method(&code.method).into(),
                 call.map(|call| argument(call, "input_length"))
-                    .unwrap_or_else(|| "?".into()),
+                    .unwrap_or_else(|| length_guard(code, "input")),
                 call.map(|call| argument(call, "output_length"))
-                    .unwrap_or_else(|| "?".into()),
+                    .unwrap_or_else(|| length_guard(code, "output")),
                 code.site_rva.clone(),
                 if code.evidence_status.starts_with("static-api") {
                     "API argument"
@@ -312,17 +314,69 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
         })
         .collect();
     if !rows.is_empty() {
-        writeln!(w, "\n{}", c.bold("Decoded IOCTL codes")).ok();
+        writeln!(w, "\n{}", c.bold("IOCTL fields and observed length guards")).ok();
         crate::core::table::print(
             w,
             &[
-                "Code", "Function", "Access", "Method", "Input", "Output", "Site RVA", "Evidence",
+                "Code",
+                "Device",
+                "Function",
+                "Access",
+                "Method",
+                "Input bytes",
+                "Output bytes",
+                "Site RVA",
+                "Evidence",
             ],
             &rows,
             c,
         );
     }
 
+    if report
+        .codes
+        .iter()
+        .any(|code| !code.length_checks.is_empty())
+    {
+        writeln!(w, "Length guards are conditional checks on recovered paths, not complete buffer layouts or proof of successful requests; ? means unknown.").ok();
+        let checks: Vec<_> = report
+            .codes
+            .iter()
+            .flat_map(|code| {
+                code.length_checks.iter().map(move |check| {
+                    vec![
+                        code.code.clone(),
+                        check.buffer.clone(),
+                        format!("{} {}", check.relation, check.bytes),
+                        check.site_rva.clone(),
+                        check.failure_status.clone(),
+                        check.failure_site_rva.clone(),
+                    ]
+                })
+            })
+            .collect();
+        if verbose {
+            crate::core::table::print(
+                w,
+                &[
+                    "Code",
+                    "Buffer",
+                    "Guard (bytes)",
+                    "Check RVA",
+                    "Failure status",
+                    "Failure RVA",
+                ],
+                &checks,
+                c,
+            );
+        }
+    }
+    writeln!(
+        w,
+        "Length analysis: {} probe instructions; truncated={}",
+        coverage.length_probe_instructions, coverage.length_analysis_truncated
+    )
+    .ok();
     let ndis_rows: Vec<_> = report
         .call_sites
         .iter()
@@ -544,5 +598,19 @@ fn frame_offset(offset: i64) -> String {
         format!("frame[-0x{:X}]", offset.unsigned_abs())
     } else {
         format!("frame[+0x{offset:X}]")
+    }
+}
+
+fn length_guard(code: &IoctlCodeCandidate, buffer: &str) -> String {
+    let guards: std::collections::BTreeSet<_> = code
+        .length_checks
+        .iter()
+        .filter(|check| check.buffer == buffer)
+        .map(|check| format!("{} {}", check.relation, check.bytes))
+        .collect();
+    if guards.is_empty() {
+        "?".into()
+    } else {
+        guards.into_iter().collect::<Vec<_>>().join("; ")
     }
 }

@@ -67,6 +67,62 @@ fn append_compare(code: &mut Vec<u8>, n: u32) {
 }
 
 #[test]
+fn length_guards_require_selected_request_field_and_size_error_edge() {
+    // rax=stack; ecx=code; select 0x220004, then input length >= 16.
+    let mut code = LOAD.to_vec();
+    code.extend([0x81, 0xf9, 4, 0, 0x22, 0, 0x74, 1, 0xc3]);
+    let field = code.len() + 2;
+    code.extend([0x83, 0x78, 0x10, 0x10, 0x72, 1, 0xc3]);
+    let status = code.len() + 1;
+    code.extend([0xb8, 6, 2, 0, 0xc0, 0xc3]);
+    let found = analyze(&code);
+    assert_eq!(found.len(), 1);
+    let checks = &found[0].length_checks;
+    assert_eq!(checks.len(), 1);
+    assert_eq!(
+        (&*checks[0].buffer, &*checks[0].relation, checks[0].bytes),
+        ("input", ">=", 16)
+    );
+    assert_eq!(checks[0].failure_status, "0xC0000206");
+    code[field] = 8;
+    assert_eq!(analyze(&code)[0].length_checks[0].buffer, "output");
+    code[field] = 0x14; // adjacent unknown member, not a length
+    assert!(analyze(&code)[0].length_checks.is_empty());
+    code[field] = 0x10;
+    code[status..status + 4].fill(0); // success branch cannot prove a size guard
+    assert!(analyze(&code)[0].length_checks.is_empty());
+    code[status..status + 4].copy_from_slice(&0xc0000206u32.to_le_bytes());
+    // A further unknown predicate on the error path breaks the direct evidence.
+    code.splice(status - 1..status - 1, [0x85, 0xdb, 0x74, 0]);
+    assert!(analyze(&code)[0].length_checks.is_empty());
+}
+
+#[test]
+fn equality_length_check_and_spilled_length_keep_provenance() {
+    let mut code = LOAD.to_vec();
+    code.extend([0x81, 0xf9, 4, 0, 0x22, 0, 0x74, 1, 0xc3]);
+    code.extend([0x8b, 0x48, 0x10, 0x89, 0x4c, 0x24, 0x20, 0x55]);
+    code.extend([0x83, 0x7c, 0x24, 0x28, 16, 0x75, 1, 0xc3]);
+    code.extend([0xb8, 4, 0, 0, 0xc0, 0xc3]);
+    let found = analyze(&code);
+    assert_eq!(found[0].length_checks.len(), 1);
+    assert_eq!(found[0].length_checks[0].relation, "==");
+    assert_eq!(found[0].length_checks[0].bytes, 16);
+}
+
+#[test]
+fn push_preserves_disjoint_spilled_request_and_invalidates_overlapping_slot() {
+    for (slot, expected) in [(0x20, 1), (0xf8, 0)] {
+        let mut code = LOAD.to_vec();
+        code.extend([0x89, 0x4c, 0x24, slot]); // spill ECX at entry RSP+slot
+        code.push(0x55); // push RBP writes entry RSP-8
+        code.extend([0x8b, 0x4c, 0x24, slot.wrapping_add(8)]);
+        append_compare(&mut code, 0x220004);
+        assert_eq!(analyze(&code).len(), expected);
+    }
+}
+
+#[test]
 fn function_zero_and_cumulative_subtraction() {
     let mut code = LOAD.to_vec();
     code.extend([

@@ -11,7 +11,7 @@ pub use calls::{
 };
 pub use capabilities::{DriverCapability, DriverCapabilityReference};
 pub use hypervisor::{HypervisorImport, HypervisorIndicator, HypervisorReport, HypervisorSite};
-pub use ioctl::Coverage as IoctlCoverage;
+pub use ioctl::{Coverage as IoctlCoverage, LengthCheck as IoctlLengthCheck};
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter};
 use serde::Serialize;
@@ -94,6 +94,7 @@ pub struct IoctlCodeCandidate {
     pub instruction: String,
     pub evidence_status: String,
     pub handler_rva: Option<String>,
+    pub length_checks: Vec<IoctlLengthCheck>,
     pub arguments: Option<String>,
     pub device_object_identity: Option<String>,
     pub ndis_oid: Option<String>,
@@ -249,6 +250,7 @@ fn analyze_ioctls_with_context(
             instruction: format!("call {}!{}", call.dll, call.api),
             evidence_status: "static-api-argument; execution-unobserved".into(),
             handler_rva: None,
+            length_checks: Vec::new(),
             arguments: Some("See call_sites for typed argument values and provenance".into()),
             device_object_identity: None,
             ndis_oid: call.ndis_oid.map(|oid| format!("0x{oid:08X}")),
