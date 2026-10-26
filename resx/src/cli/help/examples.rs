@@ -188,6 +188,18 @@ Examples:
 Both command styles always work. Preferences are stored in
 HKCU\Software\Ryftenius\RESX."
         }
+        "api" => {
+            r#"API | Windows SDK declarations
+Usage: resx api <name> [--json]
+
+Configure once: resx config --headers "C:\Program Files (x86)\Windows Kits\10\Include"
+Then: resx api VirtualAlloc
+
+Add --args to dump, calls or behavior to show parameter names, types, constants
+and statically recovered arguments. They are hidden by default. Unknown values
+remain '?'. --no-headers overrides --args for a run; config --headers off disables the SDK.
+The declaration scanner does not evaluate C preprocessor conditions."#
+        }
         "update" => {
             r"UPDATE | Update a source checkout
 Usage: resx update
@@ -297,7 +309,7 @@ malicious intent."#
         }
         "calls" | "funcs" => {
             r"CALLS | Recursive API call tree for one function
-Usage: resx calls <image> <target> [--depth N] [--only TERMS] [--exclude TERMS]
+Usage: resx calls <image> <target> [--depth N] [--only TERMS] [--exclude TERMS] [--args]
 
 Examples:
   resx calls .\agent.exe main

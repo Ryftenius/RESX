@@ -146,6 +146,23 @@ pub(super) fn discover(pe: &PeFile, raw: &[u8]) -> Vec<Function> {
     known.into_values().collect()
 }
 
+/// The body of the function at `rva` on its own, without whole-image discovery:
+/// its `.pdata` range when it has one, else a bounded linear sweep.
+pub(super) fn function_at(pe: &PeFile, raw: &[u8], rva: u32) -> Function {
+    if let Some(runtime) = crate::formats::pe::read_runtime_function(pe, raw, rva) {
+        if runtime.begin_rva == rva {
+            return Function {
+                rva,
+                ranges: vec![(runtime.begin_rva, runtime.end_rva)],
+            };
+        }
+    }
+    Function {
+        rva,
+        ranges: vec![(rva, sweep_end(pe, raw, rva, &BTreeMap::new()))],
+    }
+}
+
 fn is_code(pe: &PeFile, rva: u32) -> bool {
     rva != 0
         && pe

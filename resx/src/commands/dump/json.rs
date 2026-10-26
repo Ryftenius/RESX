@@ -140,6 +140,8 @@ pub(crate) struct PeAnomalyJson {
 
 #[derive(Serialize)]
 pub(crate) struct ApiCallJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) signature: Option<crate::analysis::headers::CallSignature>,
     pub(crate) rva: String,
     pub(crate) kind: String,
     #[serde(skip_serializing_if = "String::is_empty")]

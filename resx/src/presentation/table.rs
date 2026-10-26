@@ -9,6 +9,10 @@ const FIXED_COLUMN_WIDTH: usize = 16;
 const SOFT_COLUMN_WIDTH: usize = 48;
 static OUTPUT_WIDTH: AtomicUsize = AtomicUsize::new(FALLBACK_OUTPUT_WIDTH);
 
+pub fn output_width() -> usize {
+    OUTPUT_WIDTH.load(Ordering::Relaxed)
+}
+
 pub fn configure(use_terminal_width: bool) {
     let width = if use_terminal_width {
         terminal_width().unwrap_or(FALLBACK_OUTPUT_WIDTH)

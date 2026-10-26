@@ -47,6 +47,7 @@ impl ApiCallTree {
 }
 
 struct CallNode {
+    signature: Option<crate::analysis::headers::CallSignature>,
     call: ApiCall,
     location: String,
     kernel: Option<KernelCallTarget>,
@@ -363,8 +364,20 @@ impl TreeBuilder<'_> {
             calls.len().min(self.cfg.max_subcalls)
         };
         let mut nodes = Vec::new();
+        let signatures = crate::analysis::headers::configured(self.cfg.argument_headers())
+            .map(|index| {
+                crate::analysis::headers::enrich_calls(
+                    &index,
+                    image.pe,
+                    image.raw,
+                    insns,
+                    &calls[..budget],
+                )
+            })
+            .unwrap_or_default();
         for call in calls.iter().take(budget) {
-            if let Some(node) = self.build_node(call, insns, image, depth) {
+            if let Some(mut node) = self.build_node(call, insns, image, depth) {
+                node.signature = signatures.get(&call.rva).cloned();
                 nodes.push(node);
             }
         }
@@ -434,6 +447,7 @@ impl TreeBuilder<'_> {
         }
 
         Some(CallNode {
+            signature: None,
             call: call.clone(),
             location: call_location(call, image, self.cfg),
             kernel: syscall_target.map(|target| KernelCallTarget {
@@ -548,6 +562,91 @@ fn text_call_tag(call: &ApiCall) -> &'static str {
 
 const EXPANDED_ABOVE_TAG: &str = " [expanded above]";
 
+/// Separate parameters from call edges. Commas inside strings or expressions
+/// remain part of the value. Long values wrap inside their parameter branch.
+fn argument_tree(call: &str, width: usize, more: bool) -> Vec<String> {
+    let Some((_, body)) = call.split_once('(') else {
+        return Vec::new();
+    };
+    let body = body.strip_suffix(')').unwrap_or(body);
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let mut parts = Vec::new();
+    let (mut start, mut depth, mut quoted, mut escaped) = (0, 0usize, false, false);
+    for (at, ch) in body.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => quoted = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(body[start..at].trim());
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(body[start..].trim());
+    let content_width = width.saturating_sub(8).max(1);
+    let column = parts
+        .iter()
+        .filter_map(|part| part.split_once('='))
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(32)
+        .min(content_width / 2);
+    let mut lines = vec![format!("{} args", if more { "├──" } else { "└──" })];
+    let stem = if more { "│   " } else { "    " };
+    for (index, part) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        let text = match part.split_once('=') {
+            Some((name, value)) => format!("{name:column$} = {value}"),
+            None => (*part).to_owned(),
+        };
+        let chars: Vec<_> = text.chars().collect();
+        let first_end = chars.len().min(content_width);
+        lines.push(format!(
+            "{stem}{} {}",
+            if last { "└──" } else { "├──" },
+            chars[..first_end].iter().collect::<String>()
+        ));
+        let indent = (column + 3).min(content_width.saturating_sub(1));
+        for chunk in chars[first_end..].chunks((content_width - indent).max(1)) {
+            lines.push(format!(
+                "{stem}{}{}{}",
+                if last { "    " } else { "│   " },
+                " ".repeat(indent),
+                chunk.iter().collect::<String>()
+            ));
+        }
+    }
+    lines
+}
+
+fn compact_call_tag(call: &ApiCall, c: &Colors, cfg: &Config) -> String {
+    if cfg.verbose || call.dynamic.is_some() {
+        return colored_call_tag(call, c);
+    }
+    if call.kind == "jmp" {
+        return c.dim(" [tail call]");
+    }
+    if call.is_indirect && !call.is_import {
+        return c.dim(" [indirect]");
+    }
+    String::new()
+}
+
 fn print_call_nodes(
     w: &mut dyn Write,
     nodes: &[CallNode],
@@ -582,12 +681,31 @@ fn print_call_nodes(
             c.dim(&node.location),
             color_kind(&call.kind, c),
             colored_target,
-            colored_call_tag(call, c),
+            compact_call_tag(call, c, cfg),
             repeat,
         )
         .ok();
 
         let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
+        let argument_rows = node
+            .signature
+            .as_ref()
+            .map(|signature| {
+                argument_tree(
+                    &signature.call,
+                    crate::core::table::output_width()
+                        .min(120)
+                        .saturating_sub(detail_prefix.chars().count()),
+                    !call.switch_cases.is_empty()
+                        || call.resolves.is_some()
+                        || node.kernel.is_some()
+                        || !node.children.is_empty(),
+                )
+            })
+            .unwrap_or_default();
+        for line in &argument_rows {
+            writeln!(w, "{detail_prefix}{line}").ok();
+        }
         if !call.switch_cases.is_empty() {
             writeln!(
                 w,
@@ -648,6 +766,9 @@ fn print_call_nodes(
                 &detail_prefix,
             );
         }
+        if !argument_rows.is_empty() && node.children.is_empty() {
+            writeln!(w, "{}", detail_prefix.trim_end()).ok();
+        }
     }
     if omitted > 0 {
         writeln!(
@@ -693,6 +814,23 @@ fn write_call_nodes_text(
         );
 
         let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
+        let argument_rows = node
+            .signature
+            .as_ref()
+            .map(|signature| {
+                argument_tree(
+                    &signature.call,
+                    120usize.saturating_sub(detail_prefix.chars().count()),
+                    !call.switch_cases.is_empty()
+                        || call.resolves.is_some()
+                        || node.kernel.is_some()
+                        || !node.children.is_empty(),
+                )
+            })
+            .unwrap_or_default();
+        for line in &argument_rows {
+            let _ = writeln!(out, "{detail_prefix}{line}");
+        }
         if !call.switch_cases.is_empty() {
             let _ = writeln!(
                 out,
@@ -718,6 +856,9 @@ fn write_call_nodes_text(
         if !node.children.is_empty() {
             write_call_nodes_text(out, &node.children, node.unbuilt, cfg, &detail_prefix);
         }
+        if !argument_rows.is_empty() && node.children.is_empty() {
+            let _ = writeln!(out, "{}", detail_prefix.trim_end());
+        }
     }
     if omitted > 0 {
         let _ = writeln!(
@@ -742,6 +883,35 @@ pub(super) use syscall::*;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn argument_subtree_preserves_quoted_commas_and_wraps_values() {
+        let lines = super::argument_tree(
+            r#"f(path=L"C:\a,b.txt", flags=CTL_CODE(A, B), size=0)"#,
+            80,
+            false,
+        );
+        assert_eq!(
+            lines,
+            [
+                "└── args",
+                r#"    ├── path  = L"C:\a,b.txt""#,
+                "    ├── flags = CTL_CODE(A, B)",
+                "    └── size  = 0"
+            ]
+        );
+        let wrapped = super::argument_tree("f(value=日本語日本語日本語)", 18, true);
+        assert!(wrapped.iter().all(|line| line.chars().count() <= 18));
+        assert_eq!(
+            wrapped
+                .iter()
+                .map(|line| line.matches('日').count())
+                .sum::<usize>(),
+            3
+        );
+        assert_eq!(wrapped[0], "├── args");
+        assert!(super::argument_tree("GetLastError()", 80, false).is_empty());
+    }
+
     use super::{
         is_probable_win32k_syscall_name, normalize_image_base, syscall_kernel_images,
         syscall_stub_provider, NT_KERNEL_IMAGES, WIN32K_KERNEL_IMAGES,

@@ -179,6 +179,8 @@ pub enum Command {
     Intelli(DumpArgs),
     /// Static behavior indicators
     Behavior(BehaviorArgs),
+    /// Official prototype of a Windows API from the configured SDK headers
+    Api(ApiArgs),
 
     // Evidence
     /// API arguments and producer relationships
@@ -253,6 +255,7 @@ impl Command {
             Self::Callers(_) => "callers",
             Self::Intelli(_) => "intelli",
             Self::Behavior(_) => "behavior",
+            Self::Api(_) => "api",
             Self::Contracts(_) => "contracts",
             Self::Ipc(_) => "ipc",
             Self::Network(_) => "network",
@@ -333,6 +336,14 @@ pub struct SymbolArgs {
     /// Disable symbol loading
     #[arg(long = "no-pdb", alias = "fast")]
     pub no_pdb: bool,
+
+    /// Skip Windows SDK API signatures for this run
+    #[arg(long = "no-headers")]
+    pub no_headers: bool,
+
+    /// Show recovered API call arguments (uses configured SDK headers when available)
+    #[arg(long = "args")]
+    pub api_args: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1319,6 +1330,16 @@ pub struct ConfigArgs {
     /// Name of the real-entry function macro
     #[arg(long = "rentry-macro", value_name = "NAME")]
     pub rentry_macro: Option<String>,
+
+    /// Windows SDK include directory for API signatures, or `off`
+    #[arg(long = "headers", value_name = "DIR|off")]
+    pub headers: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ApiArgs {
+    /// API name, e.g. VirtualAlloc, CreateFile or kernel32!OpenProcess
+    pub name: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1388,6 +1409,59 @@ mod tests {
     fn lightweight_ssa_is_explicitly_opt_in() {
         assert!(!parse(&["dump", "a.dll", "f"]).unwrap().1.ssa);
         assert!(parse(&["dump", "a.dll", "f", "--ssa"]).unwrap().1.ssa);
+    }
+
+    #[test]
+    fn sdk_enrichment_options_lower_without_an_image() {
+        for args in [
+            vec!["calls", "a.dll", "f"],
+            vec!["dump", "a.dll", "f"],
+            vec!["behavior", "a.dll"],
+            vec!["intelli", "a.dll", "f"],
+            vec!["xrefs", "a.dll", "f"],
+            vec!["cfg", "a.dll", "f"],
+            vec!["driver", "a.dll"],
+            vec!["ioctl", "a.dll"],
+            vec!["contracts", "a.dll"],
+            vec!["ipc", "a.dll"],
+            vec!["network", "a.dll"],
+            vec!["crypto", "a.dll"],
+        ] {
+            let options = parse(&args).unwrap().1;
+            assert!(!options.api_args);
+            let mut cfg = crate::core::config::Config::from_options(&options, false);
+            cfg.headers = Some("saved-sdk".to_owned());
+            assert!(cfg.argument_headers().is_none());
+            let mut enabled = args;
+            enabled.push("--args");
+            assert!(parse(&enabled).unwrap().1.api_args);
+            cfg.api_args = true;
+            assert_eq!(cfg.argument_headers(), Some("saved-sdk"));
+        }
+        let (command, options) = parse(&["api", "kernel32!VirtualAlloc", "--json"]).unwrap();
+        assert!(matches!(command, Command::Api(_)));
+        assert_eq!(options.function.as_deref(), Some("kernel32!VirtualAlloc"));
+        assert!(options.dll.is_none());
+        assert_eq!(
+            parse(&["config", "--headers", "off"])
+                .unwrap()
+                .1
+                .headers
+                .as_deref(),
+            Some("off")
+        );
+        assert!(
+            parse(&["calls", "a.dll", "f", "--no-headers"])
+                .unwrap()
+                .1
+                .no_headers
+        );
+        assert!(
+            parse(&["behavior", "a.dll", "--no-headers"])
+                .unwrap()
+                .1
+                .no_headers
+        );
     }
 
     #[test]

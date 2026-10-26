@@ -953,6 +953,7 @@ fn is_known_command(command: &str) -> bool {
             | "index"
             | "hunt"
             | "types"
+            | "api"
             | "yara"
             | "update"
             | "config"
@@ -981,6 +982,7 @@ fn command_supports_json(command: &str) -> bool {
             | "index"
             | "hunt"
             | "types"
+            | "api"
             | "yara"
     )
 }

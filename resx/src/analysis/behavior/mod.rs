@@ -19,6 +19,8 @@ pub struct BehaviorFinding {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BehaviorReport {
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub api_signatures: std::collections::BTreeMap<u32, crate::analysis::headers::CallSignature>,
     pub image: String,
     pub finding_count: usize,
     pub findings: Vec<BehaviorFinding>,
@@ -44,7 +46,18 @@ pub fn analyze_image(
     raw: &[u8],
     imports: &[ImportDll],
 ) -> BehaviorReport {
+    analyze_image_with_headers(image, pe, raw, imports, None)
+}
+
+pub fn analyze_image_with_headers(
+    image: &str,
+    pe: &PeFile,
+    raw: &[u8],
+    imports: &[ImportDll],
+    headers: Option<&crate::analysis::headers::HeaderIndex>,
+) -> BehaviorReport {
     let mut findings = Vec::new();
+    let mut api_signatures = std::collections::BTreeMap::new();
     findings.extend(scan_tls(pe, raw));
     findings.extend(scan_sections(pe));
     findings.extend(scan_imports(imports));
@@ -58,6 +71,43 @@ pub fn analyze_image(
         findings.extend(scan_syscall_stubs(&insns));
         findings.extend(scan_medium_clusters(&insns));
         resolution = crate::analysis::resolution::analyze(pe, raw);
+        if let Some(headers) = headers {
+            let mut arguments = std::collections::HashMap::new();
+            let mut visited = std::collections::HashSet::new();
+            for insn in &insns {
+                let name = resolution
+                    .call_target(insn.rva)
+                    .and_then(|api| api.api.as_deref())
+                    .or_else(|| insn.import_call.as_ref().map(|(_, name)| name.as_str()));
+                let Some(prototype) = name.and_then(|name| headers.prototype(name)) else {
+                    continue;
+                };
+                if !arguments.contains_key(&insn.rva) {
+                    if let Some(body) = resolution.function_containing(pe, raw, insn.rva) {
+                        if body.first().is_some_and(|first| visited.insert(first.ip())) {
+                            arguments.extend(crate::analysis::resolution::call_arguments(
+                                pe, raw, &body,
+                            ));
+                        }
+                    }
+                }
+                let mut args = arguments.get(&insn.rva).cloned().unwrap_or_default();
+                headers.classify_callbacks(prototype, &mut args, pe, raw);
+                api_signatures.insert(
+                    insn.rva,
+                    crate::analysis::headers::CallSignature {
+                        declaration: headers.declaration(prototype),
+                        call: headers.render_call(
+                            prototype,
+                            &args,
+                            if pe.machine == 0x014c { 4 } else { 8 },
+                        ),
+                        source: prototype.header.clone(),
+                        arguments: args,
+                    },
+                );
+            }
+        }
         findings.extend(resolution.techniques.iter().map(|technique| {
             finding(
                 "api-resolution",
@@ -82,6 +132,7 @@ pub fn analyze_image(
     });
 
     BehaviorReport {
+        api_signatures,
         image: image.to_owned(),
         finding_count: findings.len(),
         findings,

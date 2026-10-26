@@ -158,6 +158,10 @@ pub struct Options {
     pub command_style: Option<String>,
     pub entry_macro: Option<String>,
     pub rentry_macro: Option<String>,
+    /// `config --headers`: a directory to save, or `off`.
+    pub headers: Option<String>,
+    pub no_headers: bool,
+    pub api_args: bool,
 }
 
 impl Default for Options {
@@ -316,6 +320,9 @@ impl Default for Options {
             command_style: None,
             entry_macro: None,
             rentry_macro: None,
+            headers: None,
+            no_headers: false,
+            api_args: false,
         }
     }
 }
@@ -465,6 +472,9 @@ pub struct Config {
     pub entry_macro: String,
     pub rentry_macro: String,
     pub resx_config: bool,
+    /// The saved Windows SDK include directory, unless skipped for this run.
+    pub headers: Option<String>,
+    pub api_args: bool,
 }
 
 impl Config {
@@ -628,7 +638,15 @@ impl Config {
             entry_macro: preferences.entry_macro,
             rentry_macro: preferences.rentry_macro,
             resx_config: options.resx_config,
+            headers: preferences.headers.filter(|_| !options.no_headers),
+            api_args: options.api_args,
         }
+    }
+
+    /// Header-backed argument recovery is explicitly opt-in, even when a saved
+    /// SDK remains available for the standalone `api` command.
+    pub fn argument_headers(&self) -> Option<&str> {
+        self.headers.as_deref().filter(|_| self.api_args)
     }
 
     pub fn effective_arch(&self, pe_arch: u32) -> u32 {

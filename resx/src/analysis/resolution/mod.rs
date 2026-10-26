@@ -41,9 +41,30 @@ pub struct ResolutionReport {
     targets: HashMap<u32, usize>,
     #[serde(skip)]
     resolvers: HashMap<u32, usize>,
+    /// Discovered function bodies, as RVA ranges, ordered by their first range.
+    #[serde(skip)]
+    functions: Vec<Vec<(u32, u32)>>,
 }
 
 impl ResolutionReport {
+    /// Instructions of the discovered function whose body contains `rva`.
+    pub fn function_containing(
+        &self,
+        pe: &PeFile,
+        raw: &[u8],
+        rva: u32,
+    ) -> Option<Vec<iced_x86::Instruction>> {
+        let ranges = self
+            .functions
+            .iter()
+            .find(|ranges| ranges.iter().any(|&(start, end)| start <= rva && rva < end))?;
+        let function = image::Function {
+            rva: ranges.first()?.0,
+            ranges: ranges.clone(),
+        };
+        Some(image::decode(pe, raw, &function))
+    }
+
     /// The API called by the indirect call or jump at `rva`.
     pub fn call_target(&self, rva: u32) -> Option<&ResolvedApi> {
         self.targets.get(&rva).map(|&i| &self.resolved[i])
@@ -319,7 +340,49 @@ fn context<'a>(
         global_module: HashMap::new(),
         writable,
         ret_pops,
+        capture: false,
     }
+}
+
+/// Argument values at every call in one function's instructions, by call RVA, as
+/// argument slots (see [`crate::analysis::headers::HeaderIndex::render_call`]).
+pub fn call_arguments(
+    pe: &PeFile,
+    raw: &[u8],
+    insns: &[iced_x86::Instruction],
+) -> HashMap<u32, Vec<crate::analysis::headers::ArgValue>> {
+    let layout = match pe.machine {
+        0x8664 => &machine::X64,
+        0x014C => &machine::X86,
+        _ => return HashMap::new(),
+    };
+    let (Some(first), Some(last)) = (insns.first(), insns.last()) else {
+        return HashMap::new();
+    };
+    let rva = |va: u64| va.wrapping_sub(pe.image_base) as u32;
+    let function = image::Function {
+        rva: rva(first.ip()),
+        ranges: vec![(rva(first.ip()), rva(last.next_ip()))],
+    };
+    // Only the callees of this function matter: their import stubs and, on x86,
+    // how many argument bytes they pop.
+    let callees: Vec<image::Function> = insns
+        .iter()
+        .filter(|insn| insn.flow_control() == iced_x86::FlowControl::Call)
+        .filter(|insn| {
+            matches!(
+                insn.op0_kind(),
+                OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+            )
+        })
+        .map(|insn| image::function_at(pe, raw, rva(insn.near_branch_target())))
+        .collect();
+    let mut ctx = context(pe, raw, layout, &callees);
+    ctx.capture = true;
+    machine::run(&ctx, &function, insns)
+        .call_args
+        .into_iter()
+        .collect()
 }
 
 /// The IAT slot a `jmp [slot]` import stub at `rva` jumps through.
@@ -710,6 +773,10 @@ fn report(functions: &[image::Function], facts: &[Facts], ctx: &Context<'_>) -> 
     }
     out.techniques = techniques(functions, facts, &out.resolved);
     out.summary = summary(&out.techniques);
+    out.functions = functions
+        .iter()
+        .map(|function| function.ranges.clone())
+        .collect();
     out
 }
 

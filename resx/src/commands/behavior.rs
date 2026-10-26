@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::analysis::behavior::analyze_image;
+use crate::analysis::behavior::analyze_image_with_headers;
 use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::json::versioned_object;
@@ -21,7 +21,8 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
     let raw = crate::core::input::read_image(&dll_path).map_err(|e| format!("read file: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let imports = read_imports(&pe, &raw);
-    let report = analyze_image(&image, &pe, &raw, &imports);
+    let headers = crate::analysis::headers::configured(cfg.argument_headers());
+    let report = analyze_image_with_headers(&image, &pe, &raw, &imports, headers.as_deref());
 
     if cfg.json {
         writeln!(
@@ -53,6 +54,9 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
             report.api_resolution
         )
         .ok();
+    }
+    for (rva, signature) in &report.api_signatures {
+        writeln!(w, "  0x{rva:08X}  {}", signature.call).ok();
     }
     if report.findings.is_empty() {
         writeln!(w, "{}", c.dim("No static behavior signals found.")).ok();

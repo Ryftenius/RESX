@@ -17,7 +17,12 @@ use iced_x86::{
 use super::hashes::Hints;
 use super::image::Function;
 use super::strings::{self, How, Want};
+use crate::analysis::headers::ArgValue;
 use crate::formats::pe::PeFile;
+
+/// Argument slots captured per call: four registers and eight stack slots on x64,
+/// twelve stack slots on x86.
+const CAPTURED_ARGS: usize = 12;
 
 pub(super) const XOR: u8 = 1;
 pub(super) const ADD: u8 = 2;
@@ -277,6 +282,8 @@ pub(super) struct Facts {
     pub params: u8,
     /// An indirect call through a value that was not resolved.
     pub indirect_unknown: bool,
+    /// Argument slots at each call site, when the context asks for them.
+    pub call_args: Vec<(u32, Vec<ArgValue>)>,
 }
 
 /// Image-wide state the interpreter reads; updated between passes.
@@ -295,6 +302,8 @@ pub(super) struct Context<'a> {
     pub writable: Vec<(u64, u64)>,
     /// Argument bytes each x86 function pops on return (`ret N`).
     pub ret_pops: HashMap<u32, i64>,
+    /// Record argument values at every call (see [`Facts::call_args`]).
+    pub capture: bool,
 }
 
 impl Context<'_> {
@@ -515,13 +524,35 @@ struct Snapshot {
 
 pub(super) fn run(ctx: &Context<'_>, function: &Function, insns: &[Instruction]) -> Facts {
     let mut machine = Machine::new(ctx, function);
+    // Argument annotations must not inherit one predecessor's constants at a
+    // join (including loop backedges). The resolver's pattern heuristics below
+    // remain unchanged; capture uses conservative basic-block-local values.
+    let capture_targets: BTreeSet<u64> = if ctx.capture {
+        insns
+            .iter()
+            .filter(|insn| {
+                matches!(
+                    insn.flow_control(),
+                    FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
+                )
+            })
+            .map(Instruction::near_branch_target)
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
     // A block after a return or jump is reached only by branching to it, so it starts
     // from the state at the first branch there, not from an epilogue that popped the
     // registers it relies on.
     let mut branches: HashMap<u64, Snapshot> = HashMap::new();
     let mut after_terminator = false;
     for (i, insn) in insns.iter().enumerate() {
-        if after_terminator {
+        if ctx.capture && (after_terminator || capture_targets.contains(&insn.ip())) {
+            machine.regs.fill(Val::Unknown);
+            machine.slots.clear();
+            machine.bytes.clear();
+            machine.regions.clear();
+        } else if after_terminator {
             if let Some(snapshot) = branches.remove(&insn.ip()) {
                 machine.regs = snapshot.regs;
                 machine.ids = snapshot.ids;
@@ -1531,6 +1562,75 @@ impl<'c, 'a> Machine<'c, 'a> {
         }
     }
 
+    /// Argument slot `i` as shown to a reader. Unlike [`Self::arg`] this does not
+    /// count as reading a parameter, so capturing cannot change a summary.
+    fn captured(&self, i: usize) -> ArgValue {
+        let layout = self.ctx.layout;
+        let value = match layout.args.get(i) {
+            Some(&reg) => index(reg).map_or(Val::Unknown, |slot| self.regs[slot].clone()),
+            None => {
+                let off = if layout.args.is_empty() {
+                    self.sp + 4 * i as i64
+                } else {
+                    self.sp + 0x20 + 8 * (i as i64 - 4)
+                };
+                self.slots.get(&off).cloned().unwrap_or(Val::Unknown)
+            }
+        };
+        let ctx = self.ctx;
+        match value {
+            Val::Const(va) if ctx.in_image(va) => u32::try_from(va - ctx.pe.image_base)
+                .ok()
+                .and_then(|rva| ctx.pe.rva_bytes(ctx.raw, rva))
+                .and_then(strings::text)
+                .map_or(ArgValue::ImageAddress(va), |(text, wide)| ArgValue::Text {
+                    text,
+                    wide,
+                }),
+            Val::Const(value) => ArgValue::Int(value),
+            Val::Stack(d) => {
+                let bytes: Vec<u8> = (d..d + 512)
+                    .map_while(|off| match self.bytes.get(&off) {
+                        Some(Cell::Plain(byte)) => Some(*byte),
+                        _ => None,
+                    })
+                    .collect();
+                strings::text(&bytes).map_or(ArgValue::Stack(d), |(text, wide)| ArgValue::Text {
+                    text,
+                    wide,
+                })
+            }
+            Val::Api(id) => ArgValue::Api(
+                self.facts
+                    .resolutions
+                    .iter()
+                    .find(|res| id.function == self.function.rva && res.site == id.site)
+                    .and_then(|res| match &res.name {
+                        Name::Text(text, _) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "resolved API".to_owned()),
+            ),
+            Val::Module(module) => ArgValue::Module(match module {
+                Module::Loader(Name::Text(text, _))
+                | Module::Walk {
+                    key: Name::Text(text, _),
+                    ..
+                } => text,
+                Module::SelfImage => "image".to_owned(),
+                _ => "module".to_owned(),
+            }),
+            Val::Import(slot) => ArgValue::Import(
+                ctx.imports
+                    .get(&slot)
+                    .map_or_else(|| "import".to_owned(), |(_, name)| name.clone()),
+            ),
+            Val::Param(p) => ArgValue::Param(p),
+            Val::Global(va) => ArgValue::Global(va),
+            _ => ArgValue::Unknown,
+        }
+    }
+
     fn arg(&mut self, i: usize) -> Val {
         let layout = self.ctx.layout;
         if let Some(&reg) = layout.args.get(i) {
@@ -1547,6 +1647,25 @@ impl<'c, 'a> Machine<'c, 'a> {
     fn call(&mut self, insn: &Instruction, next: Option<&Instruction>, tail: bool) {
         let site = self.rva(insn);
         self.called = true;
+        let stack_escaped = self.ctx.capture
+            && (0..CAPTURED_ARGS).any(|i| {
+                let value = match self.ctx.layout.args.get(i) {
+                    Some(&reg) => index(reg).and_then(|slot| self.regs.get(slot)),
+                    None => {
+                        let offset = if self.ctx.layout.args.is_empty() {
+                            self.sp + 4 * i as i64
+                        } else {
+                            self.sp + 0x20 + 8 * (i as i64 - 4)
+                        };
+                        self.slots.get(&offset)
+                    }
+                };
+                matches!(value, Some(Val::Stack(_)))
+            });
+        if self.ctx.capture {
+            let args = (0..CAPTURED_ARGS).map(|i| self.captured(i)).collect();
+            self.facts.call_args.push((site, args));
+        }
         // Bytes of arguments the callee pops (x86 stdcall), when known.
         let mut pops = None;
         let result = match self.target(insn) {
@@ -1576,6 +1695,13 @@ impl<'c, 'a> Machine<'c, 'a> {
             }
             Target::Skip => return,
         };
+        // Without a callee side-effect model, a passed local may have been
+        // overwritten (e.g. VirtualProtect's old-protection output).
+        if stack_escaped {
+            self.slots.clear();
+            self.bytes.clear();
+            self.regions.clear();
+        }
         for &reg in self.ctx.layout.volatile {
             self.set(reg, Val::Unknown, None);
         }
@@ -1597,6 +1723,13 @@ impl<'c, 'a> Machine<'c, 'a> {
                 None if caller_cleans => 0,
                 None => self.pushed,
             };
+            if self.ctx.capture && pops.is_none() && !caller_cleans {
+                // Unknown x86 cleanup cannot establish where older arguments
+                // now sit. Do not relabel caller parameters as outgoing values.
+                self.slots.clear();
+                self.bytes.clear();
+                self.regions.clear();
+            }
             self.sp += released;
             self.pushed = (self.pushed - released).max(0);
             if caller_cleans {

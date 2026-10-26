@@ -16,6 +16,7 @@ option groups.
 | `iat <image>` | Import table |
 | `syms <image>` | Symbols |
 | `types <image> [query]` | PDB-backed type browsing |
+| `api <name>` | Windows SDK declaration, parameter types and SAL directions; requires configured headers |
 
 ## Code and flow
 
@@ -81,6 +82,27 @@ and optional checksum updates.
 
 `priority`, `config`, `update`, and `symbols` manage local command behavior,
 priority search paths, source-checkout updates, and symbol settings.
+
+`config --headers <directory>` saves a Windows SDK Include directory for optional
+enrichment of `dump`, `calls`, and `behavior`. Add `--args` to opt in for each run;
+the default output omits argument enrichment. `config --headers off` disables it;
+`--no-headers` overrides `--args` for one analysis. `api VirtualAlloc --json` returns the
+header declaration and its source. Recovered arguments are static inferences;
+unknown values remain `?`. Header preprocessing and floating-point argument
+recovery are not supported.
+
+With `--args`, SDK callback parameters pointing into file-backed executable
+sections display as `&fn_0x<RVA>` rather than `&data_<VA>`. JSON preserves the VA,
+RVA, callback typedef and evidence: this is API-contract inference, not a recovered
+function-body prototype or proof of execution. Unresolved and non-executable
+targets are not promoted to callbacks. `BCryptGenRandom` flags use the SDK's RNG
+constant names and retain unknown bits numerically.
+
+`calls --args` puts parameters in a separate `args` subtree, with one aligned parameter
+per row, neutral text, and spacing between argument blocks. Long values wrap;
+empty argument blocks are omitted and routine IAT provenance is hidden. Add
+`--verbose` for import-resolution details and the inferred function signature.
+`--no-headers` keeps the call tree while omitting SDK parameter enrichment.
 
 ## Shared options
 

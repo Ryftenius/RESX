@@ -717,7 +717,8 @@ fn run_with_chain(
         None
     };
 
-    let api_calls = if cfg.funcs_depth > 0 {
+    let header_index = crate::analysis::headers::configured(cfg.argument_headers());
+    let api_calls = if cfg.funcs_depth > 0 || header_index.is_some() {
         let mut calls =
             collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base, cfg.hostile);
 
@@ -742,6 +743,18 @@ fn run_with_chain(
     } else {
         Vec::new()
     };
+    let signatures = header_index
+        .as_ref()
+        .map(|index| crate::analysis::headers::enrich_calls(index, &pe, &raw, &insns, &api_calls))
+        .unwrap_or_default();
+    for insn in &mut insns {
+        if let Some(signature) = signatures.get(&insn.rva) {
+            if !insn.comment.is_empty() {
+                insn.comment.push_str(" | ");
+            }
+            insn.comment.push_str(&signature.call);
+        }
+    }
     let call_tree = if cfg.funcs_depth > 0 {
         Some(build_api_call_tree(
             &api_calls,
@@ -869,6 +882,13 @@ fn run_with_chain(
     if !cfg.json {
         writeln!(w).ok();
         let mut title = format!("{}!{}  [RVA 0x{:08X}", dll_name, resolved_name, target_rva);
+        if let Some(base) = rebase {
+            title.push_str(&format!(", REBASE 0x{:X}", base + target_rva as u64));
+        } else {
+            title.push_str(&format!(", VA 0x{:X}", image_base + target_rva as u64));
+        }
+        title.push(']');
+        writeln!(w, "{}", c.bold(&c.b_yellow(&title))).ok();
         if let Some(base) = rebase {
             title.push_str(&format!(", REBASE 0x{:X}", base + target_rva as u64));
         } else {
@@ -1201,6 +1221,7 @@ fn run_with_chain(
                         }
                     });
                     ApiCallJson {
+                        signature: signatures.get(&ac.rva).cloned(),
                         rva: format!("0x{:08X}", ac.rva),
                         kind: ac.kind.clone(),
                         target_rva: if ac.target_rva != 0 {

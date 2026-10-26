@@ -40,6 +40,7 @@ impl GlobalArgs {
 impl Command {
     fn apply(self, o: &mut Options) {
         match self {
+            Self::Api(args) => o.function = Some(args.name),
             Self::Peinfo(args) => {
                 image(o, args.image);
                 o.file_metadata = args.file_metadata;
@@ -103,7 +104,9 @@ impl Command {
                 o.behavior = true;
             }
             Self::Contracts(args) | Self::Ipc(args) | Self::Network(args) | Self::Crypto(args) => {
-                image(o, args.image)
+                image(o, args.image);
+                args.lookup.apply(o);
+                args.symbols.apply(o);
             }
             Self::Strings(args) => args.apply(o),
             Self::Driver(args) | Self::Ioctl(args) => args.apply(o),
@@ -189,6 +192,7 @@ impl Command {
                 o.command_style = args.command_style;
                 o.entry_macro = args.entry_macro;
                 o.rentry_macro = args.rentry_macro;
+                o.headers = args.headers;
                 o.resx_config = true;
             }
             Self::Update => o.update = true,
@@ -222,6 +226,8 @@ impl SymbolArgs {
         o.sym_server = self.sym_server;
         o.reload = self.reload;
         o.no_pdb = self.no_pdb;
+        o.no_headers = self.no_headers;
+        o.api_args = self.api_args;
     }
 }
 

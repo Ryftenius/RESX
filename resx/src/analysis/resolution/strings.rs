@@ -16,6 +16,8 @@ const MIN_DECODED: usize = 4;
 pub(in crate::analysis) enum Want {
     Api,
     Module,
+    /// Any printable text, for showing string arguments.
+    Text,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,7 +70,17 @@ fn name_char(ch: char, want: Want) -> bool {
         Want::Module => {
             ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '\\' | '/' | ':' | ' ')
         }
+        Want::Text => ch.is_ascii_graphic() || matches!(ch, ' ' | '\t' | '\r' | '\n'),
     }
+}
+
+/// A NUL-terminated printable string at the start of `bytes`, ASCII or UTF-16LE,
+/// with whether it is wide. Short runs are not taken for text.
+pub(super) fn text(bytes: &[u8]) -> Option<(String, bool)> {
+    let wide = bytes.len() >= 4 && bytes[1] == 0 && bytes[0] != 0;
+    terminated(bytes, wide, Want::Text)
+        .filter(|text| text.len() >= 3)
+        .map(|text| (text, wide))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +245,7 @@ fn longest_name(decoded: &[u8], wide: bool, want: Want, dictionary: &Dictionary)
         let known = match want {
             Want::Api => dictionary.is_api(&text),
             Want::Module => dictionary.is_module(&text),
+            Want::Text => false,
         };
         if known {
             return Some(text);

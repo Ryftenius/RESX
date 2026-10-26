@@ -5,6 +5,19 @@ use std::io::Write;
 
 pub fn run(options: &Options, output: &mut dyn Write, colors: &Colors) -> Result<(), String> {
     let mut preferences = Preferences::load();
+    if let Some(dir) = &options.headers {
+        preferences.headers = if dir.eq_ignore_ascii_case("off") {
+            None
+        } else {
+            let root = crate::analysis::headers::resolve_root(std::path::Path::new(dir))
+                .ok_or_else(|| {
+                    format!("{dir} has no um/windows.h; specify a Windows SDK Include directory")
+                })?;
+            // Preferences outlive this working directory.
+            let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+            Some(root.to_string_lossy().into_owned())
+        };
+    }
     if let Some(style) = &options.command_style {
         validate_style(style)?;
         preferences.command_style = style.to_ascii_lowercase();
@@ -25,6 +38,10 @@ pub fn run(options: &Options, output: &mut dyn Write, colors: &Colors) -> Result
         &["Setting", "Value"],
         &[
             vec!["Registry".into(), format!("HKCU\\{REGISTRY_PATH}")],
+            vec![
+                "Windows SDK headers".into(),
+                preferences.headers.unwrap_or_else(|| "off".into()),
+            ],
             vec!["Command style".into(), preferences.command_style],
             vec!["Entry macro".into(), preferences.entry_macro],
             vec!["Real-entry macro".into(), preferences.rentry_macro],

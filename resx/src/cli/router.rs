@@ -15,6 +15,7 @@ pub fn dispatch(
     let image = cfg.dll.as_str();
     let target = cfg.function.as_str();
     match command {
+        Command::Api(args) => commands::api::run(&args.name, cfg, w),
         Command::Peinfo(_) => commands::peinfo::run(image, cfg, w, c),
         Command::Sections(_) => commands::dump::run(image, "", cfg, w, c),
         Command::Pechk(_) => commands::pechk::run(image, cfg, w, c),

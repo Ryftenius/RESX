@@ -10,6 +10,8 @@ pub struct Preferences {
     pub entry_macro: String,
     pub rentry_macro: String,
     pub invoke_profiles: BTreeMap<String, Vec<String>>,
+    /// Windows SDK include directory for API signatures; off when unset.
+    pub headers: Option<String>,
 }
 
 impl Default for Preferences {
@@ -19,6 +21,7 @@ impl Default for Preferences {
             entry_macro: "entry".to_owned(),
             rentry_macro: "rentry".to_owned(),
             invoke_profiles: BTreeMap::new(),
+            headers: None,
         }
     }
 }

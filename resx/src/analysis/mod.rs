@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod driver;
 pub mod edr;
 pub mod follow;
+pub mod headers;
 pub mod reconstruction;
 pub mod resolution;
 pub mod symbols;
