@@ -4,7 +4,17 @@ All notable public changes to RESX are recorded here.
 
 ## Unreleased
 
+## 2.1.0 - 2026-10-27
+
 ### Feature additions
+
+#### Windows SDK API analysis
+
+- Added `resx config --headers <directory>` and `resx api <name>` for local Windows SDK declarations, parameter types, SAL directions, constants and typedefs, with a versioned per-user header index cache.
+- Added opt-in `--args` / `/args` enrichment to dump, call trees and behavior reports, including structured JSON. `--no-headers` disables SDK enrichment for a run; `config --headers off` clears the saved SDK setting.
+- Recovered bounded x86/x64 argument slots, strings, stack pointers and image addresses. Branch joins, escaped stack outputs and unknown x86 cleanup discard uncertain values; floating-point values remain unknown.
+- Classified file-backed executable addresses passed to SDK callback parameters as inferred function targets, retaining the callback typedef, RVA, VA and evidence in JSON.
+- Decoded API-specific constants including waitable-timer access rights and BCrypt RNG flags. Kept pointer-sized integer zero distinct from null pointers.
 
 #### Disassembly and function recovery
 
@@ -40,6 +50,12 @@ All notable public changes to RESX are recorded here.
 
 ### Accuracy and correctness fixes
 
+- Required `--args` for detailed driver, IOCTL, contract, IPC, network and crypto call arguments in text and JSON. Main findings and flow summaries remain available by default.
+- Applied parsed image lookup and symbol options to the contract-family commands.
+- Rendered call arguments in aligned, neutral-color subtrees with wrapping and spacing; reduced redundant headers and routine import details in call-only output.
+- Collapsed repeated behavior findings into a count and three example RVAs; `--verbose` expands occurrences and evidence, and JSON retains all findings.
+- Stopped labeling small untyped immediates and bit tests as NTSTATUS values. Distinctive move/compare matches are labeled possible NTSTATUS, and unrelated 64-bit values cannot match through truncation.
+- Cleared progress before target-resolution output, disabled stage progress for redirected streams, and avoided interleaving it with verbose dump messages.
 - Decoded functions across contiguous chained unwind fragments. MSVC shrink-wrapping opens a new `.pdata` entry where a nonvolatile register is first saved; decoding previously stopped there and dropped the rest of the function's calls.
 - Reported calls through linker import thunks (`jmp [__imp_X]`, emitted for headers without `dllimport` such as `bcrypt.h`) as the import instead of an internal function that walked the whole thunk table.
 - Stopped reporting unconditional jumps back into a function's own body as tail calls.
@@ -49,6 +65,10 @@ All notable public changes to RESX are recorded here.
 ### Removed or retired
 
 - Removed the internal routing switches (`--peinfo`, `--behavior`, `--entropy`, `--reconstruct-cfg`, `--follow-callers`, `--locate`, `--locate-sym`, `--patch`, `--priority`, `--update`, `--resx-find`, `--resx-scan`, `--resx-diff`, `--resx-index`, `--resx-hunt`, `--resx-config`, `--scan-root`). Use the command itself, for example `resx peinfo <image>`. `resx <image> <target>` and `resx <name>` still run `dump` and `locate`.
+
+### Documentation
+
+- Expanded the README into workflow dropdowns with captured API-resolution, callback, comparison, corpus, PowerShell, PE and RESX-to-SKUGGA examples.
 
 ### Validation additions
 
