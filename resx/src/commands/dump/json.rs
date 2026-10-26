@@ -154,6 +154,10 @@ pub(crate) struct ApiCallJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) switch_cases: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dynamic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolves: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) syscall: Option<SyscallJson>,
 }
 

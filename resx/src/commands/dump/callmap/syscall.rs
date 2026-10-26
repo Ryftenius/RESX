@@ -518,6 +518,8 @@ pub(in crate::commands::dump) fn switch_dispatch_to_api_calls(
             is_indirect: false,
             indirect_method: Some("switch dispatch".to_owned()),
             switch_cases: target.classes.clone(),
+            dynamic: None,
+            resolves: None,
         })
         .collect()
 }

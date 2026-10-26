@@ -28,7 +28,7 @@ option groups.
 | `reconstruct-cfg <image>` | Startup and reachable image flow |
 | `callers <image> <target>` | Reverse caller tree |
 | `intelli <image> [target]` | Bounded static intelligence report |
-| `behavior <image>` | Static behavior indicators |
+| `behavior <image>` | Static behavior indicators, including how APIs are resolved at run time |
 
 Targets accept export/symbol names, `rva:0x...`, `va:0x...`,
 `file:0x...`, ordinals, and `image!symbol` syntax where applicable.

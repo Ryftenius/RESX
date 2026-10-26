@@ -25,6 +25,14 @@ All notable public changes to RESX are recorded here.
 - Added call-tree filter terms `winapi`, `iat`, `internal`, `crt`, `syscall`, and DLL names (with optional extension and trailing `*` prefix). Non-matching internal calls stay as the path to matching ones; repeats of an expanded function are tagged `[expanded above]`.
 - Added `--calls [DEPTH]`, `--calls-only`, and `--calls-exclude` to `dump`, `xrefs`, `cfg`, and `intelli`.
 - Filtered JSON `api_calls` to the root calls that survive the call-tree filter.
+- Labeled calls through dynamically resolved APIs with the API they reach, tagged `[dynamic · how]`, and added a `resolves:` line to each resolver call. Covers `GetProcAddress`/`LdrGetProcedureAddress` with literal, stack-built, ordinal or decoded names, wrappers that forward their arguments, pointers stored in global API tables and called elsewhere, hand-walked export and import tables, PEB loader-list walks, and hashed names, for x86 and x64. JSON `api_calls` entries carry `dynamic` and `resolves`.
+- Added the call-tree filter term `dynamic`.
+- Recognized CFG-guarded tail jumps (`jmp [__guard_dispatch_icall_fptr]`) as indirect calls through `rax`.
+
+#### Behavior triage
+
+- Added the `api-resolution` category, grading how an image resolves APIs at run time: `loader-api-resolution` and `unrecovered-api-names` (low), `stack-string-api-names` (medium), and `encoded-api-names`, `export-table-walk`, `import-table-walk`, `peb-module-walk` and `api-hashing` (high). Evidence names each resolved API, how its name was hidden (cipher and key, or hash construction and constant) and where it is called. JSON adds `api_resolution`, a one-line verdict, and `resolved_apis`.
+- Inverted API and module name hashes against the local system's export and module names, using rotate counts, multipliers and seeds found in the resolver's code to choose among common constructions.
 
 #### Native library and editor integration
 

@@ -73,6 +73,8 @@ enum FilterTerm {
     Crt,
     Syscall,
     Internal,
+    /// Calls through dynamically resolved pointers, and the resolver calls themselves.
+    Dynamic,
     /// Normalized import provider base name; a trailing `*` makes it a prefix match.
     Dll(String),
 }
@@ -85,12 +87,14 @@ impl FilterTerm {
             "crt" | "runtime" => Self::Crt,
             "syscall" | "syscalls" | "nt" => Self::Syscall,
             "internal" | "local" => Self::Internal,
+            "dynamic" | "resolved" => Self::Dynamic,
             _ => Self::Dll(normalize_image_base(term)),
         }
     }
 
     fn matches(&self, call: &ApiCall) -> bool {
         match self {
+            Self::Dynamic => call.dynamic.is_some() || call.resolves.is_some(),
             Self::Imports => call.is_import,
             Self::WinApi => call.is_import && !is_crt_dll(&call.dll),
             Self::Crt => {
@@ -203,6 +207,8 @@ mod tests {
             is_indirect: false,
             indirect_method: None,
             switch_cases: Vec::new(),
+            dynamic: None,
+            resolves: None,
         }
     }
 

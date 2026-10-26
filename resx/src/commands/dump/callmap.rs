@@ -2,7 +2,9 @@ use iced_x86::{Mnemonic, OpKind, Register};
 use std::fmt::Write as _;
 use std::io::Write;
 
-use crate::analysis::disasm::{collect_api_calls, disassemble_at, ApiCall, Instruction};
+use crate::analysis::disasm::{
+    apply_dynamic_resolution, collect_api_calls, disassemble_at, ApiCall, Instruction,
+};
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::color::Colors;
 use crate::core::config::Config;
@@ -91,6 +93,7 @@ pub(super) fn build_api_call_tree(
         };
 
     let filter = CallFilter::parse(&cfg.funcs_filter);
+    let dynamic = crate::analysis::resolution::cached(pe, raw);
     let root_image = TraceImageView {
         raw,
         pe,
@@ -98,6 +101,7 @@ pub(super) fn build_api_call_tree(
         exports,
         arch,
         image_base,
+        dynamic: Some(&dynamic),
     };
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_insns = sub_cfg.max_insns.min(300);
@@ -201,6 +205,8 @@ fn synthetic_syscall_call(
         is_indirect: false,
         indirect_method: None,
         switch_cases: Vec::new(),
+        dynamic: None,
+        resolves: None,
     })
 }
 
@@ -266,6 +272,9 @@ struct TraceImageView<'a> {
     exports: &'a [Export],
     arch: u32,
     image_base: u64,
+    /// Dynamic API resolution for the image being dumped; kernel images reached
+    /// through a syscall are not analyzed for it.
+    dynamic: Option<&'a crate::analysis::resolution::ResolutionReport>,
 }
 
 fn call_location(call: &ApiCall, image: &TraceImageView<'_>, cfg: &Config) -> String {
@@ -324,6 +333,7 @@ impl LoadedTraceImage {
             exports: &self.exports,
             arch: self.arch,
             image_base: self.image_base,
+            dynamic: None,
         }
     }
 }
@@ -455,7 +465,7 @@ impl TreeBuilder<'_> {
             &self.sub_cfg,
         )
         .ok()?;
-        let calls = collect_api_calls(
+        let mut calls = collect_api_calls(
             &insns,
             image.pe,
             image.raw,
@@ -463,11 +473,17 @@ impl TreeBuilder<'_> {
             image.image_base,
             self.cfg.hostile,
         );
+        if let Some(report) = image.dynamic {
+            apply_dynamic_resolution(&mut calls, &insns, report);
+        }
         Some((insns, calls))
     }
 }
 
 fn colored_call_tag(call: &ApiCall, c: &Colors) -> String {
+    if let Some(method) = &call.dynamic {
+        return c.dim(&format!(" [dynamic · {method}]"));
+    }
     let nt = is_nt_api(&call.label);
     match (call.is_import, call.is_indirect, call.kind.as_str(), nt) {
         (true, _, "jmp", true) => c.dim(" [syscall] [tail call]"),
@@ -511,6 +527,9 @@ fn colored_call_tag(call: &ApiCall, c: &Colors) -> String {
 }
 
 fn text_call_tag(call: &ApiCall) -> &'static str {
+    if call.dynamic.is_some() {
+        return "[dynamic]";
+    }
     match (
         call.is_import,
         call.is_indirect,
@@ -576,6 +595,16 @@ fn print_call_nodes(
                 detail_prefix,
                 c.dim("when :"),
                 c.cyan(&format_case_values(&call.switch_cases)),
+            )
+            .ok();
+        }
+        if let Some(resolves) = &call.resolves {
+            writeln!(
+                w,
+                "{}{} {}",
+                detail_prefix,
+                c.dim("resolves:"),
+                c.cyan(resolves)
             )
             .ok();
         }
@@ -672,6 +701,9 @@ fn write_call_nodes_text(
                 format_case_values(&call.switch_cases)
             );
         }
+        if let Some(resolves) = &call.resolves {
+            let _ = writeln!(out, "{}resolves: {}", detail_prefix, resolves);
+        }
 
         if let Some(kernel) = &node.kernel {
             let _ = writeln!(
@@ -727,6 +759,8 @@ mod tests {
             is_indirect: false,
             indirect_method: None,
             switch_cases: Vec::new(),
+            dynamic: None,
+            resolves: None,
         }
     }
 

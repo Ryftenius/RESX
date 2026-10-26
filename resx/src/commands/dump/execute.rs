@@ -731,6 +731,11 @@ fn run_with_chain(
             });
         }
         calls.extend(switch_api_calls.iter().cloned());
+        crate::analysis::disasm::apply_dynamic_resolution(
+            &mut calls,
+            &insns,
+            &crate::analysis::resolution::cached(&pe, &raw),
+        );
         calls.sort_by_key(|c| c.rva);
         progress.tick("building API call map");
         calls
@@ -1209,6 +1214,8 @@ fn run_with_chain(
                         is_indirect: ac.is_indirect,
                         indirect_method: ac.indirect_method.clone(),
                         switch_cases: ac.switch_cases.clone(),
+                        dynamic: ac.dynamic.clone(),
+                        resolves: ac.resolves.clone(),
                         syscall,
                     }
                 })

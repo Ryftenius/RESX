@@ -90,12 +90,14 @@ comma-separated terms and can be repeated.
 | `internal` | In-image calls only |
 | `crt` | Runtime imports (`ucrtbase`, `vcruntime*`, `msvcp*`, `api-ms-win-crt-*`) and symbolized runtime helpers |
 | `syscall` | `Nt*`/`Zw*` calls |
+| `dynamic` | Calls through dynamically resolved APIs, and the resolver calls that produce them |
 | `name.dll` | Imports from that DLL; the extension is optional and a trailing `*` matches a prefix |
 
 ```powershell
 resx calls .\agent.exe main --depth 4 --only winapi
 resx calls .\agent.exe main --only bcrypt.dll,ntdll
 resx calls .\agent.exe main --only iat --exclude kernel32
+resx calls .\agent.exe main --only dynamic
 resx calls .\agent.exe rentry --no-pdb --only winapi --json
 ```
 
@@ -103,6 +105,45 @@ A repeat call to a function whose subtree is already shown is tagged
 `[expanded above]`. Without a PDB, statically linked runtime helpers are
 anonymous `sub_` functions, so `crt` and `winapi` recognize the runtime by its
 imports alone.
+
+### Dynamically resolved APIs
+
+Calls through API pointers the image finds at run time are labeled with the API
+instead of `[via rax]`, wherever the pointer is called: in the resolving
+function, through a global API table filled elsewhere, or as a CFG-guarded tail
+jump. The resolver call itself gets a `resolves:` line.
+
+```text
+├── 0x101F  CALL  sub_00001230 [internal]
+│   resolves: kernel32!VirtualAlloc (export-table walk sub_00001230 · ror13-add hash 0x91AFCA54 · loader-list walk, djb2 hash 0x7040EE75)
+├── 0x1054  CALL  kernel32!VirtualAlloc [dynamic · export-table walk sub_00001230 · ror13-add hash 0x91AFCA54 · ...]
+```
+
+Resolution is recovered statically, for x86 and x64, from:
+
+- `GetProcAddress` and `LdrGetProcedureAddress` after `GetModuleHandle*`,
+  `LoadLibrary*` or `LdrLoadDll`, including wrapper functions that forward
+  their arguments, and lookups by ordinal.
+- Names that are literals, built on the stack, or decoded at run time. Decoding
+  covers single-byte and rolling XOR and additive ciphers over bytes or UTF-16,
+  including compiler-vectorized decoders, and a decoded name counts only when it
+  is a real export or module name on the analyzing system.
+- Modules found by walking the PEB loader lists, functions found by parsing
+  export tables or by reading import descriptors and IAT slots, whether in a
+  helper function or inlined.
+- Hashed names. The hash constants are inverted against the local system's
+  export and module names with a catalog of common constructions (ror/rol with
+  add or xor, djb2, sdbm, FNV-1/1a, CRC-32, Jenkins), widened with the rotate
+  counts, multipliers and seeds found in the resolver's own code.
+
+`resx behavior` grades the techniques an image uses, from least to most
+suspicious: `loader-api-resolution` and `unrecovered-api-names` (low),
+`stack-string-api-names` (medium), `encoded-api-names`, `export-table-walk`,
+`import-table-walk`, `peb-module-walk` and `api-hashing` (high; a hand-walked
+table without a loader-list walk or hashing is medium). Its JSON adds
+`api_resolution`, a one-line verdict, and `resolved_apis`, every resolver call
+with the module and API it produces, how each name was hidden, and the call
+sites through the result.
 
 `dump`, `xrefs`, `cfg` and `intelli` embed the same tree next to their other
 sections: `--calls [DEPTH]` (default 1), `--calls-only` and `--calls-exclude`.

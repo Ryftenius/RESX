@@ -45,6 +45,15 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         ))
     )
     .ok();
+    if !report.api_resolution.is_empty() {
+        writeln!(
+            w,
+            "{} {}",
+            c.bold("Dynamic API resolution:"),
+            report.api_resolution
+        )
+        .ok();
+    }
     if report.findings.is_empty() {
         writeln!(w, "{}", c.dim("No static behavior signals found.")).ok();
         return Ok(());
@@ -64,6 +73,33 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         writeln!(w, "  {}", finding.detail).ok();
         for item in finding.evidence.iter().take(4) {
             writeln!(w, "  {}", c.dim(item)).ok();
+        }
+    }
+
+    if !report.resolved_apis.is_empty() {
+        writeln!(w).ok();
+        writeln!(
+            w,
+            "{}",
+            c.bold(&format!(
+                "Dynamically resolved APIs ({}):",
+                report.resolved_apis.len()
+            ))
+        )
+        .ok();
+        for resolved in &report.resolved_apis {
+            let calls = match resolved.call_sites.len() {
+                0 => String::new(),
+                n => format!(", {n} call site{}", if n == 1 { "" } else { "s" }),
+            };
+            writeln!(
+                w,
+                "  0x{:08X}  {}  {}",
+                resolved.site,
+                c.cyan(&resolved.target()),
+                c.dim(&format!("[{}{calls}]", resolved.describe()))
+            )
+            .ok();
         }
     }
 

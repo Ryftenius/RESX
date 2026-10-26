@@ -3,7 +3,7 @@ mod strings;
 mod syscall_stub;
 mod xrefs;
 
-pub use api::{collect_api_calls, ApiCall};
+pub use api::{apply_dynamic_resolution, collect_api_calls, ApiCall};
 use api::{
     collect_data_refs, describe_immediate_literals, describe_segment_access, suspicious_flow_note,
 };

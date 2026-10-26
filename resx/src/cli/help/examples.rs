@@ -305,6 +305,7 @@ Examples:
   resx calls .\agent.exe main --only bcrypt.dll,ntdll
   resx calls .\agent.exe main --only iat --exclude kernel32
   resx calls .\agent.exe main --only internal
+  resx calls .\agent.exe main --only dynamic
   resx calls .\agent.exe rentry --no-pdb --only winapi --json
 
 Terms for --only and --exclude:
@@ -313,13 +314,20 @@ Terms for --only and --exclude:
   internal    In-image calls only
   crt         ucrtbase, vcruntime*, msvcp*, api-ms-win-crt-* and runtime helpers
   syscall     Nt*/Zw* calls
+  dynamic     Calls through dynamically resolved APIs, and the resolver calls
   NAME.dll    Imports from one DLL; the extension is optional, NAME* matches a prefix
 
 A call that does not match stays in the tree only as the path to one that does;
 repeat calls to a function shown earlier are tagged [expanded above]. Without a
 PDB, statically linked runtime helpers are anonymous sub_ functions, so crt and
 winapi recognize the runtime by its imports alone. Inside dump, the same tree is
---calls N with --calls-only and --calls-exclude."
+--calls N with --calls-only and --calls-exclude.
+
+APIs the image resolves at run time are labeled where they are called:
+GetProcAddress with literal, stack-built or decoded names, hand-walked export
+and import tables, and hashed lookups through the PEB loader lists. A call
+through such a pointer is tagged [dynamic · how], and a resolver call gets a
+resolves: line naming the API. `resx behavior` grades the techniques."
         }
         "xrefs" | "refs" => {
             r"XREFS | Incoming references to a function or import

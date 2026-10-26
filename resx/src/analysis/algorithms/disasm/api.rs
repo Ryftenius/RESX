@@ -15,6 +15,12 @@ pub struct ApiCall {
     /// Selector values that route to this switch-dispatch target.
     /// Empty for non-switch entries.  Printed on a `when:` sub-line.
     pub switch_cases: Vec<u32>,
+    /// Set when the target is an API found by dynamic resolution rather than the
+    /// import table: how it was resolved, e.g. "GetProcAddress · xor 0x5A".
+    pub dynamic: Option<String>,
+    /// On a call to a resolver (GetProcAddress, an export-table walker): the API the
+    /// call resolves, e.g. "kernel32!VirtualAlloc".
+    pub resolves: Option<String>,
 }
 
 /// Short lowercase name for a register, normalized to 64-bit form.
@@ -567,6 +573,8 @@ pub fn collect_api_calls(
                         is_indirect: false,
                         indirect_method: Some(format!("IAT thunk 0x{target_rva:X}")),
                         switch_cases: Vec::new(),
+                        dynamic: None,
+                        resolves: None,
                     });
                     continue;
                 }
@@ -586,6 +594,8 @@ pub fn collect_api_calls(
                 is_indirect: false,
                 indirect_method: None,
                 switch_cases: Vec::new(),
+                dynamic: None,
+                resolves: None,
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
             // Indirect call/jmp — most commonly `call [rip+rel32]` through the IAT.
@@ -617,6 +627,8 @@ pub fn collect_api_calls(
                             src.method, "__guard_dispatch_icall_fptr"
                         )),
                         switch_cases: Vec::new(),
+                        dynamic: None,
+                        resolves: None,
                     });
                     continue;
                 }
@@ -654,6 +666,8 @@ pub fn collect_api_calls(
                         is_indirect: true,
                         indirect_method: Some(iat_method),
                         switch_cases: Vec::new(),
+                        dynamic: None,
+                        resolves: None,
                     });
                     continue;
                 }
@@ -670,6 +684,8 @@ pub fn collect_api_calls(
                         is_indirect: true,
                         indirect_method: Some(format!("WdfFunctions[0x{:X}]", func.offset(8))),
                         switch_cases: Vec::new(),
+                        dynamic: None,
+                        resolves: None,
                     });
                     continue;
                 }
@@ -698,6 +714,8 @@ pub fn collect_api_calls(
                 is_indirect: true,
                 indirect_method: Some(mem_method),
                 switch_cases: Vec::new(),
+                dynamic: None,
+                resolves: None,
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Register {
             // Register-indirect call/jmp: `call rax`, `jmp r9`, etc.
@@ -737,6 +755,8 @@ pub fn collect_api_calls(
                         is_indirect: true,
                         indirect_method: Some(src.method),
                         switch_cases: Vec::new(),
+                        dynamic: None,
+                        resolves: None,
                     });
                 }
             } else if insn.is_call || hostile {
@@ -751,6 +771,8 @@ pub fn collect_api_calls(
                     is_indirect: true,
                     indirect_method: Some(format!("unresolved register {reg_name}")),
                     switch_cases: Vec::new(),
+                    dynamic: None,
+                    resolves: None,
                 });
             }
             // Non-hostile unresolved JMP via register: left for the switch-dispatch path.
@@ -767,12 +789,63 @@ pub(super) fn guard_dispatch_slot(pe: &PeFile, raw: &[u8]) -> u64 {
         .map_or(0, |load| load.guard_cf_dispatch_function_pointer)
 }
 
+/// Relabels calls through pointers found by dynamic API resolution (see
+/// [`crate::analysis::resolution`]) and notes on each resolver call what it resolves.
+/// Tail jumps through a resolved pointer that the call map skipped are added.
+pub fn apply_dynamic_resolution(
+    calls: &mut Vec<ApiCall>,
+    insns: &[Instruction],
+    report: &crate::analysis::resolution::ResolutionReport,
+) {
+    for insn in insns.iter().filter(|insn| insn.is_call || insn.is_jmp) {
+        let Some(resolved) = report.call_target(insn.rva) else {
+            continue;
+        };
+        let label = resolved.api.clone().unwrap_or_else(|| "?".to_owned());
+        let dll = resolved.module.clone().unwrap_or_default();
+        let method = resolved.describe();
+        match calls.iter_mut().find(|call| call.rva == insn.rva) {
+            Some(call) => {
+                call.label = label;
+                call.dll = dll;
+                call.target_rva = 0;
+                call.is_import = true;
+                call.is_indirect = true;
+                call.dynamic = Some(method);
+            }
+            None => calls.push(ApiCall {
+                rva: insn.rva,
+                kind: if insn.is_call { "call" } else { "jmp" }.to_owned(),
+                target_rva: 0,
+                label,
+                dll,
+                is_import: true,
+                is_indirect: true,
+                indirect_method: None,
+                switch_cases: Vec::new(),
+                dynamic: Some(method),
+                resolves: None,
+            }),
+        }
+    }
+    for call in calls.iter_mut() {
+        if let Some(resolved) = report.resolver_call(call.rva) {
+            call.resolves = Some(format!("{} ({})", resolved.target(), resolved.describe()));
+        }
+    }
+    calls.sort_by_key(|call| call.rva);
+}
+
 pub(super) fn is_guard_dispatch_call(
     insn: &Instruction,
     symbol_index: Option<&SymbolIndex>,
     dispatch_slot: u64,
 ) -> bool {
-    if !insn.is_call || insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Memory {
+    // A guarded tail call jumps through the same dispatch slot.
+    if !(insn.is_call || insn.is_jmp)
+        || insn.iced.op_count() == 0
+        || insn.iced.op0_kind() != OpKind::Memory
+    {
         return false;
     }
     let slot_va = if matches!(insn.iced.memory_base(), Register::RIP | Register::EIP) {

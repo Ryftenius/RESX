@@ -22,6 +22,11 @@ pub struct BehaviorReport {
     pub image: String,
     pub finding_count: usize,
     pub findings: Vec<BehaviorFinding>,
+    /// Dynamic API resolution techniques, most suspicious first.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub api_resolution: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolved_apis: Vec<crate::analysis::resolution::ResolvedApi>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +49,7 @@ pub fn analyze_image(
     findings.extend(scan_sections(pe));
     findings.extend(scan_imports(imports));
 
+    let mut resolution = crate::analysis::resolution::ResolutionReport::default();
     if let Some(managed_finding) = managed_native_scan_suppression(pe, raw) {
         findings.push(managed_finding);
     } else {
@@ -51,6 +57,19 @@ pub fn analyze_image(
         findings.extend(scan_instruction_signals(&insns));
         findings.extend(scan_syscall_stubs(&insns));
         findings.extend(scan_medium_clusters(&insns));
+        resolution = crate::analysis::resolution::analyze(pe, raw);
+        findings.extend(resolution.techniques.iter().map(|technique| {
+            finding(
+                "api-resolution",
+                &technique.rule,
+                &technique.severity,
+                &technique.confidence,
+                "dataflow",
+                technique.rva,
+                technique.detail.clone(),
+                technique.evidence.clone(),
+            )
+        }));
     }
 
     findings = dedup_findings(findings);
@@ -66,6 +85,8 @@ pub fn analyze_image(
         image: image.to_owned(),
         finding_count: findings.len(),
         findings,
+        api_resolution: resolution.summary,
+        resolved_apis: resolution.resolved,
     }
 }
 
