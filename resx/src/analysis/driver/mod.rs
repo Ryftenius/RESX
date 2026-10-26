@@ -1,17 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 mod calls;
 mod capabilities;
 mod dispatch;
 mod hypervisor;
+mod ioctl;
 pub use calls::{
     Argument as IoctlArgument, BufferField as IoctlBufferField, CallEvidence as IoctlCallEvidence,
     Value as IoctlValue,
 };
 pub use capabilities::{DriverCapability, DriverCapabilityReference};
 pub use hypervisor::{HypervisorImport, HypervisorIndicator, HypervisorReport, HypervisorSite};
+pub use ioctl::Coverage as IoctlCoverage;
 
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter, Mnemonic, OpKind};
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter};
 use serde::Serialize;
 
 use crate::formats::pe::{
@@ -65,6 +67,7 @@ pub struct IoctlReport {
     pub dispatch_candidates: Vec<IoctlDispatchCandidate>,
     pub codes: Vec<IoctlCodeCandidate>,
     pub call_sites: Vec<IoctlCallEvidence>,
+    pub coverage: IoctlCoverage,
     pub limitations: Vec<String>,
 }
 
@@ -90,6 +93,7 @@ pub struct IoctlCodeCandidate {
     pub owner_name: String,
     pub instruction: String,
     pub evidence_status: String,
+    pub handler_rva: Option<String>,
     pub arguments: Option<String>,
     pub device_object_identity: Option<String>,
     pub ndis_oid: Option<String>,
@@ -148,8 +152,9 @@ pub fn analyze_driver(image: &str, pe: &PeFile, raw: &[u8], imports: &[ImportDll
     let mut capabilities = capabilities::analyze(imports);
     let hypervisor = hypervisor::analyze(&insns, imports);
     capabilities::add_hypervisor_capabilities(&mut capabilities, &hypervisor);
-    let major_functions = major_function_assignments(pe, raw, &insns);
-    let ioctl = analyze_ioctls_with_context(image, pe, raw, &insns, &major_functions);
+    let discovery = dispatch::recover(pe, raw, &insns);
+    let ioctl = analyze_ioctls_with_context(image, pe, raw, &insns, &discovery);
+    let major_functions = discovery.major_functions;
     let interesting_strings = driver_strings(image, pe, raw);
     let (mut classification, mut confidence, framework_indicators) =
         classify_driver(imports, &api_hits, &major_functions);
@@ -182,8 +187,8 @@ pub fn analyze_ioctls(image: &str, pe: &PeFile, raw: &[u8]) -> IoctlReport {
     let exports = read_exports(pe, raw);
     let runtime_functions = read_runtime_functions(pe, raw);
     let insns = decode_executable(pe, raw, &exports, &runtime_functions);
-    let major_functions = major_function_assignments(pe, raw, &insns);
-    analyze_ioctls_with_context(image, pe, raw, &insns, &major_functions)
+    let discovery = dispatch::recover(pe, raw, &insns);
+    analyze_ioctls_with_context(image, pe, raw, &insns, &discovery)
 }
 
 fn analyze_ioctls_with_context(
@@ -191,140 +196,94 @@ fn analyze_ioctls_with_context(
     pe: &PeFile,
     raw: &[u8],
     insns: &[DecodedInsn],
-    major_functions: &[MajorFunctionAssignment],
+    discovery: &dispatch::Recovery,
 ) -> IoctlReport {
-    let call_sites: Vec<_> = calls::recover(pe, raw, insns)
+    let calls = calls::recover(pe, raw, insns);
+    let mut coverage = IoctlCoverage {
+        linear_instruction_limit_reached: insns.len() == 65_536,
+        call_limit_reached: calls.len() == 1024,
+        dispatch_discovery_truncated: discovery.truncated,
+        ..Default::default()
+    };
+    let call_sites: Vec<_> = calls
         .into_iter()
         .filter(|call| matches!(call.category.as_str(), "ioctl" | "ndis"))
         .collect();
-    let mut seen = BTreeSet::new();
-    let mut codes = Vec::new();
-    let device_control_owners: BTreeSet<String> = major_functions
+    let mut roots = discovery.callbacks.clone();
+    for item in discovery
+        .major_functions
         .iter()
-        .filter(|item| item.major_index == 14)
-        .map(|item| item.target_rva.clone())
-        .collect();
-
-    for insn in insns {
-        if !is_ioctl_compare_instruction(insn.instr.mnemonic()) {
-            continue;
-        }
-        let owner_rva_text = format!("0x{:08X}", insn.owner_rva);
-        let owner_lower = insn.owner_name.to_ascii_lowercase();
-        let context_hint = device_control_owners.contains(&owner_rva_text)
-            || owner_lower.contains("ioctl")
-            || owner_lower.contains("devicecontrol")
-            || owner_lower.contains("device_control");
-        for value in instruction_immediates(&insn.instr) {
-            let Some(decoded) = decode_ioctl(value, context_hint) else {
-                continue;
-            };
-            let key = format!("{}|{}", decoded.code, insn.rva);
-            if !seen.insert(key) {
-                continue;
+        .filter(|item| matches!(item.major_index, 14 | 15))
+    {
+        if let Some(rva) = parse_hex_u32(&item.target_rva) {
+            if let Some(root) = roots.iter_mut().find(|root| root.rva == rva) {
+                root.reason
+                    .push_str(&format!("; {} at {}", item.major_name, item.site_rva));
+            } else {
+                roots.push(ioctl::Root {
+                    rva,
+                    reason: format!(
+                        "{} assignment at {}; static entry ABI",
+                        item.major_name, item.site_rva
+                    ),
+                });
             }
-            codes.push(IoctlCodeCandidate {
-                code: format!("0x{:08X}", decoded.code),
-                device_type: format!("0x{:04X}", decoded.device_type),
-                device_type_name: device_type_name(decoded.device_type).to_owned(),
-                function: format!("0x{:03X}", decoded.function),
-                method: method_name(decoded.method).to_owned(),
-                access: access_name(decoded.access).to_owned(),
-                site_rva: format!("0x{:08X}", insn.rva),
-                owner_rva: format!("0x{:08X}", insn.owner_rva),
-                owner_name: insn.owner_name.clone(),
-                instruction: insn.text.clone(),
-                evidence_status: "unverified-immediate-candidate".into(),
-                arguments: None,
-                device_object_identity: None,
-                ndis_oid: None,
-            });
         }
     }
-
+    roots.sort_by_key(|root| root.rva);
+    let mut codes = ioctl::recover(pe, raw, &roots, &mut coverage);
     for call in &call_sites {
         let Some(code) = call.ioctl_code else {
             continue;
         };
-        let decoded = DecodedIoctl {
-            code,
-            device_type: code >> 16,
-            function: (code >> 2) & 0xfff,
-            method: code & 3,
-            access: (code >> 14) & 3,
-        };
         codes.push(IoctlCodeCandidate {
             code: format!("0x{code:08X}"),
-            device_type: format!("0x{:04X}", decoded.device_type),
-            device_type_name: device_type_name(decoded.device_type).into(),
-            function: format!("0x{:03X}", decoded.function),
-            method: method_name(decoded.method).into(),
-            access: access_name(decoded.access).into(),
+            device_type: format!("0x{:04X}", code >> 16),
+            device_type_name: device_type_name(code >> 16).into(),
+            function: format!("0x{:03X}", (code >> 2) & 0xfff),
+            method: method_name(code & 3).into(),
+            access: access_name((code >> 14) & 3).into(),
             site_rva: format!("0x{:08X}", call.site_rva),
             owner_rva: format!("0x{:08X}", call.owner_rva),
             owner_name: call.owner_name.clone(),
             instruction: format!("call {}!{}", call.dll, call.api),
             evidence_status: "static-api-argument; execution-unobserved".into(),
+            handler_rva: None,
             arguments: Some("See call_sites for typed argument values and provenance".into()),
             device_object_identity: None,
             ndis_oid: call.ndis_oid.map(|oid| format!("0x{oid:08X}")),
         });
     }
-
-    let mut by_owner: BTreeMap<(u32, String), Vec<String>> = BTreeMap::new();
-    for code in &codes {
-        // Calling an IOCTL API does not make the caller a dispatch handler.
-        if code.evidence_status != "unverified-immediate-candidate" {
-            continue;
-        }
-        let owner = parse_hex_u32(&code.owner_rva).unwrap_or(0);
-        by_owner
-            .entry((owner, code.owner_name.clone()))
-            .or_default()
-            .push(code.code.clone());
-    }
-
-    let mut dispatch_candidates = Vec::new();
-    for ((owner_rva, owner_name), mut owner_codes) in by_owner {
-        owner_codes.sort();
-        owner_codes.dedup();
-        let owner_rva_text = format!("0x{:08X}", owner_rva);
-        let major_match = device_control_owners.contains(&owner_rva_text);
-        if owner_codes.len() >= 2
-            || major_match
-            || owner_name.to_ascii_lowercase().contains("ioctl")
-        {
-            let reason = if major_match {
-                "owner is a statically assigned IRP_MJ_DEVICE_CONTROL target".to_owned()
-            } else if owner_codes.len() >= 2 {
-                "multiple CTL_CODE-shaped immediates in one function".to_owned()
-            } else {
-                "function name suggests IOCTL dispatch".to_owned()
-            };
-            dispatch_candidates.push(IoctlDispatchCandidate {
-                owner_rva: owner_rva_text,
-                owner_name,
-                reason,
-                code_count: owner_codes.len(),
-                codes: owner_codes,
-            });
-        }
-    }
-
+    let dispatch_candidates: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            let owner = format!("0x{:08X}", root.rva);
+            let root_codes: BTreeSet<_> = codes
+                .iter()
+                .filter(|code| {
+                    code.owner_rva == owner
+                        && code.evidence_status.starts_with("static-request-code-")
+                })
+                .map(|code| code.code.clone())
+                .collect();
+            IoctlDispatchCandidate {
+                owner_rva: owner,
+                owner_name: format!("sub_{:08X}", root.rva),
+                reason: root.reason.clone(),
+                code_count: root_codes.len(),
+                codes: root_codes.into_iter().collect(),
+            }
+        })
+        .collect();
     let summary = format!(
-        "{} IOCTL code candidate(s), {} dispatch candidate(s)",
+        "{} IOCTL code evidence record(s), {} registered dispatch root(s)",
         codes.len(),
         dispatch_candidates.len()
     );
     IoctlReport {
-        image: image.to_owned(),
-        summary,
-        dispatch_candidates,
-        codes,
-        call_sites,
-        limitations: std::iter::once("x64 call arguments use bounded straight-line facts and ABI assumptions. Linear decode is limited to 65536 instructions; call evidence to 1024 sites. Missing facts and kernel-object identity remain unknown.".into())
-            .chain(pe.anomalies.iter().map(|finding| format!("{} [{}]: {}", finding.severity, finding.kind, finding.detail)))
-            .collect(),
+        image:image.into(),summary,dispatch_candidates,codes,call_sites,coverage,
+        limitations:std::iter::once("Static x64 request provenance and bounded CFG analysis; comparisons do not prove successful requests, access rights or runtime reachability. Dispatch roots: 64; instructions: 8192/root, 131072 total; helper depth: 2; table slots: 256. Unknown indirect branches, WDF callbacks and unrecognized registration paths may be omitted. Linear API-call scan: 65536 instructions, 1024 calls. Empty results do not establish absence of IOCTLs.".into())
+            .chain(pe.anomalies.iter().map(|f|format!("{} [{}]: {}",f.severity,f.kind,f.detail))).collect(),
     }
 }
 
@@ -569,77 +528,13 @@ fn classify_driver(
     }
 }
 
+#[cfg(test)]
 fn major_function_assignments(
     pe: &PeFile,
     raw: &[u8],
     insns: &[DecodedInsn],
 ) -> Vec<MajorFunctionAssignment> {
-    dispatch::recover(pe, raw, insns)
-}
-
-fn is_ioctl_compare_instruction(mnemonic: Mnemonic) -> bool {
-    matches!(
-        mnemonic,
-        Mnemonic::Cmp | Mnemonic::Sub | Mnemonic::Add | Mnemonic::Lea
-    )
-}
-
-fn instruction_immediates(instr: &iced_x86::Instruction) -> Vec<u32> {
-    let mut out = Vec::new();
-    for idx in 0..instr.op_count() {
-        let value = match instr.op_kind(idx) {
-            OpKind::Immediate8 => Some(instr.immediate8() as u32),
-            OpKind::Immediate8to16 | OpKind::Immediate8to32 | OpKind::Immediate8to64 => {
-                Some(instr.immediate8to32() as u32)
-            }
-            OpKind::Immediate16 => Some(instr.immediate16() as u32),
-            OpKind::Immediate32 | OpKind::Immediate32to64 => Some(instr.immediate32()),
-            OpKind::Immediate64 => u32::try_from(instr.immediate64()).ok(),
-            _ => None,
-        };
-        if let Some(value) = value {
-            out.push(value);
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-struct DecodedIoctl {
-    code: u32,
-    device_type: u32,
-    function: u32,
-    method: u32,
-    access: u32,
-}
-
-fn decode_ioctl(code: u32, context_hint: bool) -> Option<DecodedIoctl> {
-    if code < 0x0001_0000 {
-        return None;
-    }
-    let method = code & 0x3;
-    let function = (code >> 2) & 0xFFF;
-    let access = (code >> 14) & 0x3;
-    let device_type = (code >> 16) & 0xFFFF;
-    if function == 0 {
-        return None;
-    }
-    let known_device = matches!(device_type, 0x22 | 0x23 | 0x2D);
-    let custom_device = device_type >= 0x8000;
-    let vendor_function = (0x800..=0xFFF).contains(&function);
-    let plausible = if context_hint {
-        known_device || custom_device || device_type != 0
-    } else {
-        known_device && vendor_function
-    };
-    plausible.then_some(DecodedIoctl {
-        code,
-        device_type,
-        function,
-        method,
-        access,
-    })
+    dispatch::recover(pe, raw, insns).major_functions
 }
 
 fn driver_strings(_image: &str, pe: &PeFile, raw: &[u8]) -> Vec<DriverString> {
@@ -670,7 +565,7 @@ fn driver_notes(
         notes.push("MajorFunction stores require entry-argument provenance and a mapped code target. Bounded x64 branches, constant loops, and direct helpers are covered under the entry ABI assumption. Conditional stores may be overwritten; final runtime table and object identity remain unknown.".to_owned());
     }
     if !ioctl.dispatch_candidates.is_empty() {
-        notes.push("IOCTL candidates are decoded from CTL_CODE-shaped immediates and grouped by owning function.".to_owned());
+        notes.push("IOCTL evidence follows request values from registered dispatch roots; comparisons alone do not prove successful requests.".to_owned());
     }
     if hits.device_apis.is_empty() && hits.symbolic_link_apis.is_empty() {
         notes.push("No obvious device creation or symbolic-link import was found; this may be filter-only, framework-only, or stripped/indirect.".to_owned());

@@ -1,6 +1,8 @@
 //! Path-bounded DRIVER_OBJECT assignment recovery under the Windows x64 ABI.
 //! These are conditional static stores, not a recovered live dispatch table.
+use super::ioctl::Root;
 use super::{major_function_name, DecodedInsn, MajorFunctionAssignment, PeFile};
+use crate::formats::pe::read_imports;
 use iced_x86::{
     Decoder, DecoderOptions, FlowControl, Formatter, Instruction, InstructionInfoFactory,
     IntelFormatter, Mnemonic, OpAccess, OpKind, Register,
@@ -102,14 +104,25 @@ fn branch(mnemonic: Mnemonic, flags: Flags) -> Option<bool> {
     })
 }
 
-pub(super) fn recover(
-    pe: &PeFile,
-    raw: &[u8],
-    insns: &[DecodedInsn],
-) -> Vec<MajorFunctionAssignment> {
+#[derive(Default)]
+pub(super) struct Recovery {
+    pub major_functions: Vec<MajorFunctionAssignment>,
+    pub callbacks: Vec<Root>,
+    pub truncated: bool,
+}
+
+pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Recovery {
     if pe.machine != 0x8664 || pe.subsystem != 1 {
-        return Vec::new();
+        return Recovery::default();
     }
+    let class_initialize: BTreeSet<_> = read_imports(pe, raw)
+        .iter()
+        .filter(|dll| dll.dll.eq_ignore_ascii_case("classpnp.sys"))
+        .flat_map(|dll| dll.entries.iter())
+        .filter(|entry| entry.name == "ClassInitialize")
+        .map(|entry| entry.slot_rva)
+        .collect();
+    let mut recovery = Recovery::default();
     let by_rva: BTreeMap<_, _> = insns
         .iter()
         .map(|instruction| (instruction.rva, instruction))
@@ -135,6 +148,7 @@ pub(super) fn recover(
             steps += 1;
             let visits = visits.entry(work.pc).or_default();
             if *visits >= 64 {
+                recovery.truncated = true;
                 break;
             }
             *visits += 1;
@@ -202,6 +216,8 @@ pub(super) fn recover(
                                 taken.pc = target;
                                 taken.conditional = true;
                                 pending.push_back(taken);
+                            } else {
+                                recovery.truncated = true;
                             }
                         }
                     }
@@ -211,6 +227,37 @@ pub(super) fn recover(
                 }
                 FlowControl::Call | FlowControl::IndirectCall => {
                     let args = [Register::RCX, Register::RDX, Register::R8, Register::R9];
+                    if instr.flow_control() == FlowControl::IndirectCall
+                        && instr.is_ip_rel_memory_operand()
+                        && pe
+                            .va_to_rva(instr.ip_rel_memory_address())
+                            .is_some_and(|rva| class_initialize.contains(&rva))
+                        && register(&work, Register::RCX) == Some(Value::Driver)
+                    {
+                        if let Some(Value::Stack(base)) = register(&work, Register::R8) {
+                            // WDK x64 CLASS_INIT_DATA.FdoData.ClassDeviceControl.
+                            if let Some(Value::Code(target)) = base
+                                .checked_add(0x28)
+                                .and_then(|offset| work.stack.get(&offset))
+                                .copied()
+                            {
+                                let root = Root { rva: target, reason: format!("ClassInitialize FdoData.ClassDeviceControl at 0x{:08X}; static entry ABI", work.pc) };
+                                if !recovery.callbacks.iter().any(|old| old.rva == target) {
+                                    recovery.callbacks.push(root);
+                                }
+                            }
+                        }
+                    }
+                    // Non-escaping caller locals survive calls; the callee owns
+                    // the 32-byte home area. Passing a local address invalidates
+                    // the snapshot, including addresses passed on the stack.
+                    let escaped = args
+                        .iter()
+                        .any(|reg| matches!(register(&work, *reg), Some(Value::Stack(_))))
+                        || work
+                            .stack
+                            .values()
+                            .any(|value| matches!(value, Value::Stack(_)));
                     if instr.flow_control() == FlowControl::Call
                         && work.depth < 8
                         && pending.len() < 256
@@ -249,7 +296,13 @@ pub(super) fn recover(
                     ] {
                         work.regs.remove(&reg);
                     }
-                    work.stack.clear();
+                    if escaped {
+                        work.stack.clear();
+                    } else if let Some(Value::Stack(sp)) = register(&work, Register::RSP) {
+                        work.stack.retain(|&offset, _| {
+                            offset.saturating_add(8) <= sp || offset >= sp.saturating_add(32)
+                        });
+                    }
                     work.flags = None;
                     work.pc = next;
                     continue;
@@ -453,5 +506,7 @@ pub(super) fn recover(
             break;
         }
     }
-    out
+    recovery.truncated |= steps >= 65_536;
+    recovery.major_functions = out;
+    recovery
 }

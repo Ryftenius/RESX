@@ -237,7 +237,12 @@ pub fn render_flow_contracts(
                 ]
             })
             .collect();
-        writeln!(w, "\n{}", c.bold("Recovered IOCTL contracts")).ok();
+        writeln!(
+            w,
+            "\n{}",
+            c.bold("Static IOCTL evidence (execution unobserved)")
+        )
+        .ok();
         crate::core::table::print(w, &["Code", "Function", "Evidence RVA"], &rows, c);
     }
 }
@@ -246,6 +251,31 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
     writeln!(w, "{}", c.bold("IOCTL and NDIS recovery")).ok();
     writeln!(w, "{}  {}", c.dim("Image:"), report.image).ok();
     writeln!(w, "{}  {}", c.dim("Result:"), report.summary).ok();
+    writeln!(w, "Static request comparisons and API arguments; successful execution and access rights are unproven.").ok();
+    let coverage = &report.coverage;
+    writeln!(w, "Coverage: {}/{} dispatch roots; {} dispatch instructions; linear scan truncated={}; dispatch discovery/analysis truncated={}/{}; unsupported indirect branches={}",
+        coverage.analyzed_roots, coverage.dispatch_roots, coverage.decoded_dispatch_instructions,
+        coverage.linear_instruction_limit_reached, coverage.dispatch_discovery_truncated,
+        coverage.dispatch_analysis_truncated, coverage.unsupported_indirect_branches).ok();
+    if !report.dispatch_candidates.is_empty() {
+        let roots: Vec<_> = report
+            .dispatch_candidates
+            .iter()
+            .map(|root| {
+                vec![
+                    root.owner_rva.clone(),
+                    root.code_count.to_string(),
+                    root.reason.clone(),
+                ]
+            })
+            .collect();
+        crate::core::table::print(
+            w,
+            &["Dispatch RVA", "Codes", "Registration evidence"],
+            &roots,
+            c,
+        );
+    }
 
     let rows: Vec<_> = report
         .codes
@@ -253,10 +283,12 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
         .map(|code| {
             let numeric = u32::from_str_radix(code.code.trim_start_matches("0x"), 16).ok();
             let call = numeric.and_then(|value| {
-                report
-                    .call_sites
-                    .iter()
-                    .find(|call| call.ioctl_code == Some(value))
+                report.call_sites.iter().find(|call| {
+                    code.evidence_status.starts_with("static-api-argument")
+                        && call.ioctl_code == Some(value)
+                        && code.site_rva == format!("0x{:08X}", call.site_rva)
+                        && code.owner_rva == format!("0x{:08X}", call.owner_rva)
+                })
             });
             vec![
                 code.code.clone(),
@@ -268,6 +300,14 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
                 call.map(|call| argument(call, "output_length"))
                     .unwrap_or_else(|| "?".into()),
                 code.site_rva.clone(),
+                if code.evidence_status.starts_with("static-api") {
+                    "API argument"
+                } else if code.handler_rva.is_some() {
+                    "request table"
+                } else {
+                    "request comparison"
+                }
+                .into(),
             ]
         })
         .collect();
@@ -276,7 +316,7 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
         crate::core::table::print(
             w,
             &[
-                "Code", "Function", "Access", "Method", "Input", "Output", "Site RVA",
+                "Code", "Function", "Access", "Method", "Input", "Output", "Site RVA", "Evidence",
             ],
             &rows,
             c,
