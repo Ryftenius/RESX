@@ -924,22 +924,62 @@ fn describe_gs_access(disp: u64) -> Option<String> {
 
 pub(super) fn describe_immediate_literals(instr: &iced_x86::Instruction) -> Vec<String> {
     let mut out = Vec::new();
+    // Untyped instruction immediates are not status values merely because their
+    // numbers coincide. Only suggest distinctive status constants in moves or
+    // comparisons; small integers and bit tests are particularly ambiguous.
+    if !matches!(instr.mnemonic(), Mnemonic::Mov | Mnemonic::Cmp) {
+        return out;
+    }
     for op_idx in 0..instr.op_count() {
         let value = match instr.op_kind(op_idx) {
-            OpKind::Immediate8 => Some(instr.immediate8() as u64),
-            OpKind::Immediate16 => Some(instr.immediate16() as u64),
             OpKind::Immediate32 => Some(instr.immediate32() as u64),
             OpKind::Immediate32to64 => Some(instr.immediate32to64() as u64),
             OpKind::Immediate64 => Some(instr.immediate64()),
             _ => None,
         };
         if let Some(value) = value.and_then(describe_status_literal) {
-            out.push(value.to_owned());
+            out.push(format!("possible NTSTATUS: {value}"));
         }
     }
     out
 }
 
 fn describe_status_literal(value: u64) -> Option<&'static str> {
-    crate::core::status::ntstatus_name(value as u32)
+    let low = value as u32;
+    if value != u64::from(low) && value != (low as i32 as i64) as u64 {
+        return None;
+    }
+    if low < 0x4000_0000 {
+        return None;
+    }
+    crate::core::status::ntstatus_name(low)
+}
+
+#[cfg(test)]
+mod literal_annotation_tests {
+    use super::*;
+    fn annotations(bytes: &[u8]) -> Vec<String> {
+        let instr = iced_x86::Decoder::new(64, bytes, iced_x86::DecoderOptions::NONE).decode();
+        describe_immediate_literals(&instr)
+    }
+    #[test]
+    fn untyped_zero_flags_and_addresses_are_not_status_codes() {
+        assert!(annotations(&[0x80, 0x7b, 0x10, 0]).is_empty()); // cmp byte [rbx+10h],0
+        assert!(annotations(&[0xb8, 0, 0, 0, 0]).is_empty()); // mov eax,0
+        assert!(annotations(&[0xa9, 1, 0, 0, 0]).is_empty()); // test eax,1
+        assert!(annotations(&[0xb8, 3, 1, 0, 0]).is_empty()); // ambiguous 259
+        assert!(describe_status_literal(0x1_c0000022).is_none());
+        assert_eq!(
+            annotations(&[0xb8, 0x22, 0, 0, 0xc0]),
+            vec!["possible NTSTATUS: STATUS_ACCESS_DENIED"]
+        );
+        assert_eq!(
+            annotations(&[0x3d, 0x22, 0, 0, 0xc0]),
+            vec!["possible NTSTATUS: STATUS_ACCESS_DENIED"]
+        );
+        assert_eq!(
+            describe_status_literal(0xffffffffc0000022),
+            Some("STATUS_ACCESS_DENIED")
+        );
+    }
 }
