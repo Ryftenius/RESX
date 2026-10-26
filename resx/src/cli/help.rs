@@ -1,4 +1,4 @@
-use crate::core::config::Cli;
+use crate::cli::args::{on_parser_stack, Cli};
 use clap::CommandFactory;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -6,65 +6,106 @@ use std::sync::OnceLock;
 const SECTIONS: &[&str] = &[
     "inspect", "code", "evidence", "recovery", "compare", "options",
 ];
-const COMMANDS: &[&str] = &[
-    "dump",
-    "xrefs",
-    "cfg",
-    "reconstruct-cfg",
-    "intelli",
-    "behavior",
-    "contracts",
-    "ipc",
-    "network",
-    "crypto",
-    "strings",
-    "payload",
-    "driver",
-    "ioctl",
-    "entropy",
-    "patch",
-    "types",
-    "peinfo",
-    "sections",
-    "eat",
-    "iat",
-    "syms",
-    "pechk",
-    "priority",
-    "callers",
-    "locate",
-    "locate-sym",
-    "scan",
-    "diff",
-    "index",
-    "hunt",
-    "yara",
-    "find",
-    "edrchk",
-    "follow",
-    "recomp",
-    "symbols",
-    "funcs",
-    "refs",
-    "update",
-    "config",
+
+/// Help topics that are not commands themselves; each resolves to the command that
+/// documents it.
+const TOPIC_ALIASES: &[(&str, &str)] = &[
+    ("recomp", "dump"),
+    ("c", "dump"),
+    ("edrchk", "dump"),
+    ("hookchk", "dump"),
+    ("funcs", "calls"),
+    ("symbols", "syms"),
+    ("pdb", "syms"),
 ];
 
-/// Accept dumpbin-style `/command` and `/option:value` spellings for every clap long option.
-/// Unknown slash-prefixed values are preserved so paths are never reinterpreted as flags.
+/// The command grammar, flattened for the pre-parse steps that run on raw argv.
+struct Grammar {
+    /// Command names and aliases, lowercase, to the canonical command name.
+    commands: HashMap<String, String>,
+    /// Per command: long names, aliases and short names, lowercase, to the canonical
+    /// long name, including the global options.
+    options: HashMap<String, HashMap<String, String>>,
+}
+
+fn grammar() -> &'static Grammar {
+    static GRAMMAR: OnceLock<Grammar> = OnceLock::new();
+    GRAMMAR.get_or_init(|| {
+        on_parser_stack(build_grammar).unwrap_or_else(|| Grammar {
+            commands: HashMap::new(),
+            options: HashMap::new(),
+        })
+    })
+}
+
+fn build_grammar() -> Grammar {
+    let mut root = Cli::command();
+    root.build();
+    let mut commands = HashMap::new();
+    let mut options = HashMap::new();
+    for command in root.get_subcommands() {
+        let name = command.get_name().to_owned();
+        commands.insert(name.clone(), name.clone());
+        for alias in command.get_all_aliases() {
+            commands.insert(alias.to_ascii_lowercase(), name.clone());
+        }
+        let mut long_options = HashMap::new();
+        for argument in command.get_arguments() {
+            let Some(long) = argument.get_long() else {
+                continue;
+            };
+            let canonical = long.to_owned();
+            let mut spellings: Vec<String> = vec![long.to_owned()];
+            spellings.extend(
+                argument
+                    .get_all_aliases()
+                    .into_iter()
+                    .flatten()
+                    .map(str::to_owned),
+            );
+            spellings.extend(argument.get_short().map(String::from));
+            spellings.extend(
+                argument
+                    .get_all_short_aliases()
+                    .into_iter()
+                    .flatten()
+                    .map(String::from),
+            );
+            for spelling in spellings {
+                long_options.insert(spelling.to_ascii_lowercase(), canonical.clone());
+            }
+        }
+        options.insert(name, long_options);
+    }
+    Grammar { commands, options }
+}
+
+fn canonical_command(name: &str) -> Option<&'static str> {
+    grammar()
+        .commands
+        .get(&name.to_ascii_lowercase())
+        .map(String::as_str)
+}
+
+/// Accept dumpbin-style `/command` and `/option:value` spellings for every option of
+/// the command being run. Unknown slash-prefixed values are preserved so paths are
+/// never reinterpreted as flags.
 pub fn normalize_cli_syntax(raw_args: &[String]) -> Vec<String> {
     if raw_args.is_empty() {
         return Vec::new();
     }
-    let long_options = slash_long_options();
     let mut out = Vec::with_capacity(raw_args.len() + 2);
     out.push(raw_args[0].clone());
+    let mut command: Option<&'static str> = None;
     for (index, argument) in raw_args.iter().enumerate().skip(1) {
         if argument == "/?" {
             out.push("--help".to_owned());
             continue;
         }
         let Some(body) = argument.strip_prefix('/') else {
+            if index == 1 {
+                command = canonical_command(argument);
+            }
             out.push(argument.clone());
             continue;
         };
@@ -79,29 +120,34 @@ pub fn normalize_cli_syntax(raw_args: &[String]) -> Vec<String> {
                 }
                 continue;
             }
-        }
-        if index == 1
-            && (COMMANDS
-                .iter()
-                .chain(SECTIONS)
-                .any(|name| body.eq_ignore_ascii_case(name))
-                || body.eq_ignore_ascii_case("help")
-                || body.eq_ignore_ascii_case("version"))
-        {
-            out.push(body.to_ascii_lowercase());
-            continue;
+            let lower = body.to_ascii_lowercase();
+            if let Some(name) = canonical_command(&lower) {
+                command = Some(name);
+                out.push(lower);
+                continue;
+            }
+            if SECTIONS.contains(&lower.as_str())
+                || TOPIC_ALIASES.iter().any(|(topic, _)| *topic == lower)
+                || lower == "help"
+                || lower == "version"
+            {
+                out.push(lower);
+                continue;
+            }
         }
         let (key, value) = body
             .split_once(':')
             .or_else(|| body.split_once('='))
             .unwrap_or((body, ""));
-        let canonical = match key.to_ascii_lowercase().as_str() {
-            "v" => Some("verbose".to_owned()),
-            "q" => Some("quiet".to_owned()),
-            "o" => Some("out".to_owned()),
-            "n" => Some("ordinal".to_owned()),
-            "h" => Some("help".to_owned()),
-            other => long_options.get(other).cloned(),
+        let key = key.to_ascii_lowercase();
+        let canonical = if key == "h" || key == "help" {
+            Some("help".to_owned())
+        } else {
+            grammar()
+                .options
+                .get(command.unwrap_or("implicit"))
+                .and_then(|options| options.get(&key))
+                .cloned()
         };
         if let Some(canonical) = canonical {
             out.push(format!("--{canonical}"));
@@ -115,39 +161,74 @@ pub fn normalize_cli_syntax(raw_args: &[String]) -> Vec<String> {
     out
 }
 
-fn slash_long_options() -> &'static HashMap<String, String> {
-    static OPTIONS: OnceLock<HashMap<String, String>> = OnceLock::new();
-    OPTIONS.get_or_init(|| {
-        // Clap's generated command graph is large in debug builds. Construct it on a bounded
-        // worker stack so the Windows 1 MiB main-thread reserve cannot be exhausted at startup.
-        std::thread::Builder::new()
-            .name("resx-schema".to_owned())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(build_slash_long_options)
-            .ok()
-            .and_then(|worker| worker.join().ok())
-            .unwrap_or_default()
-    })
+/// Whether `command` takes the long option `flag` (any spelling): `Some(false)` when
+/// only other commands take it, `None` when no command does. An argv[1] that is not a
+/// command means the implicit dump/locate form.
+pub fn command_takes_option(command: &str, flag: &str) -> Option<bool> {
+    let grammar = grammar();
+    let flag = flag.trim_start_matches('-').to_ascii_lowercase();
+    let command = canonical_command(command).unwrap_or("implicit");
+    if grammar
+        .options
+        .get(command)
+        .is_some_and(|options| options.contains_key(&flag))
+    {
+        return Some(true);
+    }
+    grammar
+        .options
+        .values()
+        .any(|options| options.contains_key(&flag))
+        .then_some(false)
 }
 
-fn build_slash_long_options() -> HashMap<String, String> {
-    let mut long_options = HashMap::new();
-    for argument in Cli::command().get_arguments() {
-        if let Some(long) = argument.get_long() {
-            let canonical = long.to_owned();
-            long_options.insert(long.to_ascii_lowercase(), canonical.clone());
-            for alias in argument.get_all_aliases().into_iter().flatten() {
-                long_options.insert(alias.to_ascii_lowercase(), canonical.clone());
-            }
-            if let Some(short) = argument.get_short() {
-                long_options.insert(short.to_ascii_lowercase().to_string(), canonical.clone());
-            }
-            for short in argument.get_all_short_aliases().into_iter().flatten() {
-                long_options.insert(short.to_ascii_lowercase().to_string(), canonical.clone());
-            }
+/// Prepares normalized argv for clap. Command names are case-insensitive, and the
+/// pre-subcommand forms `resx <image> <target>` and `resx <name>` run through the
+/// hidden `implicit` command. A near-miss of a command name is left alone so clap
+/// can suggest the intended command instead of treating the typo as an image.
+pub fn prepare_args(raw_args: &[String]) -> Vec<String> {
+    let mut args = raw_args.to_vec();
+    let Some(first) = args.get(1).cloned() else {
+        return args;
+    };
+    if first.starts_with('-') {
+        return args;
+    }
+    if canonical_command(&first).is_some() {
+        args[1] = first.to_ascii_lowercase();
+        return args;
+    }
+    if is_near_command(&first) {
+        return args;
+    }
+    args.insert(1, "implicit".to_owned());
+    args
+}
+
+fn is_near_command(word: &str) -> bool {
+    if word.contains(['.', '\\', '/', ':', '!']) || word.len() < 3 {
+        return false;
+    }
+    let word = word.to_ascii_lowercase();
+    grammar()
+        .commands
+        .keys()
+        .any(|name| name != "implicit" && edit_distance(&word, name) <= 1 + name.len() / 6)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = diagonal + usize::from(ca != *cb);
+            diagonal = row[j + 1];
+            row[j + 1] = substitution.min(row[j] + 1).min(row[j + 1] + 1);
         }
     }
-    long_options
+    row[b.len()]
 }
 
 pub const APP_NAME: &str = "RESX";
@@ -157,10 +238,19 @@ pub fn version_string() -> String {
     format!("{} v{}", APP_NAME, env!("CARGO_PKG_VERSION"))
 }
 
+/// Set by build.rs from the version, commit and target. A build-script output cached
+/// by an older build.rs lacks it, so the ID falls back to the version alone instead
+/// of failing the build.
+const BUILD_ID: &str = match option_env!("RESX_BUILD_ID") {
+    Some(id) => id,
+    None => concat!("resx-", env!("CARGO_PKG_VERSION"), "+unknown"),
+};
+
 pub fn product_banner() -> String {
     format!(
-        "Ryftenius (R) RESX Reverse Engineering Suite Extended, Version {}\nCopyright (C) 2026 Ryftenius.\nSEE DEEPER",
-        env!("CARGO_PKG_VERSION")
+        "Ryftenius (R) RESX Reverse Engineering Suite Extended, Version {}\nBuild ID: {}\nCopyright (C) 2026 Ryftenius.\nSEE DEEPER",
+        env!("CARGO_PKG_VERSION"),
+        BUILD_ID
     )
 }
 
@@ -207,7 +297,7 @@ Usage: resx <command> [arguments] [options]
 
 SECTION     PURPOSE          COMMANDS
   inspect   PE and symbols   peinfo sections eat iat syms types pechk
-  code      Code and flow    dump xrefs cfg reconstruct-cfg callers
+  code      Code and flow    dump calls xrefs cfg reconstruct-cfg callers
   evidence  Static evidence  contracts driver ioctl ipc network crypto strings
   recovery  Decode/edit      payload patch
   compare   Compare/find     diff index hunt scan locate locate-sym
@@ -215,400 +305,118 @@ SECTION     PURPOSE          COMMANDS
 
 EXAMPLES
   resx peinfo .\driver.sys
-  resx ioctl .\J58.dll --json
+  resx ioctl .\sample.dll --json
   resx dump kernel32.dll CreateFileW --recomp
+  resx calls .\agent.exe main --depth 4 --only winapi
   resx /dump kernel32.dll entry /bytes:96
-  resx config --command-style slash --entry-macro ep
 
 DETAILS
   resx code             Open the code and flow section
-  resx help ioctl       Usage, examples and flags for one command
-  resx ioctl --help     Same command help
-  resx help options     Shared options and saved preferences"#,
+  resx help calls       Usage, examples and options for one command
+  resx calls --help     Same command help
+  resx help options     Shared options and saved preferences
+  resx help all         Every command and option"#,
         product_banner()
     );
 }
 
-pub fn example_topic<'a>(raw_args: &'a [String], cli: &'a Cli) -> &'a str {
-    const KNOWN: &[&str] = &[
-        "dump",
-        "xrefs",
-        "cfg",
-        "reconstruct-cfg",
-        "intelli",
-        "behavior",
-        "contracts",
-        "ipc",
-        "network",
-        "crypto",
-        "strings",
-        "payload",
-        "driver",
-        "ioctl",
-        "entropy",
-        "patch",
-        "types",
-        "peinfo",
-        "sections",
-        "eat",
-        "iat",
-        "syms",
-        "pechk",
-        "priority",
-        "callers",
-        "locate",
-        "locate-sym",
-        "scan",
-        "diff",
-        "index",
-        "hunt",
-        "yara",
-        "find",
-        "edrchk",
-        "follow",
-        "recomp",
-        "symbols",
-        "funcs",
-        "refs",
-        "update",
-        "config",
-    ];
-    if raw_args.len() >= 2 {
-        let first = raw_args[1].as_str();
-        if KNOWN.iter().any(|cmd| first.eq_ignore_ascii_case(cmd)) {
-            return first;
-        }
-    }
-    cli.dll.as_deref().unwrap_or("general")
+/// Resolves a help topic to the command whose generated options it shows.
+fn topic_command(topic: &str) -> Option<&'static str> {
+    TOPIC_ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(topic))
+        .map(|(_, command)| *command)
+        .or_else(|| canonical_command(topic).filter(|name| *name != "implicit"))
 }
 
-pub fn preprocess_args(raw_args: &[String]) -> Vec<String> {
-    if raw_args.is_empty() {
-        return Vec::new();
-    }
-    if raw_args.len() == 1 {
-        return raw_args.to_vec();
-    }
-
-    let cmd = raw_args[1].to_ascii_lowercase();
-    if raw_args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        return raw_args.to_vec();
-    }
-    if raw_args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        return raw_args.to_vec();
-    }
-    if raw_args.iter().any(|arg| arg == "--example") {
-        return raw_args.to_vec();
-    }
-
-    let mut rewritten = vec![raw_args[0].clone()];
-    match cmd.as_str() {
-        "dump" | "driver" | "ioctl" | "contracts" | "ipc" | "network" | "crypto" | "payload"
-        | "strings" => rewritten.extend(raw_args.iter().skip(2).cloned()),
-        "config" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--resx-config".to_owned());
-        }
-        "xrefs" | "refs" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--xrefs".to_string());
-        }
-        "types" => rewritten.extend(raw_args.iter().skip(2).cloned()),
-        "cfg" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--cfg".to_string());
-            rewritten.push("text".to_string());
-        }
-        "reconstruct-cfg" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--reconstruct-cfg".to_string());
-        }
-        "intelli" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--intelli".to_string());
-        }
-        "behavior" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--behavior".to_string());
-        }
-        "entropy" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--entropy".to_string());
-        }
-        "patch" => return rewrite_patch_command(raw_args),
-        "peinfo" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--peinfo".to_string());
-        }
-        "sections" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--sections".to_string());
-        }
-        "eat" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--show-eat".to_string());
-        }
-        "iat" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--show-iat".to_string());
-        }
-        "syms" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--show-syms".to_string());
-        }
-        "pechk" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--pechk".to_string());
-        }
-        "priority" => {
-            rewritten.push("--priority".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
-        "callers" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--follow-callers".to_string());
-        }
-        "locate" => {
-            rewritten.push("--locate".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
-        "locate-sym" => {
-            rewritten.push("--locate-sym".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
-        "scan" => {
-            rewritten.push("--resx-scan".to_string());
-            if let Some(root) = raw_args.get(2) {
-                rewritten.push("--scan-root".to_string());
-                rewritten.push(root.clone());
-                rewritten.extend(raw_args.iter().skip(3).cloned());
-            } else {
-                rewritten.extend(raw_args.iter().skip(2).cloned());
-            }
-        }
-        "diff" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--resx-diff".to_string());
-        }
-        "index" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--resx-index".to_string());
-        }
-        "hunt" => {
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-            rewritten.push("--resx-hunt".to_string());
-        }
-        "yara" => {
-            if raw_args.len() >= 4 {
-                rewritten.push(raw_args[2].clone());
-                rewritten.push("--yara".to_string());
-                rewritten.push(raw_args[3].clone());
-                rewritten.extend(raw_args.iter().skip(4).cloned());
-            } else {
-                rewritten.extend(raw_args.iter().skip(2).cloned());
-            }
-        }
-        "find" => {
-            if raw_args.len() >= 4 {
-                rewritten.push(raw_args[2].clone());
-                rewritten.push("--resx-find".to_string());
-                rewritten.push("--find".to_string());
-                rewritten.push(raw_args[3].clone());
-                rewritten.extend(raw_args.iter().skip(4).cloned());
-            } else {
-                rewritten.extend(raw_args.iter().skip(2).cloned());
-                rewritten.push("--resx-find".to_string());
-            }
-        }
-        "update" => {
-            rewritten.push("--update".to_string());
-            rewritten.extend(raw_args.iter().skip(2).cloned());
-        }
-        _ => return raw_args.to_vec(),
-    }
-    rewritten
+/// Renders one command's options grouped by heading, optionally after its generated
+/// usage line. Global output options are summarized once instead of repeated under
+/// every command.
+fn command_options(name: String, with_usage: bool) -> Option<String> {
+    on_parser_stack(move || {
+        let mut root = Cli::command();
+        let command = root.find_subcommand_mut(&name)?.clone();
+        let template = if with_usage {
+            "{usage-heading} {usage}\n\n{all-args}"
+        } else {
+            "{all-args}"
+        };
+        Some(
+            command
+                .bin_name(format!("resx {name}"))
+                .disable_help_flag(true)
+                .help_template(template)
+                .render_help()
+                .to_string(),
+        )
+    })
+    .flatten()
 }
 
-fn rewrite_patch_command(raw_args: &[String]) -> Vec<String> {
-    let mut rewritten = vec![raw_args[0].clone()];
-    let Some(image) = raw_args.get(2) else {
-        rewritten.push("--patch".to_string());
-        return rewritten;
-    };
-    if image.starts_with('-') {
-        rewritten.extend(raw_args.iter().skip(2).cloned());
-        rewritten.push("--patch".to_string());
-        return rewritten;
-    }
-
-    rewritten.push(image.clone());
-    let mut idx = 3;
-    if raw_args.get(idx).is_some_and(|arg| !arg.starts_with('-')) {
-        rewritten.push("--at".to_string());
-        rewritten.push(raw_args[idx].clone());
-        idx += 1;
-    }
-    if raw_args.get(idx).is_some_and(|arg| !arg.starts_with('-')) {
-        let mut bytes = Vec::new();
-        while raw_args.get(idx).is_some_and(|arg| !arg.starts_with('-')) {
-            bytes.push(raw_args[idx].clone());
-            idx += 1;
-        }
-        rewritten.push("--patch-bytes".to_string());
-        rewritten.push(bytes.join(" "));
-    }
-
-    rewritten.extend(raw_args.iter().skip(idx).cloned());
-    rewritten.push("--patch".to_string());
-    rewritten
+fn global_options() -> String {
+    on_parser_stack(|| {
+        Cli::command()
+            .help_template("{all-args}")
+            .render_help()
+            .to_string()
+    })
+    .unwrap_or_default()
 }
+
+const GLOBAL_SUMMARY: &str =
+    "Every command also accepts the output options: --json, --out <FILE>, -v, -q,
+--diagnostic, --diagnostic-trace, --time, --color, --no-color, --debug-report.
+See `resx help options`.";
 
 mod examples;
 pub use examples::print_examples;
 
 fn all_help() -> String {
-    // Building and rendering the generated clap graph exceeds the Windows main
-    // thread's 1 MiB stack in debug builds. Keep help generation deterministic,
-    // but render it on the same bounded worker-stack model used by slash syntax.
-    let flags = std::thread::Builder::new()
-        .name("resx-help-schema".to_owned())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            let mut parser = Cli::command();
-            parser.render_long_help().to_string()
-        })
-        .ok()
-        .and_then(|worker| worker.join().ok())
-        .unwrap_or_else(|| "  <unable to render generated operator arguments>".to_owned());
-    format!(
-        r#"{}
+    let overview = on_parser_stack(|| {
+        Cli::command()
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set())
+            .map(|command| {
+                format!(
+                    "  {:<16} {}",
+                    command.get_name(),
+                    command
+                        .get_about()
+                        .map(|about| about.to_string())
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    let names = on_parser_stack(|| {
+        Cli::command()
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set())
+            .map(|command| command.get_name().to_owned())
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
 
-COMPLETE COMMAND REFERENCE
-
-Inspect
-  peinfo  sections  pechk  eat  iat  syms  types
-
-Code and flow
-  dump  xrefs  refs  cfg  reconstruct-cfg  callers  follow  recomp  funcs
-  intelli  behavior
-
-Evidence and search
-  contracts  driver  ioctl  ipc  network  crypto  strings  entropy
-  yara  find  scan  locate  locate-sym  edrchk
-
-Recovery and comparison
-  payload  patch
-  diff  index  hunt
-
-Configuration
-  priority  symbols  config  update
-
-COMMAND HELP
-  resx help <command>               Detailed usage and examples
-  resx <command> --help             Same command help
-  resx help all                     This complete reference
-
-ALL OPERATOR ARGUMENTS AND FLAGS
-{}
-
-INTERNAL COMMAND-ROUTING FLAGS
-  --patch  --resx-find  --resx-scan  --resx-diff  --resx-index  --resx-hunt
-  --resx-config
-
-These internal switches are shown for completeness. Use their command forms above.
-Slash syntax is accepted for every long operator flag, for example /verbose and /out:file."#,
+    let mut out = format!(
+        "{}\n\nCOMPLETE COMMAND REFERENCE\n\n{}\n\nCOMMAND HELP\n  resx help <command>               Usage, examples and options\n  resx <command> --help             Same command help\n  resx help all                     This complete reference\n\nGLOBAL OPTIONS\n{}\n",
         product_banner(),
-        flags.trim()
-    )
+        overview.join("\n"),
+        global_options().trim_end()
+    );
+    for name in names {
+        if let Some(options) = command_options(name, true) {
+            out.push_str(&format!("\n{}\n{}\n", "=".repeat(78), options.trim_end()));
+        }
+    }
+    out.push_str(
+        "\nSlash syntax is accepted for every long option, for example /verbose and /out:file.",
+    );
+    out
 }
 
 fn section_help(topic: &str) -> Option<&'static str> {
     Some(match topic {
-        "contracts" => {
-            r"CONTRACTS | Bounded x64 API arguments and producer relationships
-Usage: resx contracts <image> [--json] [-v]
-
-Examples:
-  resx contracts .\J58.dll --json
-  resx contracts .\sample.exe -v --out contracts.json
-
-Includes IPC, network, crypto and IOCTL/NDIS contracts. Unknown values remain
-unknown; reports include instruction/call budgets. No target execution."
-        }
-        "ipc" => {
-            r"IPC | Named pipes, ALPC, RPC, COM and shared mappings
-Usage: resx ipc <image> [--json] [-v]
-
-Examples:
-  resx ipc .\service.exe --json
-  resx ipc .\sample.exe -v --out ipc.json
-
-Static names, arguments and producer references. Live peers and shared kernel
-objects require runtime evidence."
-        }
-        "network" => {
-            r"NETWORK | Endpoint candidates and HTTP/socket configuration
-Usage: resx network <image> [--json] [-v]
-
-Examples:
-  resx network .\sample.exe --json
-  resx network .\sample.exe -v --out endpoints.json
-
-Recovers available host, port, method, path and sockaddr fields. No endpoint is
-contacted. Endpoint presence does not establish C2 activity."
-        }
-        "crypto" => {
-            r"CRYPTO | Imported algorithm, provider and mode configuration
-Usage: resx crypto <image> [--json] [-v]
-
-Examples:
-  resx crypto .\sample.exe --json
-  resx crypto .\J58.dll -v --out crypto.json
-
-Static CNG/CAPI contracts; custom/inlined algorithms may remain unknown.
-For decoding with a supplied key: resx help payload."
-        }
-        "strings" => {
-            r"STRINGS | ASCII and UTF-16LE candidates with exact offsets
-Usage: resx strings <image> [--json] [-v]
-
-Examples:
-  resx strings .\J58.dll --json
-  resx strings .\sample.exe --strings-encoding ascii --strings-min-len 8
-  resx strings .\sample.exe --strings-interesting --strings-limit 200
-  resx strings .\sample.exe --strings-match TARGET --strings-tag success-marker
-
-Limits: 16 MiB scanned, 8,192 candidates, 4,096 code units per candidate.
-UTF-16 candidates use a text-quality filter by default; --strings-raw-wide keeps
-permissive binary coincidences. --strings-encoding ascii|utf16le|both,
---strings-min-len, --strings-limit, --strings-match, and --strings-tag bound output.
-TARGET_OK-like values are labeled success-marker; brace-form tokens are separate
-flag-candidate findings. Text presence does not prove behavior."
-        }
-        "driver" => {
-            r"DRIVER | Static x64 dispatch and driver capability evidence
-Usage: resx driver <image> [--json] [-v]
-
-Examples:
-  resx driver .\hypervisor.sys --verbose
-  resx driver C:\Windows\System32\drivers\vmbus.sys --json --out vmbus.json
-
-driver includes conditional MajorFunction assignments, imported-API capability
-groups, AMD SVM / Intel VMX evidence, and correlated NPT/EPT SLAT hook machinery
-with instruction RVAs. No driver is loaded."
-        }
-        "ioctl" => {
-            r"IOCTL | Static x64 request, dispatch, CTL_CODE and NDIS/OID evidence
-Usage: resx ioctl <image> [--json] [-v]
-
-Examples:
-  resx ioctl .\J58.dll --verbose --out ioctl.txt
-  resx ioctl .\driver.sys --json
-
-Reports bounded request arguments, producer relationships, CTL_CODE candidates,
-dispatch assignments and known NDIS/OID layouts. No driver is loaded and no IOCTL
-is sent."
-        }
         "inspect" => {
             r"INSPECT | PE headers, exports, imports and symbols
   peinfo / sections / pechk    Metadata, section layout, anomalies
@@ -617,19 +425,21 @@ is sent."
 
 Examples:
   resx peinfo .\driver.sys
-  resx eat .\J58.dll --json
+  resx eat .\sample.dll --json
   resx types .\driver.sys DEVICE_OBJECT --pdb .\driver.pdb"
         }
         "code" => {
             r"CODE | Disassembly and control flow
   dump                        Disassemble by name, RVA or ordinal
+  calls                       Recursive API call tree, filterable by import source
   xrefs / callers             Incoming references and reverse callers
   cfg / reconstruct-cfg       Function graph and image startup flow
 
 Examples:
   resx dump kernel32.dll CreateFileW --recomp
   resx dump .\sample.exe --at 0x1200 --bytes
-  resx cfg .\J58.dll --ordinal 1
+  resx calls .\agent.exe main --depth 4 --only winapi
+  resx cfg .\sample.dll --ordinal 1
   resx callers ntdll.dll NtOpenProcess --depth 2"
         }
         "evidence" => {
@@ -642,7 +452,7 @@ Examples:
 
 Examples:
   resx driver .\driver.sys --json
-  resx ioctl .\J58.dll --verbose
+  resx ioctl .\sample.dll --verbose
   resx network .\sample.exe --json --out endpoints.json
   resx yara .\sample.exe .\rules.yar
 
@@ -654,7 +464,7 @@ Static findings do not prove execution, live peers or C2 activity."
   patch                       Apply a checked byte patch to a new image
 
 Examples:
-  resx payload .\blob.bin --payload-dir .\decoded --codec zlib --json
+  resx payload .\blob.bin --out-dir .\decoded --codec zlib --json
   resx patch .\sample.exe rva:0x1200 "90 90" --dry-run
 
 Payload decoding is bounded and records hashes for each transform layer. Patching
@@ -674,25 +484,28 @@ Examples:
   resx scan .\drivers --jsonl --max-files 100"
         }
         "options" => {
-            r"OPTIONS | Shared output, symbol and saved preference flags
+            r"OPTIONS | Output options shared by every command, and option groups
+Output (every command, before or after it):
   --json                      Structured output
-  --out <file>                Save output; evidence commands require a new file
+  --out, -o <file>            Save output; evidence commands require a new file
   --verbose, -v               Coverage and diagnostics on stderr
+  --quiet, -q                 Suppress optional diagnostics; overrides verbose
   --diagnostic                DEBUG developer trace on stderr; implies --verbose
   --diagnostic-trace          Include bounded TRACE events; implies --diagnostic
   --disasm-context <4..32>    Instructions per verbose evidence window (default 12)
   --debug-report <report.zip> Sanitized reproducibility bundle
   --debug-report-include-target  Explicitly include target bytes (64 MiB cap)
-  --analysis-budget <n|unlimited>  Alias for --max-insns
-  --cfg-budget <n|unlimited>  Alias for --max-total
   --time                      Print command completion time on stderr
-  --quiet, -q                 Suppress optional diagnostics; overrides verbose
-  --no-color                  Disable terminal colors
-  --no-pdb                    Disable symbol loading
-  --pdb <file>                Use an explicit local PDB
-  --path <dir>                Add an image lookup directory
-  --max-subcalls <n>          Cap calls rendered per function
-  --driver-flow               Add driver dispatch contracts to CFG output
+  --color, --no-color         Force or disable terminal colors
+
+Option groups (each command lists the groups it takes under `resx help <command>`):
+  Image lookup                --path, --no-system, --no-cwd, --no-path, --arch, --rebase
+  Symbols                     --pdb, --sym-path, --sym-server, --reload, --no-pdb
+  Target                      <TARGET>, --at, --ordinal
+  Analysis                    --max-insns, --max-total, --hostile
+  Listing                     --bytes, --nodis, --ssa, --rva, --offset, ...
+  Call tree                   --calls, --calls-only, --calls-exclude, --max-subcalls
+  Search scope                --include-dir, --include-image, --scope-file, ...
 
 Slash form:
   /dump, /json, /out:file and every other long option are accepted.
@@ -704,10 +517,8 @@ Function macros:
   resx config --entry-macro ep --rentry-macro realep
 
 Examples:
-  resx contracts .\J58.dll --json -v --out contracts.json
-  resx peinfo .\driver.sys --json -q
-
-Command-specific flags: resx help dump, resx help payload, etc."
+  resx contracts .\sample.dll --json -v --out contracts.json
+  resx peinfo .\driver.sys --json -q"
         }
         _ => return None,
     })
@@ -715,8 +526,9 @@ Command-specific flags: resx help dump, resx help payload, etc."
 
 #[cfg(test)]
 mod tests {
+    use super::examples::command_help;
     use super::{
-        all_help, help_topic, is_help_request, normalize_cli_syntax, preprocess_args, section_help,
+        all_help, help_topic, is_help_request, normalize_cli_syntax, prepare_args, section_help,
     };
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -724,22 +536,23 @@ mod tests {
     }
 
     #[test]
-    fn help_all_contains_commands_subcommands_and_operator_flags() {
+    fn help_all_lists_every_command_and_its_options() {
         let help = all_help();
         for required in [
             "COMPLETE COMMAND REFERENCE",
             "reconstruct-cfg",
             "--diagnostic-trace",
             "--max-insns",
-            "--yara",
-            "INTERNAL COMMAND-ROUTING FLAGS",
+            "Usage: resx calls",
+            "--only <TERMS>",
         ] {
             assert!(help.contains(required), "missing {required}");
         }
+        assert!(!help.contains("implicit"));
     }
 
     #[test]
-    fn slash_commands_and_options_normalize_without_touching_paths() {
+    fn slash_options_resolve_against_the_command_being_run() {
         let normalized = normalize_cli_syntax(&args(&[
             "resx",
             "/dump",
@@ -765,9 +578,35 @@ mod tests {
                 "--json",
             ])
         );
+        // `limit` is the strings cap under `strings`, not the dump instruction budget.
+        assert_eq!(
+            normalize_cli_syntax(&args(&["resx", "/strings", "a.dll", "/limit:5"])),
+            args(&["resx", "strings", "a.dll", "--limit", "5"])
+        );
         assert_eq!(
             normalize_cli_syntax(&args(&["resx", "/not-a-command/path"])),
             args(&["resx", "/not-a-command/path"])
+        );
+    }
+
+    #[test]
+    fn bare_image_forms_run_through_the_implicit_command() {
+        assert_eq!(
+            prepare_args(&args(&["resx", "kernel32.dll", "CreateFileW"])),
+            args(&["resx", "implicit", "kernel32.dll", "CreateFileW"])
+        );
+        assert_eq!(
+            prepare_args(&args(&["resx", "OpenProcess"])),
+            args(&["resx", "implicit", "OpenProcess"])
+        );
+        assert_eq!(
+            prepare_args(&args(&["resx", "DUMP", "a.dll", "x"])),
+            args(&["resx", "dump", "a.dll", "x"])
+        );
+        // A typo stays a typo so clap can suggest the command.
+        assert_eq!(
+            prepare_args(&args(&["resx", "dumpp", "a.dll"])),
+            args(&["resx", "dumpp", "a.dll"])
         );
     }
 
@@ -779,26 +618,20 @@ mod tests {
     }
 
     #[test]
-    fn exact_command_help_is_distinct_and_documents_its_flags() {
-        let driver = section_help("driver").unwrap();
-        let ioctl = section_help("ioctl").unwrap();
-        let strings = section_help("strings").unwrap();
+    fn command_help_is_distinct_and_generates_its_options() {
+        let driver = command_help("driver").unwrap();
+        let ioctl = command_help("ioctl").unwrap();
+        let strings = command_help("strings").unwrap();
         assert_ne!(driver, ioctl);
-        assert!(driver.starts_with("DRIVER |"));
-        assert!(ioctl.starts_with("IOCTL |"));
-        assert!(strings.contains("--strings-encoding"));
-        assert!(strings.contains("--strings-raw-wide"));
-    }
-
-    #[test]
-    fn yara_shorthand_preserves_one_image_and_routes_rules_as_options() {
-        let args = ["resx", "yara", "sample.exe", "rules.yar", "--json"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            preprocess_args(&args),
-            ["resx", "sample.exe", "--yara", "rules.yar", "--json"]
+        assert!(driver.contains("DRIVER |"));
+        assert!(ioctl.contains("IOCTL |"));
+        assert!(strings.contains("--encoding"));
+        assert!(strings.contains("--raw-wide"));
+        assert!(
+            !strings.contains("--max-insns"),
+            "options are scoped per command"
         );
+        assert!(command_help("funcs").unwrap().contains("Usage: resx calls"));
+        assert!(section_help("options").unwrap().contains("Call tree"));
     }
 }

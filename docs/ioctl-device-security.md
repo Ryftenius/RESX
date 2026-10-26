@@ -41,7 +41,12 @@ Security evidence is separated into:
   Windows only permits identification. This does not test an open, mandatory integrity,
   or the driver's create/dispatch policy. Zero-access remains unknown in this mode.
 
-The token identity/elevation/integrity and individual errors are reported. No suitable
+Text output summarizes the token, SDDL and access probes without diagnostic tables.
+The `User-access test token` label identifies the non-elevated access test, not
+the process privileges used for the earlier SDDL lookup.
+`--verbose` adds numeric errors, descriptor provenance and detailed limitations;
+`--json` retains the complete evidence. Access denied does not imply elevation
+will resolve it. No suitable
 token, denied metadata access, unknown device associations and unsupported queries stay
 unknown. An internal-device-control route is not a direct user `DeviceIoControl` route.
 Even an allowed open does not prove that the driver accepts a particular IOCTL.

@@ -194,7 +194,7 @@ Use CLI flag names in snake_case or kebab-case:
   "json": true,
   "quiet": true,
   "no_pdb": true,
-  "funcs_depth": 2,
+  "calls": 2,
   "cfg_view": "text",
   "show_strings": true,
   "show_xrefs": true
@@ -214,9 +214,9 @@ RESX maps common FFI option aliases:
 | `diff_max_functions` | `--max-functions` |
 | `left_pdb_file` | `--left-pdb` |
 | `right_pdb_file` | `--right-pdb` |
-| `cfg_diff_target` | `--show-cfg-diff` |
-| `cfg_diff_format` | `--cfg-diff-format` |
-| `cfg_diff_out` | `--cfg-diff-out` |
+| `cfg_diff_target` | `--show-cfg` |
+| `cfg_diff_format` | `--cfg-format` |
+| `cfg_diff_out` | `--cfg-out` |
 | `corpus_db` | `--db` |
 | `scan_extensions` | `--extensions` |
 | `scan_dirs` | `--include-dir` |
@@ -230,6 +230,8 @@ RESX maps common FFI option aliases:
 Other keys are converted from underscores to kebab-case. For example, `max_total` becomes `--max-total`.
 
 Boolean `true` adds a flag. Boolean `false` and `null` omit it. Strings and numbers add `--flag value`. Arrays repeat the flag.
+
+CLI options are scoped per command, but one options object can be shared across typed calls. Each call receives only the keys its command takes, so `{"no_pdb": true, "max_functions": 256}` works for both `ResxPeInfo` and `ResxDiff`. A key that no command takes, such as a misspelling, fails with `RSX_STATUS_INVALID_OPTIONS`. Raw `cli_args` are passed through unfiltered and must be valid for the command. Option names from earlier releases, such as `funcs_depth`, are still accepted; see [CLI earlier spellings](cli.md#earlier-spellings).
 
 Reserved meta keys:
 

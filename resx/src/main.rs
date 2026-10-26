@@ -6,13 +6,14 @@ use rayon::ThreadPoolBuilder;
 
 use resx_ffi as resx;
 
+use resx::cli::args::parse_cli;
 use resx::cli::help::{
-    example_topic, help_topic, is_help_request, is_version_request, normalize_cli_syntax,
-    preprocess_args, print_examples, print_usage, product_banner,
+    help_topic, is_help_request, is_version_request, normalize_cli_syntax, prepare_args,
+    print_examples, print_usage, product_banner,
 };
 use resx::cli::router::dispatch;
 use resx::core::color::{enable_windows_ansi, is_terminal, Colors};
-use resx::core::config::{parse_cli, Config};
+use resx::core::config::Config;
 use resx::core::diagnostic::Severity;
 
 fn main() {
@@ -32,9 +33,11 @@ fn main() {
         return;
     }
 
-    let cli = parse_cli(preprocess_args(&raw_args)).unwrap_or_else(|error| error.exit());
+    let (command, cli) = parse_cli(prepare_args(&raw_args))
+        .unwrap_or_else(|error| error.exit())
+        .lower();
     if cli.example {
-        print_examples(example_topic(&raw_args, &cli));
+        print_examples(command.name());
         return;
     }
 
@@ -52,10 +55,7 @@ fn main() {
         color,
     );
     resx::diagnostic_event!(Severity::Info, "cli", "operation.start")
-        .field(
-            "command",
-            raw_args.get(1).map(String::as_str).unwrap_or("dump"),
-        )
+        .field("command", command.name())
         .field("argc", raw_args.len())
         .field("version", env!("CARGO_PKG_VERSION"))
         .field("commit", resx::core::diagnostic::BUILD_COMMIT)
@@ -74,7 +74,7 @@ fn main() {
         )
         .emit("parsed command line and started operation");
 
-    let cfg = Config::from_cli(&cli, color);
+    let cfg = Config::from_options(&cli, color);
     let terminal_c = Colors::new(color && !cfg.json);
     let c = Colors::new(color && !cfg.json && cfg.out_file.is_empty());
     if cfg.workers > 0 {
@@ -88,12 +88,10 @@ fn main() {
     let mut file_handle: Option<BufWriter<File>> = None;
 
     let w: &mut dyn Write = if !cfg.out_file.is_empty() {
-        let evidence_output = raw_args.get(1).is_some_and(|arg| {
-            matches!(
-                arg.to_ascii_lowercase().as_str(),
-                "payload" | "contracts" | "ipc" | "network" | "crypto" | "strings" | "yara"
-            )
-        });
+        let evidence_output = matches!(
+            command.name(),
+            "payload" | "contracts" | "ipc" | "network" | "crypto" | "strings" | "yara"
+        );
         let opened = if evidence_output {
             std::fs::OpenOptions::new()
                 .write(true)
@@ -128,7 +126,7 @@ fn main() {
         eprintln!(
             "{} command={} input={} json={} symbols_disabled={}",
             terminal_c.label("RESX:"),
-            terminal_c.value(raw_args.get(1).map(String::as_str).unwrap_or("dump")),
+            terminal_c.value(command.name()),
             terminal_c.value(&format!("{:?}", cfg.dll)),
             terminal_c.value(&cfg.json.to_string()),
             terminal_c.value(&cfg.no_pdb.to_string())
@@ -140,7 +138,7 @@ fn main() {
     }
 
     let dispatch_started = Instant::now();
-    if let Err(e) = dispatch(&raw_args, &cli, &cfg, w, &c) {
+    if let Err(e) = dispatch(&command, &cli, &cfg, w, &c) {
         resx::diagnostic_event!(Severity::Error, "cli.dispatch", "operation.failed")
             .field("duration_us", dispatch_started.elapsed().as_micros())
             .field("reason", &e)

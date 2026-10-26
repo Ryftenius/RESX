@@ -12,9 +12,9 @@ use std::io::Write;
 use std::sync::OnceLock;
 
 use self::callmap::{
-    best_symbol_name_for_rva, print_api_calls, recover_local_switch_dispatch, render_api_call_tree,
-    resolve_syscall_call_details, switch_dispatch_to_api_calls, synthetic_syscall_api_call,
-    QsiDispatcher,
+    best_symbol_name_for_rva, build_api_call_tree, print_api_calls, recover_local_switch_dispatch,
+    render_api_call_tree, resolve_syscall_call_details, switch_dispatch_to_api_calls,
+    synthetic_syscall_api_call, QsiDispatcher,
 };
 use self::json::{
     hex_bytes, to_anomaly_json, to_data_summary_json, to_edr_json, to_section_json,

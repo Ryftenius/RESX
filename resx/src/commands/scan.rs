@@ -9,7 +9,7 @@ use crate::analysis::discovery::discover_functions;
 use crate::analysis::indirect::analyze_indirect_flow;
 use crate::analysis::symbols::display_symbol_name;
 use crate::analysis::symbols::SymbolIndex;
-use crate::core::config::{Cli, Config};
+use crate::core::config::{Config, Options};
 use crate::formats::pe::{
     find_startup_routines, parse_pe, read_data_summary, read_debug_info, read_exports,
     read_imports, read_load_config, Export, ImportDll, PeFile,
@@ -86,20 +86,20 @@ struct FuzzManifestEntry {
     seed_hint: String,
 }
 
-pub fn run(cli: &Cli, w: &mut dyn Write) -> Result<(), String> {
-    let root = cli
+pub fn run(options: &Options, w: &mut dyn Write) -> Result<(), String> {
+    let root = options
         .scan_root
         .as_deref()
         .ok_or_else(|| "Use `resx scan <path> [--jsonl]`".to_owned())?;
     let root = PathBuf::from(root);
-    let extensions = parse_extensions(&cli.scan_extensions);
-    let max_file_bytes = cli.max_file_mb.saturating_mul(1024 * 1024);
-    let paths = collect_image_paths(&root, &extensions, cli.max_files, max_file_bytes)?;
-    let cfg = Config::from_cli(cli, false);
+    let extensions = parse_extensions(&options.scan_extensions);
+    let max_file_bytes = options.max_file_mb.saturating_mul(1024 * 1024);
+    let paths = collect_image_paths(&root, &extensions, options.max_files, max_file_bytes)?;
+    let cfg = Config::from_options(options, false);
 
     let mut results: Vec<ImageScanReport> = paths
         .par_iter()
-        .filter_map(|path| scan_one(path, cli.max_candidates, &cfg).ok())
+        .filter_map(|path| scan_one(path, options.max_candidates, &cfg).ok())
         .collect();
     results.sort_by(|a, b| {
         b.risk_score
@@ -107,7 +107,7 @@ pub fn run(cli: &Cli, w: &mut dyn Write) -> Result<(), String> {
             .then_with(|| a.path.cmp(&b.path))
     });
 
-    if cli.jsonl {
+    if options.jsonl {
         for result in &results {
             let line = serde_json::to_string(result).map_err(|e| format!("json: {}", e))?;
             writeln!(w, "{}", line).ok();

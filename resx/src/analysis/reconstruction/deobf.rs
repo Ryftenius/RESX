@@ -54,7 +54,7 @@ pub fn analyze_deobf(image: &str, pe: Option<&PeFile>, raw: &[u8], limit: usize)
     let next_steps = vec![
         "Use decoded previews as search terms with `resx strings <image> --interesting`.".to_owned(),
         "For XOR hits, carve a small range around the offset and confirm the key against surrounding bytes.".to_owned(),
-        "For code hints, dump the RVA with `resx dump <image> --at <rva> --hostile --strings --funcs`.".to_owned(),
+        "For code hints, dump the RVA with `resx dump <image> --at <rva> --hostile --strings --calls`.".to_owned(),
     ];
     DeobfReport {
         image: image.to_owned(),

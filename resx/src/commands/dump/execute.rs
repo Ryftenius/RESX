@@ -614,6 +614,9 @@ fn run_with_chain(
         cfg,
     )
     .unwrap_or(linear_insns);
+    // Reachable recovery stitches separately decoded blocks; label loads whose trap
+    // landed in a different block.
+    crate::analysis::disasm::annotate_syscall_numbers(&mut insns);
     if cfg.ssa {
         crate::analysis::reconstruction::dataflow::annotate(&mut insns, arch);
     }
@@ -734,8 +737,8 @@ fn run_with_chain(
     } else {
         Vec::new()
     };
-    let api_call_tree = if cfg.funcs_depth > 0 {
-        render_api_call_tree(
+    let call_tree = if cfg.funcs_depth > 0 {
+        Some(build_api_call_tree(
             &api_calls,
             &insns,
             &resolved_name,
@@ -748,10 +751,14 @@ fn run_with_chain(
             image_base,
             cfg,
             target_rva,
-        )
+        ))
     } else {
-        String::new()
+        None
     };
+    let api_call_tree = call_tree
+        .as_ref()
+        .map(|tree| render_api_call_tree(tree, cfg))
+        .unwrap_or_default();
     let current_syscall = synthetic_syscall_api_call(&insns, &resolved_name, &dll_name)
         .and_then(|call| resolve_syscall_call_details(&call, &insns, cfg));
     let prototype = symbol_index
@@ -1025,22 +1032,9 @@ fn run_with_chain(
             }
         }
         if cfg.funcs_depth > 0 {
-            print_api_calls(
-                w,
-                &api_calls,
-                &insns,
-                &resolved_name,
-                &dll_name,
-                c,
-                &raw,
-                &pe,
-                &symbol_index,
-                &exports,
-                arch,
-                image_base,
-                cfg,
-                target_rva,
-            );
+            if let Some(tree) = &call_tree {
+                print_api_calls(w, tree, &resolved_name, c, cfg);
+            }
             let driver_report =
                 crate::analysis::driver::analyze_driver(&dll_name, &pe, &raw, &imports);
             super::super::driver::render_flow_contracts(w, c, &driver_report, cfg.max_subcalls);
@@ -1191,6 +1185,7 @@ fn run_with_chain(
             edrchk: edr_result.as_ref().map(to_edr_json),
             api_calls: api_calls
                 .iter()
+                .filter(|ac| call_tree.as_ref().is_none_or(|tree| tree.keeps_root(ac)))
                 .map(|ac| {
                     let syscall = resolve_syscall_call_details(ac, &insns, cfg).map(|details| {
                         self::json::SyscallJson {

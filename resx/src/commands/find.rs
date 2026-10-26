@@ -32,8 +32,7 @@ struct Report {
 pub fn run(image: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     if image.is_empty() || cfg.find_pattern.trim().is_empty() {
         return Err(
-            "Use `resx find <image> <query> [--find-mode raw|decoded|semantic] [--find-encoded]`"
-                .into(),
+            "Use `resx find <image> <query> [--mode raw|decoded|semantic] [--encoded]`".into(),
         );
     }
     let path = find_dll_path(image, cfg)?;
@@ -163,7 +162,7 @@ pub fn run(image: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(
             .ok();
         }
         if report.truncated {
-            writeln!(w, "{}", c.warn(&format!("search stopped at a bounded limit (instructions={}, matches={}); override with --find-budget <n|unlimited>", cfg.find_budget, MATCH_BUDGET))).ok();
+            writeln!(w, "{}", c.warn(&format!("search stopped at a bounded limit (instructions={}, matches={}); override with --budget <n|unlimited>", cfg.find_budget, MATCH_BUDGET))).ok();
         }
         if cfg.verbose {
             writeln!(

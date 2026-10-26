@@ -35,8 +35,7 @@ pub fn run(
 
     if !cfg.cfg_diff_target.is_empty() && diff_paths.len() != 2 {
         return Err(
-            "CFG diff targets are pair-specific; use exactly two images with --show-cfg-diff"
-                .to_owned(),
+            "CFG diff targets are pair-specific; use exactly two images with --show-cfg".to_owned(),
         );
     }
 
@@ -155,7 +154,7 @@ fn emit_multi_heatmap(
             .map_err(|e| format!("serialize multi diff heatmap: {e}"))?,
         other => {
             return Err(format!(
-                "unsupported --diff-graph-format `{other}`; use text, json, or dot"
+                "unsupported --graph-format `{other}`; use text, json, or dot"
             ))
         }
     };
@@ -170,7 +169,7 @@ fn render_heatmap_output(report: &DiffReport, cfg: &Config, c: &Colors) -> Resul
         "json" => serde_json::to_string_pretty(&versioned_object("diff_heatmap", &report.heatmap))
             .map_err(|e| format!("serialize diff heatmap: {e}")),
         other => Err(format!(
-            "unsupported --diff-graph-format `{other}`; use text, json, or dot"
+            "unsupported --graph-format `{other}`; use text, json, or dot"
         )),
     }
     .map(|rendered| {

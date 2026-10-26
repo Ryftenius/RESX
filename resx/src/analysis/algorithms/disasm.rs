@@ -1,5 +1,6 @@
 mod api;
 mod strings;
+mod syscall_stub;
 mod xrefs;
 
 pub use api::{collect_api_calls, ApiCall};
@@ -8,6 +9,7 @@ use api::{
 };
 use strings::describe_string_address;
 pub use strings::find_string_refs;
+pub use syscall_stub::annotate_syscall_numbers;
 pub use xrefs::find_xrefs;
 
 use iced_x86::{
@@ -157,6 +159,31 @@ pub fn disassemble_at_unbounded(
     )
 }
 
+/// End of `func` extended over the chained unwind fragments laid out directly after
+/// it. MSVC shrink-wrapping opens a new .pdata entry where a nonvolatile register is
+/// first saved; that fragment chains back to the same function and is not a boundary.
+fn chained_runtime_end(
+    pe: &crate::formats::pe::PeFile,
+    raw: &[u8],
+    func: &crate::formats::pe::PeRuntimeFunctionInfo,
+) -> u32 {
+    let mut end_rva = func.end_rva;
+    for _ in 0..32 {
+        let Some(next) = crate::formats::pe::read_runtime_function(pe, raw, end_rva) else {
+            break;
+        };
+        let continues_function = next.begin_rva == end_rva
+            && next.chained_parent.as_ref().is_some_and(|parent| {
+                parent.begin_rva >= func.begin_rva && parent.begin_rva < end_rva
+            });
+        if !continues_function || next.end_rva <= end_rva {
+            break;
+        }
+        end_rva = next.end_rva;
+    }
+    end_rva
+}
+
 #[allow(clippy::too_many_arguments)]
 fn disassemble_at_inner(
     raw: &[u8],
@@ -194,7 +221,8 @@ fn disassemble_at_inner(
     let runtime_size = if honor_runtime_bounds {
         runtime_function
             .as_ref()
-            .and_then(|func| func.end_rva.checked_sub(start_rva))
+            .map(|func| chained_runtime_end(pe, raw, func))
+            .and_then(|end_rva| end_rva.checked_sub(start_rva))
             .map(|size| size as usize)
             .filter(|&size| size > 0)
     } else {
@@ -413,6 +441,7 @@ fn disassemble_at_inner(
         current_rva += i_len as u32;
     }
 
+    annotate_syscall_numbers(&mut insns);
     Ok(insns)
 }
 

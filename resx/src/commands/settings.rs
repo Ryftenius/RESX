@@ -1,19 +1,19 @@
 use crate::core::color::Colors;
-use crate::core::config::Cli;
+use crate::core::config::Options;
 use crate::core::preferences::{validate_macro, validate_style, Preferences, REGISTRY_PATH};
 use std::io::Write;
 
-pub fn run(cli: &Cli, output: &mut dyn Write, colors: &Colors) -> Result<(), String> {
+pub fn run(options: &Options, output: &mut dyn Write, colors: &Colors) -> Result<(), String> {
     let mut preferences = Preferences::load();
-    if let Some(style) = &cli.command_style {
+    if let Some(style) = &options.command_style {
         validate_style(style)?;
         preferences.command_style = style.to_ascii_lowercase();
     }
-    if let Some(name) = &cli.entry_macro {
+    if let Some(name) = &options.entry_macro {
         validate_macro(name)?;
         preferences.entry_macro = name.clone();
     }
-    if let Some(name) = &cli.rentry_macro {
+    if let Some(name) = &options.rentry_macro {
         validate_macro(name)?;
         preferences.rentry_macro = name.clone();
     }

@@ -2,6 +2,51 @@
 
 All notable public changes to RESX are recorded here.
 
+## Unreleased
+
+### Feature additions
+
+#### Disassembly and function recovery
+
+- Labeled the service-number load in syscall stubs (`mov eax, 0x18  ; syscall 0x18 (24)`) for x64 `syscall`/`int 0x2e` stubs, WoW64 `call edx` stubs, and kernel `Zw*` stubs that jump to `KiServiceInternal`, with or without symbols. win32k numbers show their table index (`syscall 0x1004 (win32k #4)`). The label replaces literal guesses such as `STATUS_SUCCESS` on the service number.
+
+#### CLI and output
+
+- Rebuilt the command line on per-command subcommands. Each command takes only the options it uses, an unused option is reported as an error, and mistyped commands and options get a suggestion.
+- Grouped shared options into named groups (Output, Image lookup, Symbols, Target, Analysis, Listing, Report sections, Call tree, Flow, Search scope, Matching) that appear under their own headings in command help.
+- Generated each command's options in `resx help <command>`, `resx <command> --help`, and `resx help all` from the parser itself, so help matches what a command accepts.
+- Dropped implied prefixes inside commands: `strings --min-len`, `entropy --window`, `find --mode`, `diff --mode --graph --show-cfg`, `payload --out-dir --offset`, `patch --bytes`. Earlier spellings remain accepted as aliases.
+- Accepted output options before or after the command, for example `resx --json dump <image> <target>`.
+- Resolved slash options against the command being run, so `/limit:5` is the result cap under `strings` and the instruction budget under `dump`.
+
+#### Call trees
+
+- Added `resx calls <image> <target>` for the recursive API call tree of one function, with `--depth`, `--only`, and `--exclude`.
+- Added call-tree filter terms `winapi`, `iat`, `internal`, `crt`, `syscall`, and DLL names (with optional extension and trailing `*` prefix). Non-matching internal calls stay as the path to matching ones; repeats of an expanded function are tagged `[expanded above]`.
+- Added `--calls [DEPTH]`, `--calls-only`, and `--calls-exclude` to `dump`, `xrefs`, `cfg`, and `intelli`.
+- Filtered JSON `api_calls` to the root calls that survive the call-tree filter.
+
+#### Native library and editor integration
+
+- Treated FFI `options_json` as a shared option bag: each typed call receives only the keys its command takes, and keys no command takes still fail with `RSX_STATUS_INVALID_OPTIONS`.
+
+### Accuracy and correctness fixes
+
+- Decoded functions across contiguous chained unwind fragments. MSVC shrink-wrapping opens a new `.pdata` entry where a nonvolatile register is first saved; decoding previously stopped there and dropped the rest of the function's calls.
+- Reported calls through linker import thunks (`jmp [__imp_X]`, emitted for headers without `dllimport` such as `bcrypt.h`) as the import instead of an internal function that walked the whole thunk table.
+- Stopped reporting unconditional jumps back into a function's own body as tail calls.
+- Built the API call tree once per dump instead of once for text and once for JSON, halving kernel-image loads for syscall tracing.
+- Fixed `resx --json dump <image> <target>` parsing `dump` as the image.
+
+### Removed or retired
+
+- Removed the internal routing switches (`--peinfo`, `--behavior`, `--entropy`, `--reconstruct-cfg`, `--follow-callers`, `--locate`, `--locate-sym`, `--patch`, `--priority`, `--update`, `--resx-find`, `--resx-scan`, `--resx-diff`, `--resx-index`, `--resx-hunt`, `--resx-config`, `--scan-root`). Use the command itself, for example `resx peinfo <image>`. `resx <image> <target>` and `resx <name>` still run `dump` and `locate`.
+
+### Validation additions
+
+- Validated call trees and API arguments, including callback targets and Windows constants.
+- Added call-tree filter tests, parser grammar and scoping tests, and a check that every earlier option spelling still parses.
+
 ## 2.0.0 - 2026-09-20
 
 ### Feature additions

@@ -1,6 +1,9 @@
 # RESX command reference
 
-`resx help all` is the authoritative generated list of commands and flags.
+`resx help all` is the authoritative generated list of commands and options, and
+`resx help <command>` shows one command's usage, examples and options. Options are
+scoped per command; see [docs/cli.md](docs/cli.md#option-groups) for the shared
+option groups.
 
 ## Inspection
 
@@ -19,6 +22,7 @@
 | Command | Purpose |
 | --- | --- |
 | `dump <image> [target]` | Targeted disassembly and optional C-like reconstruction |
+| `calls <image> <target>` | Recursive API call tree, filterable with `--only`/`--exclude` |
 | `xrefs <image> <target>` | Incoming references |
 | `cfg <image> <target>` | Function CFG |
 | `reconstruct-cfg <image>` | Startup and reachable image flow |
@@ -29,8 +33,9 @@
 Targets accept export/symbol names, `rva:0x...`, `va:0x...`,
 `file:0x...`, ordinals, and `image!symbol` syntax where applicable.
 
-`dump` omits opcode bytes unless `--hex` is supplied. Use `--nodis` to omit
-disassembly and `--verbose` for image and function-boundary details.
+`dump` omits opcode bytes unless `--bytes` is supplied. Use `--nodis` to omit
+disassembly and `--verbose` for image and function-boundary details. `--calls`,
+`--xrefs`, `--strings`, `--cfg text` and `--recomp` add report sections.
 
 ## Evidence
 
@@ -65,8 +70,8 @@ string, instruction, or configuration executed.
 
 | Command | Purpose |
 | --- | --- |
-| `payload <file>` | Bounded operator-directed codec/AES-CBC decoding |
-| `patch <image> <address> <bytes>` | Checked patch plan or new patched image |
+| `payload <file> --out-dir <dir>` | Bounded operator-directed codec/AES-CBC decoding |
+| `patch <image> <address> <hex>` | Checked patch plan or new patched image |
 
 Payload decoding records input/output hashes and enforces per-layer and aggregate
 limits. Patch supports expected-byte checks, dry-run mode, separate output paths,
@@ -77,13 +82,18 @@ and optional checksum updates.
 `priority`, `config`, `update`, and `symbols` manage local command behavior,
 priority search paths, source-checkout updates, and symbol settings.
 
-## Shared output
+## Shared options
 
-- `--json`, `--jsonl`, `--out <file>`
+Every command accepts the output options, before or after the command:
+
+- `--json`, `--out <file>`; `scan` also takes `--jsonl`
 - `--verbose`, `--diagnostic`, `--diagnostic-trace`, `--quiet`
 - `--color`, `--no-color`, `--time`
-- `--pdb`, `--no-pdb`, `--sym-path`, `--sym-server`, `--reload`
-- `--max-insns`, `--max-bytes`, `--depth`, and command-specific budgets
+
+Every command that reads an image also accepts the image lookup (`--path`,
+`--no-system`, ...) and symbol (`--pdb`, `--no-pdb`, `--sym-path`, `--sym-server`,
+`--reload`) options. Budgets such as `--max-insns`, `--max-total` and `--depth`, and
+every other option, belong to the commands that use them.
 
 `--diagnostic` implies verbose output. `--diagnostic-trace` selects TRACE
 developer events. Values are emitted at actual decision points and remain bounded.

@@ -3,7 +3,7 @@
 //! Explicit, bounded local transformations with a complete artifact ledger.
 use crate::analysis::codec;
 use crate::core::{
-    config::{Cli, Config},
+    config::{Config, Options},
     json::versioned_object,
 };
 use serde_json::json;
@@ -82,11 +82,12 @@ fn identify(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-pub fn run(cli: &Cli, cfg: &Config, output: &mut dyn Write) -> Result<(), String> {
+pub fn run(options: &Options, cfg: &Config, output: &mut dyn Write) -> Result<(), String> {
     let destination = destination(
-        cli.payload_dir
+        options
+            .payload_dir
             .as_deref()
-            .ok_or("payload requires --payload-dir <new-directory>")?,
+            .ok_or("payload requires --out-dir <new-directory>")?,
     )?;
     let source =
         std::fs::File::open(local_path(Path::new(&cfg.dll))?).map_err(|e| e.to_string())?;
@@ -101,8 +102,8 @@ pub fn run(cli: &Cli, cfg: &Config, output: &mut dyn Write) -> Result<(), String
     if raw.len() > codec::MAX_OUTPUT {
         return Err("Payload input exceeds 16 MiB".into());
     }
-    let start = usize::try_from(cli.payload_offset.unwrap_or(0)).map_err(|e| e.to_string())?;
-    let length = cli
+    let start = usize::try_from(options.payload_offset.unwrap_or(0)).map_err(|e| e.to_string())?;
+    let length = options
         .payload_length
         .map(usize::try_from)
         .transpose()
@@ -114,8 +115,10 @@ pub fn run(cli: &Cli, cfg: &Config, output: &mut dyn Write) -> Result<(), String
         .ok_or("Payload extent is outside the input")?
         .to_vec();
     let source_hash = crate::core::hash::sha256(&raw)?;
-    let requested = cli.codec.as_deref().unwrap_or("auto");
-    if requested != "aes-cbc" && (cli.key_file.is_some() || cli.iv_hex.is_some() || cli.pkcs7) {
+    let requested = options.codec.as_deref().unwrap_or("auto");
+    if requested != "aes-cbc"
+        && (options.key_file.is_some() || options.iv_hex.is_some() || options.pkcs7)
+    {
         return Err("Key, IV and padding options require --codec aes-cbc".into());
     }
     let mut layers = Vec::new();
@@ -143,7 +146,8 @@ pub fn run(cli: &Cli, cfg: &Config, output: &mut dyn Write) -> Result<(), String
                 }
             }
             let file = std::fs::File::open(local_path(Path::new(
-                cli.key_file
+                options
+                    .key_file
                     .as_deref()
                     .ok_or("AES-CBC requires --key-file with raw key bytes")?,
             ))?)
@@ -157,12 +161,13 @@ pub fn run(cli: &Cli, cfg: &Config, output: &mut dyn Write) -> Result<(), String
                 .map_err(|e| e.to_string())?;
             let iv = codec::decode(
                 "hex",
-                cli.iv_hex
+                options
+                    .iv_hex
                     .as_deref()
                     .ok_or("AES-CBC requires --iv-hex")?
                     .as_bytes(),
             )?;
-            crate::analysis::crypto_decode::aes_cbc(&bytes, &key.0, &iv, cli.pkcs7)?
+            crate::analysis::crypto_decode::aes_cbc(&bytes, &key.0, &iv, options.pkcs7)?
         } else {
             codec::decode(method, &bytes)?
         };

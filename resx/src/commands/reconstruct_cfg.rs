@@ -11,9 +11,7 @@ use crate::formats::pe::{find_startup_routines, parse_pe, read_exports, read_imp
 
 pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     if dll_arg.is_empty() {
-        return Err(
-            "Use `resx reconstruct-cfg <dll>` or `resx <dll> --reconstruct-cfg`".to_owned(),
-        );
+        return Err("Use `resx reconstruct-cfg <image>`".to_owned());
     }
 
     let dll_path = find_dll_path(dll_arg, cfg)?;

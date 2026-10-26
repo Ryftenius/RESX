@@ -68,6 +68,11 @@ fn emit_build_identity() {
         .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=RESX_GIT_COMMIT={commit}");
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    let short = &commit[..commit.len().min(12)];
+    println!("cargo:rustc-env=RESX_BUILD_ID=resx-{version}+{short}.{os}-{arch}");
 }
 
 #[cfg(windows)]

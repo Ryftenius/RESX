@@ -72,7 +72,7 @@ pub fn run(
     c: &Colors,
 ) -> Result<(), String> {
     if dll_arg.is_empty() {
-        return Err("Use `resx patch <image> --at <addr> --patch-bytes <hex>`".to_owned());
+        return Err("Use `resx patch <image> <addr> <hex>`".to_owned());
     }
 
     let address_spec = if !cfg.at_rva.is_empty() {
@@ -93,7 +93,7 @@ pub fn run(
     if let Some(expected) = expected_bytes.as_ref() {
         if expected.len() != patch_bytes.len() {
             return Err(format!(
-                "--expect length ({}) must match --patch-bytes length ({})",
+                "--expect length ({}) must match the replacement length ({})",
                 expected.len(),
                 patch_bytes.len()
             ));
@@ -252,7 +252,7 @@ fn patch_bytes_spec(func_arg: &str, cfg: &Config) -> Result<String, String> {
         pieces.extend(cfg.extra_diff_images.iter().cloned());
         return Ok(pieces.join(" "));
     }
-    Err("patch requires --patch-bytes <hex>".to_owned())
+    Err("patch requires replacement bytes: `resx patch <image> <addr> <hex>`".to_owned())
 }
 
 fn print_patch_report(report: &PatchReport, w: &mut dyn Write, c: &Colors) {

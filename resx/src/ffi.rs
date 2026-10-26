@@ -11,13 +11,14 @@ use rayon::ThreadPoolBuilder;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::cli::args::parse_cli;
 use crate::cli::help::{
-    is_help_request, is_version_request, normalize_cli_syntax, preprocess_args, product_banner,
+    is_help_request, is_version_request, normalize_cli_syntax, prepare_args, product_banner,
     version_string,
 };
 use crate::cli::router::dispatch;
 use crate::core::color::Colors;
-use crate::core::config::{parse_cli, Config};
+use crate::core::config::Config;
 use crate::core::json::SCHEMA_VERSION;
 
 const RSX_STATUS_OK: c_int = 0;
@@ -109,6 +110,7 @@ pub extern "C" fn ResxRunCommandJson(
             let mut args = normalized.iter().skip(2).cloned().collect::<Vec<_>>();
             if request.options.is_some() {
                 append_options(
+                    &command,
                     &mut args,
                     request.options.as_ref(),
                     command_supports_json(&command),
@@ -133,6 +135,7 @@ pub extern "C" fn ResxRunCommandJson(
                 .to_owned();
             let mut args = request.args.unwrap_or_default();
             append_options(
+                &command,
                 &mut args,
                 request.options.as_ref(),
                 command_supports_json(&command),
@@ -443,7 +446,7 @@ pub extern "C" fn ResxCfgDiff(
         let args = vec![
             left,
             right,
-            "--show-cfg-diff".to_owned(),
+            "--show-cfg".to_owned(),
             target,
             "--cfg-diff-format".to_owned(),
             "json".to_owned(),
@@ -671,7 +674,7 @@ fn run_typed(
     default_json: bool,
 ) -> Result<String, FfiError> {
     let options = read_options_json(options_json)?;
-    append_options(&mut args, options.as_ref(), default_json)?;
+    append_options(command, &mut args, options.as_ref(), default_json)?;
     let mut raw_args = vec!["resx".to_owned(), command.to_owned()];
     raw_args.extend(args.iter().cloned());
     run_enveloped(&raw_args, command, &args)
@@ -708,10 +711,10 @@ fn run_cli_capture(raw_args: &[String]) -> Result<CapturedRun, FfiError> {
         });
     }
 
-    let parsed_args = preprocess_args(&raw_args);
-    let cli = parse_cli(parsed_args)
-        .map_err(|e| FfiError::new(RSX_STATUS_INVALID_OPTIONS, e.to_string().trim().to_owned()))?;
-    let cfg = Config::from_cli(&cli, false);
+    let (command, options) = parse_cli(prepare_args(&raw_args))
+        .map_err(|e| FfiError::new(RSX_STATUS_INVALID_OPTIONS, e.to_string().trim().to_owned()))?
+        .lower();
+    let cfg = Config::from_options(&options, false);
     if cfg.workers > 0 {
         RAYON_INIT.call_once(|| {
             let _ = ThreadPoolBuilder::new()
@@ -722,7 +725,7 @@ fn run_cli_capture(raw_args: &[String]) -> Result<CapturedRun, FfiError> {
 
     let c = Colors::new(false);
     let mut out = Vec::new();
-    dispatch(&raw_args, &cli, &cfg, &mut out, &c)
+    dispatch(&command, &options, &cfg, &mut out, &c)
         .map_err(|e| FfiError::new(RSX_STATUS_EXECUTION_ERROR, e))?;
     if cfg.verbose && !cfg.json {
         let elapsed = started.elapsed();
@@ -744,7 +747,10 @@ fn run_cli_capture(raw_args: &[String]) -> Result<CapturedRun, FfiError> {
     })
 }
 
+/// Appends `options_json` as flags. The object is a shared option bag: keys that only
+/// other commands take are skipped, while keys no command takes still fail to parse.
 fn append_options(
+    command: &str,
     args: &mut Vec<String>,
     options: Option<&Value>,
     default_json: bool,
@@ -774,7 +780,9 @@ fn append_options(
     };
 
     for (key, value) in map {
-        if is_option_meta_key(key) {
+        if is_option_meta_key(key)
+            || crate::cli::help::command_takes_option(command, &ffi_flag_name(key)) == Some(false)
+        {
             continue;
         }
         append_option_value(args, key, value)?;
@@ -882,9 +890,9 @@ fn ffi_flag_name(key: &str) -> String {
         "diff_max_functions" => "max-functions",
         "left_pdb_file" => "left-pdb",
         "right_pdb_file" => "right-pdb",
-        "cfg_diff_target" => "show-cfg-diff",
-        "cfg_diff_format" => "cfg-diff-format",
-        "cfg_diff_out" => "cfg-diff-out",
+        "cfg_diff_target" => "show-cfg",
+        "cfg_diff_format" => "cfg-format",
+        "cfg_diff_out" => "cfg-out",
         "corpus_db" => "db",
         "scan_extensions" => "extensions",
         "scan_dirs" => "include-dir",

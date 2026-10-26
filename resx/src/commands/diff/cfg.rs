@@ -14,7 +14,7 @@ pub(super) fn render_cfg_diff(
         "text" | "" => Ok(render_cfg_diff_text(report, c)),
         "dot" | "graphviz" => Ok(render_cfg_diff_dot(report)),
         other => Err(format!(
-            "unsupported --cfg-diff-format `{other}`; use text, json, or dot"
+            "unsupported --cfg-format `{other}`; use text, json, or dot"
         )),
     }
 }

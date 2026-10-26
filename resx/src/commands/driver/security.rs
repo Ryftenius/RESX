@@ -414,52 +414,6 @@ mod windows {
         }
         result
     }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        #[test]
-        fn dacl_evaluation_distinguishes_allow_deny_and_unperformed_opens() {
-            let mut process_token = null_mut();
-            // SAFETY: current process is valid and output slots own pointer-sized writable storage.
-            assert_ne!(
-                unsafe { OpenProcessToken(GetCurrentProcess(), 0x000a, &mut process_token) },
-                0
-            );
-            let process_token = Owned(process_token);
-            let mut token = null_mut();
-            // SAFETY: process_token is live and token is a writable handle output.
-            assert_ne!(unsafe { DuplicateToken(process_token.0, 1, &mut token) }, 0);
-            let token = Owned(token);
-            let mut report = LiveSecurity {
-                sddl: Some("O:SYG:SYD:(D;;0x2;;;WD)(A;;0x1;;;WD)".into()),
-                ..Default::default()
-            };
-            dacl_probes(&mut report, token.0);
-            assert_eq!(
-                report
-                    .user_open_probes
-                    .iter()
-                    .map(|p| p.dacl_allowed)
-                    .collect::<Vec<_>>(),
-                [None, Some(true), Some(false), Some(false)]
-            );
-            assert!(report
-                .user_open_probes
-                .iter()
-                .all(|p| p.opened.is_none() && p.win32_error.is_none()));
-        }
-        #[test]
-        fn relative_descriptor_validator_rejects_out_of_buffer_offsets() {
-            let mut data = [0u32; 5];
-            data[0] = 0x80000001; // revision 1, self-relative, no components
-            data[1] = 0xfffffff0; // owner outside returned bytes
-                                  // SAFETY: the length-aware validator receives a live aligned 20-byte buffer.
-            assert_eq!(
-                unsafe { RtlValidRelativeSecurityDescriptor(data.as_ptr().cast(), 20, 7) },
-                0
-            );
-        }
-    }
     pub(super) fn query(report: &mut LiveSecurity) {
         if cfg!(target_pointer_width = "32") {
             report.error = Some("Live device security currently requires Windows x64".into());
@@ -594,6 +548,49 @@ mod windows {
                     win32_error: Some(error),
                 }),
             }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn dacl_evaluation_distinguishes_allow_deny_and_unperformed_opens() {
+            let mut process_token = null_mut();
+            // SAFETY: current process is valid and output slots own pointer-sized writable storage.
+            let opened =
+                unsafe { OpenProcessToken(GetCurrentProcess(), 0x000a, &mut process_token) };
+            assert_ne!(opened, 0);
+            let process_token = Owned(process_token);
+            let mut token = null_mut();
+            // SAFETY: process_token is live and token is a writable handle output.
+            assert_ne!(unsafe { DuplicateToken(process_token.0, 1, &mut token) }, 0);
+            let token = Owned(token);
+            let mut report = LiveSecurity {
+                sddl: Some("O:SYG:SYD:(D;;0x2;;;WD)(A;;0x1;;;WD)".into()),
+                ..Default::default()
+            };
+            dacl_probes(&mut report, token.0);
+            assert_eq!(
+                report
+                    .user_open_probes
+                    .iter()
+                    .map(|p| p.dacl_allowed)
+                    .collect::<Vec<_>>(),
+                [None, Some(true), Some(false), Some(false)]
+            );
+            assert!(report
+                .user_open_probes
+                .iter()
+                .all(|p| p.opened.is_none() && p.win32_error.is_none()));
+        }
+        #[test]
+        fn relative_descriptor_validator_rejects_out_of_buffer_offsets() {
+            let mut data = [0u32; 5];
+            data[0] = 0x80000001; // revision 1, self-relative, no components
+            data[1] = 0xfffffff0; // owner outside returned bytes
+                                  // SAFETY: the length-aware validator receives a live aligned 20-byte buffer.
+            let valid = unsafe { RtlValidRelativeSecurityDescriptor(data.as_ptr().cast(), 20, 7) };
+            assert_eq!(valid, 0);
         }
     }
 }

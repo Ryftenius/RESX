@@ -40,8 +40,18 @@ pub(super) fn render(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbos
         )
         .ok();
     }
-    writeln!(w,"Route: external = user DeviceIoControl channel; internal = kernel internal-device-control channel. Neither establishes a successful request.").ok();
-    writeln!(w,"Device IDs are candidates sharing the recovered DRIVER_OBJECT, not proven per-code targets. '-' means unresolved.").ok();
+    writeln!(
+        w,
+        "Route: external = DeviceIoControl; internal = kernel-only device control."
+    )
+    .ok();
+    if !report.devices.endpoints.is_empty() {
+        writeln!(
+            w,
+            "Device IDs are static candidates, not proven per-code targets; '-' = unresolved."
+        )
+        .ok();
+    }
     if !report.devices.endpoints.is_empty() {
         writeln!(w, "\n{}", c.bold("Device endpoints — static declarations")).ok();
         let rows: Vec<_> = report
@@ -107,7 +117,10 @@ pub(super) fn render(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbos
             c,
         );
     } else {
-        writeln!(w,"No device creation arguments recovered; effective SDDL and device routing remain unknown. Use --device-security PATH for an explicit live endpoint lookup.").ok();
+        writeln!(w, "Static device mapping: unresolved.").ok();
+        if report.live_security.is_none() {
+            writeln!(w, "Use --device-security PATH to inspect a live endpoint.").ok();
+        }
     }
     if verbose && !report.devices.symbolic_links.is_empty() {
         let links: Vec<_> = report
@@ -125,89 +138,7 @@ pub(super) fn render(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbos
         crate::core::table::print(w, &["Declared link", "Target", "Site RVA"], &links, c);
     }
     if let Some(live) = &report.live_security {
-        writeln!(
-            w,
-            "\n{}",
-            c.bold("Live endpoint security and access evidence")
-        )
-        .ok();
-        let rows = vec![
-            vec!["Requested endpoint".into(), live.requested_path.clone()],
-            vec![
-                "Object name".into(),
-                live.object_name.clone().unwrap_or_else(|| "unknown".into()),
-            ],
-            vec![
-                "DOS mapping".into(),
-                live.dos_target
-                    .clone()
-                    .unwrap_or_else(|| "not resolved/applicable".into()),
-            ],
-            vec![
-                "Static name matches".into(),
-                if live.matched_endpoint_ids.is_empty() {
-                    "none; no association with this image established".into()
-                } else {
-                    live.matched_endpoint_ids.join(", ")
-                },
-            ],
-            vec![
-                "Token tested".into(),
-                format!(
-                    "{}; elevated={:?}; integrity RID={:?}",
-                    live.token, live.token_elevated, live.token_integrity_rid
-                ),
-            ],
-            vec![
-                "SDDL (owner/group/DACL)".into(),
-                live.sddl.clone().unwrap_or_else(|| "unknown".into()),
-            ],
-            vec!["Descriptor source".into(), live.descriptor_source.clone()],
-        ];
-        crate::core::table::print(w, &["Property", "Observed value"], &rows, c);
-        let probes: Vec<_> = live
-            .user_open_probes
-            .iter()
-            .map(|p| {
-                vec![
-                    match p.access {
-                        0 => "ANY (no data right)",
-                        1 => "READ",
-                        2 => "WRITE",
-                        3 => "READ+WRITE",
-                        _ => "unknown",
-                    }
-                    .into(),
-                    match (p.opened, p.dacl_allowed) {
-                        (Some(true), _) => "opened",
-                        (Some(false), _) => "open failed",
-                        (None, Some(true)) => "DACL allows",
-                        (None, Some(false)) => "DACL denies",
-                        _ => "unknown",
-                    }
-                    .into(),
-                    p.win32_error
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "-".into()),
-                ]
-            })
-            .collect();
-        crate::core::table::print(
-            w,
-            &[
-                "IOCTL access-bit profile",
-                "Non-elevated access evidence",
-                "Win32 error",
-            ],
-            &probes,
-            c,
-        );
-        if let Some(error) = &live.error {
-            crate::core::table::print(w, &["Observation error"], &[vec![error.clone()]], c);
-        }
-        for note in &live.limitations {
-            crate::core::table::print(w, &["Live evidence limit"], &[vec![note.clone()]], c);
-        }
+        render_live(w, c, live, verbose);
     }
     if verbose {
         let rows: Vec<_> = report
@@ -235,5 +166,147 @@ pub(super) fn render(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbos
             &rows,
             c,
         );
+    }
+}
+
+fn failure(code: u32) -> &'static str {
+    match code {
+        2 | 3 => "not found",
+        5 => "access denied",
+        50 => "not supported",
+        _ => "failed",
+    }
+}
+
+fn render_live(
+    w: &mut dyn Write,
+    c: &Colors,
+    live: &crate::analysis::driver::devices::LiveSecurity,
+    verbose: bool,
+) {
+    writeln!(
+        w,
+        "\n{}: {}",
+        c.bold("Live device security"),
+        live.requested_path
+    )
+    .ok();
+    if let Some(sddl) = &live.sddl {
+        writeln!(w, "  SDDL: {sddl}").ok();
+    } else if let Some(error) = &live.error {
+        if let Some(code) = error
+            .strip_prefix("READ_CONTROL open failed: Win32 ")
+            .and_then(|code| code.parse::<u32>().ok())
+        {
+            writeln!(w, "  SDDL: unavailable — {} (READ_CONTROL).", failure(code)).ok();
+        } else {
+            writeln!(w, "  SDDL: unavailable.").ok();
+            if !verbose {
+                writeln!(w, "  Diagnostic: {error}").ok();
+            }
+        }
+    } else {
+        writeln!(w, "  SDDL: unavailable.").ok();
+    }
+    if !live.token.is_empty() {
+        let token = if live.token.starts_with("linked non-elevated") {
+            "linked non-elevated token"
+        } else {
+            match live.token_elevated {
+                Some(false) => "current non-elevated token",
+                Some(true) => "current elevated token",
+                None => "current token (elevation unknown)",
+            }
+        };
+        let integrity = match live.token_integrity_rid {
+            Some(0) => "untrusted",
+            Some(0x1000) => "low",
+            Some(0x2000) => "medium",
+            Some(0x2100) => "medium-plus",
+            Some(0x3000) => "high",
+            Some(0x4000) => "system",
+            _ => "unknown",
+        };
+        writeln!(
+            w,
+            "  User-access test token: {token}; {integrity} integrity."
+        )
+        .ok();
+    }
+    let probes: Vec<_> = live
+        .user_open_probes
+        .iter()
+        .map(|p| {
+            let access = match p.access {
+                0 => "ANY",
+                1 => "READ",
+                2 => "WRITE",
+                3 => "READ+WRITE",
+                _ => "unknown",
+            };
+            let result = match (p.opened, p.dacl_allowed) {
+                (Some(true), _) => "opened",
+                (Some(false), _) => p.win32_error.map(failure).unwrap_or("open failed"),
+                (None, Some(true)) => "DACL allows (open untested)",
+                (None, Some(false)) => "DACL denies (open untested)",
+                _ => "unknown",
+            };
+            format!("{access}: {result}")
+        })
+        .collect();
+    writeln!(
+        w,
+        "  Access: {}.",
+        if probes.is_empty() {
+            "unknown (no usable probe result)".into()
+        } else {
+            probes.join("; ")
+        }
+    )
+    .ok();
+    for (label, value) in [
+        ("Object", &live.object_name),
+        ("DOS target", &live.dos_target),
+    ] {
+        if let Some(value) = value {
+            if verbose || value != &live.requested_path {
+                writeln!(w, "  {label}: {value}").ok();
+            }
+        }
+    }
+    if live.matched_endpoint_ids.is_empty() {
+        writeln!(w, "  Image association: unverified.").ok();
+    } else {
+        writeln!(
+            w,
+            "  Static name matches: {} (image identity unverified).",
+            live.matched_endpoint_ids.join(", ")
+        )
+        .ok();
+    }
+    writeln!(
+        w,
+        "  Open checks only; IOCTL execution is untested.{}",
+        if verbose { "" } else { " Details: --verbose." }
+    )
+    .ok();
+    if verbose {
+        if !live.descriptor_source.is_empty() {
+            writeln!(w, "  Descriptor source: {}", live.descriptor_source).ok();
+        }
+        if let Some(error) = &live.error {
+            writeln!(w, "  Diagnostic: {error}").ok();
+        }
+        if let Some(rid) = live.token_integrity_rid {
+            writeln!(w, "  Integrity RID: 0x{rid:X}").ok();
+        }
+        for probe in &live.user_open_probes {
+            if let Some(error) = probe.win32_error {
+                writeln!(w, "  Probe access={}: Win32 {error}", probe.access).ok();
+            }
+        }
+        for note in &live.limitations {
+            writeln!(w, "  - {note}").ok();
+        }
     }
 }

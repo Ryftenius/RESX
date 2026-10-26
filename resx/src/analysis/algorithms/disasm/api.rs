@@ -530,6 +530,10 @@ pub fn collect_api_calls(
 ) -> Vec<ApiCall> {
     let mut results = Vec::new();
     let dispatch_slot = guard_dispatch_slot(pe, raw);
+    let body = insns
+        .first()
+        .zip(insns.last())
+        .map(|(first, last)| first.rva..=last.rva);
 
     for (idx, insn) in insns.iter().enumerate() {
         if !insn.is_call && !insn.is_jmp {
@@ -538,8 +542,35 @@ pub fn collect_api_calls(
         let kind = if insn.is_call { "call" } else { "jmp" }.to_string();
 
         if insn.call_target != 0 {
+            // An unconditional jmp back into the decoded body is block layout, not a
+            // tail call, unless a symbol begins exactly at the destination.
+            let local_rva = insn.call_target.wrapping_sub(image_base) as u32;
+            if insn.is_jmp
+                && body.as_ref().is_some_and(|body| body.contains(&local_rva))
+                && symbol_index.exact(insn.call_target).is_none()
+            {
+                continue;
+            }
             // Direct near call / unconditional jmp with an immediate target.
             let target_rva = insn.call_target.wrapping_sub(image_base) as u32;
+            // Imports declared without dllimport (bcrypt.h, for one) are reached through
+            // linker `jmp [__imp_X]` stubs; report the import, not an internal sub_.
+            if let Some(thunk) = crate::analysis::thunk::follow_jmp_thunk(raw, pe, target_rva) {
+                if let (Some(dll), Some(func)) = (thunk.iat_dll(), thunk.iat_func()) {
+                    results.push(ApiCall {
+                        rva: insn.rva,
+                        kind,
+                        target_rva: 0,
+                        label: func.to_owned(),
+                        dll: dll.to_owned(),
+                        is_import: true,
+                        is_indirect: false,
+                        indirect_method: Some(format!("IAT thunk 0x{target_rva:X}")),
+                        switch_cases: Vec::new(),
+                    });
+                    continue;
+                }
+            }
             let label = if let Some(hit) = symbol_index.lookup(insn.call_target) {
                 hit.symbol.name.clone()
             } else {
