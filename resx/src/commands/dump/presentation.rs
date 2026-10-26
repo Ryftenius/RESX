@@ -33,6 +33,7 @@ pub(crate) fn resolve_function(
     w: &mut dyn Write,
     c: &Colors,
 ) -> Result<(u32, String, bool), String> {
+    let show_resolution = !cfg.quiet && !cfg.json && (!cfg.no_disassembly || cfg.verbose);
     if !cfg.at_rva.is_empty() {
         let target = resolve_address_target(
             &cfg.at_rva,
@@ -43,7 +44,7 @@ pub(crate) fn resolve_function(
             raw,
             image_base,
         )?;
-        if !cfg.quiet && !cfg.json {
+        if show_resolution {
             print_address_resolution(w, c, &target);
         }
         return Ok((target.target_rva, target.name, false));
@@ -62,7 +63,7 @@ pub(crate) fn resolve_function(
         if pe.entry_point == 0 || pe.rva_to_offset(pe.entry_point).is_none() {
             return Err("the PE entrypoint is absent or not file-backed".to_owned());
         }
-        if !cfg.quiet && !cfg.json {
+        if show_resolution {
             writeln!(
                 w,
                 "{}",
@@ -90,7 +91,7 @@ pub(crate) fn resolve_function(
         if rva == 0 || pe.rva_to_offset(rva).is_none() {
             return Err("RESX did not recover a file-backed real-entry candidate".to_owned());
         }
-        if !cfg.quiet && !cfg.json {
+        if show_resolution {
             writeln!(
                 w,
                 "{}",

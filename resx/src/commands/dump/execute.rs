@@ -61,9 +61,10 @@ fn run_with_chain(
     let want_cfg = cfg.cfg_view.eq_ignore_ascii_case("text");
     let want_hookchk = cfg.hookchk || cfg.edrchk;
     let want_intelli = cfg.intelli;
+    let compact_calls = cfg.no_disassembly && cfg.funcs_depth > 0 && !cfg.verbose;
     let mut progress = StageProgress::new(
         count_dump_steps(cfg, only_metadata, want_recomp),
-        !cfg.quiet && !cfg.json,
+        !cfg.quiet && !cfg.json && !compact_calls,
         c.on,
     );
 
@@ -889,46 +890,41 @@ fn run_with_chain(
         }
         title.push(']');
         writeln!(w, "{}", c.bold(&c.b_yellow(&title))).ok();
-        if let Some(base) = rebase {
-            title.push_str(&format!(", REBASE 0x{:X}", base + target_rva as u64));
-        } else {
-            title.push_str(&format!(", VA 0x{:X}", image_base + target_rva as u64));
-        }
-        title.push(']');
-        writeln!(w, "{}", c.bold(&c.b_yellow(&title))).ok();
-        if let Some(base) = rebase {
+        if !compact_calls {
+            if let Some(base) = rebase {
+                writeln!(
+                    w,
+                    "{}",
+                    c.dim(&format!(
+                        "  Base0/RVA: 0x{:08X}  |  PE-VA: 0x{:X}  |  Rebased-VA: 0x{:X}",
+                        target_rva,
+                        image_base + target_rva as u64,
+                        base + target_rva as u64
+                    ))
+                )
+                .ok();
+            } else {
+                writeln!(
+                    w,
+                    "{}",
+                    c.dim(&format!(
+                        "  Base0/RVA: 0x{:08X}  |  VA: 0x{:X}",
+                        target_rva,
+                        image_base + target_rva as u64
+                    ))
+                )
+                .ok();
+            }
             writeln!(
                 w,
-                "{}",
-                c.dim(&format!(
-                    "  Base0/RVA: 0x{:08X}  |  PE-VA: 0x{:X}  |  Rebased-VA: 0x{:X}",
-                    target_rva,
-                    image_base + target_rva as u64,
-                    base + target_rva as u64
+                "  {}",
+                c.b_blue(&format!(
+                    "Signature [{}]: {}",
+                    signature.source, signature.prototype
                 ))
             )
             .ok();
-        } else {
-            writeln!(
-                w,
-                "{}",
-                c.dim(&format!(
-                    "  Base0/RVA: 0x{:08X}  |  VA: 0x{:X}",
-                    target_rva,
-                    image_base + target_rva as u64
-                ))
-            )
-            .ok();
         }
-        writeln!(
-            w,
-            "  {}",
-            c.b_blue(&format!(
-                "Signature [{}]: {}",
-                signature.source, signature.prototype
-            ))
-        )
-        .ok();
         if cfg.verbose && signature.source != "pdb" {
             writeln!(
                 w,
