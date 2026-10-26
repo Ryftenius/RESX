@@ -234,6 +234,9 @@ intelli takes every dump option and adds imports, strings, hooks, and signal tag
             r"BEHAVIOR | Static behavior indicators
 Usage: resx behavior <image>
 
+Repeated findings are summarized with counts and three example RVAs.
+Use --verbose for all occurrences and evidence; --json retains all findings.
+
 Examples:
   resx behavior suspicious.dll
   resx behavior suspicious.dll --json

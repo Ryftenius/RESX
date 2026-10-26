@@ -54,6 +54,11 @@ disassembly and `--verbose` for image and function-boundary details. `--calls`,
 These commands report static evidence. They do not claim that an observed API,
 string, instruction, or configuration executed.
 
+`behavior` collapses more than three repeated findings of the same rule, detail,
+severity, confidence and source into a count with three example RVAs. Use
+`--verbose` to show every occurrence and all evidence. `--json` retains the full
+findings regardless of this text-display limit.
+
 ## Search and comparison
 
 | Command | Purpose |
