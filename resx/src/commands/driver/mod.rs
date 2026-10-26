@@ -6,6 +6,8 @@ use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::json::versioned_object;
 use std::io::Write;
+mod devices;
+mod security;
 
 pub fn run(
     cfg: &Config,
@@ -13,12 +15,27 @@ pub fn run(
     output: &mut dyn Write,
     colors: &Colors,
 ) -> Result<(), String> {
+    if cfg.device_security_worker {
+        let endpoint = cfg
+            .device_security
+            .as_deref()
+            .ok_or("Missing device-security endpoint")?;
+        serde_json::to_writer(&mut *output, &security::query(endpoint))
+            .map_err(|e| e.to_string())?;
+        writeln!(output).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     let path = crate::core::search::find_dll_path(&cfg.dll, cfg)?;
     let raw = crate::core::input::read_image(&path).map_err(|error| error.to_string())?;
     let pe = crate::formats::pe::parse_pe(&raw).map_err(|error| error.to_string())?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let imports = crate::formats::pe::read_imports(&pe, &raw);
-    let report = crate::analysis::driver::analyze_driver(&name, &pe, &raw, &imports);
+    let mut report = crate::analysis::driver::analyze_driver(&name, &pe, &raw, &imports);
+    if let Some(endpoint) = cfg.device_security.as_deref() {
+        let mut live = security::observe(&path, endpoint);
+        crate::analysis::driver::devices::match_live(&report.ioctl.devices, &mut live);
+        report.ioctl.live_security = Some(live);
+    }
 
     if cfg.json {
         let value = if ioctls_only {
@@ -293,23 +310,26 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
             });
             vec![
                 code.code.clone(),
-                format!("{} ({})", code.device_type, code.device_type_name),
                 code.function.clone(),
-                short_access(&code.access).into(),
+                match short_access(&code.access) {
+                    "Read" => "R",
+                    "Write" => "W",
+                    "Read+Write" => "R+W",
+                    other => other,
+                }
+                .into(),
                 short_method(&code.method).into(),
                 call.map(|call| argument(call, "input_length"))
                     .unwrap_or_else(|| length_guard(code, "input")),
                 call.map(|call| argument(call, "output_length"))
                     .unwrap_or_else(|| length_guard(code, "output")),
-                code.site_rva.clone(),
-                if code.evidence_status.starts_with("static-api") {
-                    "API argument"
-                } else if code.handler_rva.is_some() {
-                    "request table"
+                devices::route(code).into(),
+                if code.device_candidates.is_empty() {
+                    "-".into()
                 } else {
-                    "request comparison"
-                }
-                .into(),
+                    code.device_candidates.join(",")
+                },
+                code.site_rva.clone(),
             ]
         })
         .collect();
@@ -319,20 +339,21 @@ fn render_ioctl(w: &mut dyn Write, c: &Colors, report: &IoctlReport, verbose: bo
             w,
             &[
                 "Code",
-                "Device",
                 "Function",
                 "Access",
                 "Method",
-                "Input bytes",
-                "Output bytes",
-                "Site RVA",
-                "Evidence",
+                "Input B",
+                "Output B",
+                "Route",
+                "Device",
+                "Check RVA",
             ],
             &rows,
             c,
         );
     }
 
+    devices::render(w, c, report, verbose);
     if report
         .codes
         .iter()

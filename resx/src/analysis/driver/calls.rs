@@ -6,6 +6,7 @@ use iced_x86::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+mod device;
 mod ndis;
 mod semantic;
 
@@ -796,6 +797,7 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<Cal
             }
             let mut return_value = Value::Unknown;
             let mut outputs = Vec::new();
+            let mut device_stores = None;
             let mut stack_address_escaped = false;
             if let Some((dll, imported_name)) = target {
                 let name = crate::analysis::apis::ordinal_name(&dll, &imported_name)
@@ -805,7 +807,11 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<Cal
                 let win32 = matches!(library.as_str(), "kernel32.dll" | "kernelbase.dll")
                     || library.starts_with("api-ms-win-core-");
                 let native = matches!(library.as_str(), "ntdll.dll" | "ntoskrnl.exe");
-                let spec = crate::analysis::apis::lookup(&dll, &name);
+                let device_spec = device::spec(&dll, &name);
+                let spec = crate::analysis::apis::lookup(&dll, &name).or(device_spec);
+                if device_spec.is_some() {
+                    device_stores = device::effects(pe, raw, &state, &name, insn.rva);
+                }
                 let ndis_call = library == "ndis.sys"
                     && matches!(
                         name.as_str(),
@@ -906,6 +912,9 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<Cal
                         oid_evidence = Some("WDK x64 NDIS_OID_REQUEST with validated header and request type; static field provenance; submission unobserved".into());
                     }
                     let mut details = semantic::details(pe, raw, &state, &name, spec, &arguments);
+                    if device_spec.is_some() {
+                        device::strings(pe, raw, &state, &arguments, &mut details);
+                    }
                     details["transfer"] = serde_json::json!(if tail {
                         "import-tail-transfer"
                     } else {
@@ -964,6 +973,9 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<Cal
                 state.regs.remove(&reg);
             }
             state.last_compare = None;
+            if device_stores.is_some() {
+                stack_address_escaped = false;
+            }
             if stack_address_escaped {
                 state.stack.clear();
             } else if let Value::StackAddress { offset, .. } = state.reg(Register::RSP) {
@@ -976,6 +988,13 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<Cal
                 });
             } else {
                 state.stack.clear();
+            }
+            for (offset, stored) in device_stores.into_iter().flatten() {
+                state.stack.retain(|&start, old| {
+                    start.saturating_add(old.width as i64) <= offset
+                        || start >= offset.saturating_add(stored.width as i64)
+                });
+                state.stack.insert(offset, stored);
             }
             for (offset, value) in outputs {
                 state.stack.insert(offset, Stored { width: 8, value });

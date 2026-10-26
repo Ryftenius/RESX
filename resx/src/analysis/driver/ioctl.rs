@@ -322,7 +322,7 @@ fn emit(
         evidence_status: if table.is_some() { "static-request-code-table; execution-unobserved" } else { "static-request-code-comparison; execution-unobserved" }.into(),
         arguments: Some(format!("{}; IoControlCode derived from IRP.CurrentStackLocation; success and access checks unproven",root.reason)),
         handler_rva: table.map(|(_,handler)|format!("0x{handler:08X}")),
-        device_object_identity: None, ndis_oid: None, length_checks: Vec::new(),
+        device_object_identity: None, ndis_oid: None, length_checks: Vec::new(), request_channels: Vec::new(), device_candidates: Vec::new(), user_accessibility: String::new(),
     });
 }
 

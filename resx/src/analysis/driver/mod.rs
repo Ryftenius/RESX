@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 mod calls;
 mod capabilities;
+pub mod devices;
 mod dispatch;
 mod hypervisor;
 mod ioctl;
@@ -68,6 +69,8 @@ pub struct IoctlReport {
     pub codes: Vec<IoctlCodeCandidate>,
     pub call_sites: Vec<IoctlCallEvidence>,
     pub coverage: IoctlCoverage,
+    pub devices: devices::DeviceEvidence,
+    pub live_security: Option<devices::LiveSecurity>,
     pub limitations: Vec<String>,
 }
 
@@ -97,6 +100,9 @@ pub struct IoctlCodeCandidate {
     pub length_checks: Vec<IoctlLengthCheck>,
     pub arguments: Option<String>,
     pub device_object_identity: Option<String>,
+    pub request_channels: Vec<String>,
+    pub device_candidates: Vec<String>,
+    pub user_accessibility: String,
     pub ndis_oid: Option<String>,
 }
 
@@ -200,6 +206,7 @@ fn analyze_ioctls_with_context(
     discovery: &dispatch::Recovery,
 ) -> IoctlReport {
     let calls = calls::recover(pe, raw, insns);
+    let devices = devices::recover(&calls, discovery);
     let mut coverage = IoctlCoverage {
         linear_instruction_limit_reached: insns.len() == 65_536,
         call_limit_reached: calls.len() == 1024,
@@ -253,9 +260,13 @@ fn analyze_ioctls_with_context(
             length_checks: Vec::new(),
             arguments: Some("See call_sites for typed argument values and provenance".into()),
             device_object_identity: None,
+            request_channels: Vec::new(),
+            device_candidates: Vec::new(),
+            user_accessibility: String::new(),
             ndis_oid: call.ndis_oid.map(|oid| format!("0x{oid:08X}")),
         });
     }
+    devices::associate(&mut codes, &devices, &discovery.major_functions);
     let dispatch_candidates: Vec<_> = roots
         .iter()
         .map(|root| {
@@ -283,7 +294,7 @@ fn analyze_ioctls_with_context(
         dispatch_candidates.len()
     );
     IoctlReport {
-        image:image.into(),summary,dispatch_candidates,codes,call_sites,coverage,
+        image:image.into(),summary,dispatch_candidates,codes,call_sites,coverage,devices,live_security:None,
         limitations:std::iter::once("Static x64 request provenance and bounded CFG analysis; comparisons do not prove successful requests, access rights or runtime reachability. Dispatch roots: 64; instructions: 8192/root, 131072 total; helper depth: 2; table slots: 256. Unknown indirect branches, WDF callbacks and unrecognized registration paths may be omitted. Linear API-call scan: 65536 instructions, 1024 calls. Empty results do not establish absence of IOCTLs.".into())
             .chain(pe.anomalies.iter().map(|f|format!("{} [{}]: {}",f.severity,f.kind,f.detail))).collect(),
     }

@@ -108,6 +108,7 @@ fn branch(mnemonic: Mnemonic, flags: Flags) -> Option<bool> {
 pub(super) struct Recovery {
     pub major_functions: Vec<MajorFunctionAssignment>,
     pub callbacks: Vec<Root>,
+    pub device_creation_sites: BTreeSet<u32>,
     pub truncated: bool,
 }
 
@@ -121,6 +122,21 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Recover
         .flat_map(|dll| dll.entries.iter())
         .filter(|entry| entry.name == "ClassInitialize")
         .map(|entry| entry.slot_rva)
+        .collect();
+    let device_creates: BTreeSet<_> = read_imports(pe, raw)
+        .iter()
+        .filter(|dll| {
+            dll.dll.eq_ignore_ascii_case("ntoskrnl.exe")
+                || dll.dll.eq_ignore_ascii_case("wdmsec.sys")
+        })
+        .flat_map(|dll| &dll.entries)
+        .filter(|e| {
+            matches!(
+                e.name.as_str(),
+                "IoCreateDevice" | "IoCreateDeviceSecure" | "WdmlibIoCreateDeviceSecure"
+            )
+        })
+        .map(|e| e.slot_rva)
         .collect();
     let mut recovery = Recovery::default();
     let by_rva: BTreeMap<_, _> = insns
@@ -247,6 +263,15 @@ pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Recover
                                 }
                             }
                         }
+                    }
+                    if instr.flow_control() == FlowControl::IndirectCall
+                        && instr.is_ip_rel_memory_operand()
+                        && pe
+                            .va_to_rva(instr.ip_rel_memory_address())
+                            .is_some_and(|rva| device_creates.contains(&rva))
+                        && register(&work, Register::RCX) == Some(Value::Driver)
+                    {
+                        recovery.device_creation_sites.insert(work.pc);
                     }
                     // Non-escaping caller locals survive calls; the callee owns
                     // the 32-byte home area. Passing a local address invalidates

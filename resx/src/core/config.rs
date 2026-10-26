@@ -311,6 +311,11 @@ pub struct Cli {
     /// Include recovered MajorFunction and IOCTL contracts in CFG-oriented output.
     #[arg(long = "driver-flow")]
     pub driver_flow: bool,
+    /// Query one local device endpoint's SDDL and non-elevated access evidence (no IOCTL sent)
+    #[arg(long = "device-security", value_name = "PATH")]
+    pub device_security: Option<String>,
+    #[arg(long = "device-security-worker", hide = true, requires = "device_security")]
+    pub device_security_worker: bool,
 
     #[arg(long = "cfg", value_name = "FMT")]
     pub cfg_view: Option<String>,
@@ -602,6 +607,8 @@ pub struct Config {
     pub highlight: String,
     pub max_subcalls: usize,
     pub driver_flow: bool,
+    pub device_security: Option<String>,
+    pub device_security_worker: bool,
     pub cfg_view: String,
     pub show_eat: bool,
     pub show_iat: bool,
@@ -753,6 +760,8 @@ impl Config {
             highlight: cli.highlight.clone().unwrap_or_default(),
             max_subcalls: cli.max_subcalls.clamp(1, 4096),
             driver_flow: cli.driver_flow,
+            device_security: cli.device_security.clone(),
+            device_security_worker: cli.device_security_worker,
             cfg_view: cli.cfg_view.clone().unwrap_or_default(),
             show_eat: cli.show_eat,
             show_iat: cli.show_iat,

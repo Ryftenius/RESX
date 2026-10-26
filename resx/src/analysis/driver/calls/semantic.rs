@@ -101,7 +101,12 @@ pub(super) fn text(
     None
 }
 
-fn unicode_string(pe: &PeFile, raw: &[u8], state: &State, pointer: &Value) -> Option<String> {
+pub(super) fn unicode_string(
+    pe: &PeFile,
+    raw: &[u8],
+    state: &State,
+    pointer: &Value,
+) -> Option<String> {
     let header = bytes(pe, raw, state, pointer, 4)?;
     let length = u16::from_le_bytes([header[0], header[1]]) as usize;
     let maximum = u16::from_le_bytes([header[2], header[3]]) as usize;
