@@ -105,7 +105,7 @@ pub extern "C" fn ResxRunCommandJson(
     ffi_boundary(out_json, || {
         let request = read_required_json::<CommandJsonRequest>("request_json", request_json)?;
         let (raw_args, command, args) = if let Some(argv) = request.argv {
-            let normalized = normalize_raw_argv(argv);
+            let normalized = normalize_cli_syntax(&normalize_raw_argv(argv));
             let command = normalized.get(1).cloned().unwrap_or_default();
             let mut args = normalized.iter().skip(2).cloned().collect::<Vec<_>>();
             if request.options.is_some() {
@@ -755,6 +755,7 @@ fn append_options(
     options: Option<&Value>,
     default_json: bool,
 ) -> Result<(), FfiError> {
+    let command = command.strip_prefix('/').unwrap_or(command);
     let json_requested = option_bool(options, "json").unwrap_or(default_json);
     if json_requested {
         args.push("--json".to_owned());
@@ -931,60 +932,13 @@ fn normalize_raw_argv(mut args: Vec<String>) -> Vec<String> {
 }
 
 fn is_known_command(command: &str) -> bool {
-    matches!(
-        command,
-        "dump"
-            | "cfg"
-            | "reconstruct-cfg"
-            | "intelli"
-            | "patch"
-            | "peinfo"
-            | "sections"
-            | "eat"
-            | "iat"
-            | "syms"
-            | "pechk"
-            | "priority"
-            | "callers"
-            | "locate"
-            | "locate-sym"
-            | "scan"
-            | "diff"
-            | "index"
-            | "hunt"
-            | "types"
-            | "api"
-            | "yara"
-            | "update"
-            | "config"
-            | "version"
-    )
+    crate::cli::help::canonical_command(command).is_some() || matches!(command, "help" | "version")
 }
 
 fn command_supports_json(command: &str) -> bool {
-    matches!(
-        command.to_ascii_lowercase().as_str(),
-        "dump"
-            | "reconstruct-cfg"
-            | "intelli"
-            | "patch"
-            | "peinfo"
-            | "sections"
-            | "eat"
-            | "iat"
-            | "syms"
-            | "pechk"
-            | "callers"
-            | "locate"
-            | "locate-sym"
-            | "scan"
-            | "diff"
-            | "index"
-            | "hunt"
-            | "types"
-            | "api"
-            | "yara"
-    )
+    let command = command.strip_prefix('/').unwrap_or(command);
+    crate::cli::help::canonical_command(command).is_some()
+        && crate::cli::help::command_takes_option(command, "json") == Some(true)
 }
 
 fn success_envelope(command: &str, args: &[String], stdout: &str) -> String {
@@ -1068,4 +1022,51 @@ For the full interactive CLI help, run `resx help`.
 fn writeln_no_fail(out: &mut Vec<u8>, line: &str) {
     out.extend_from_slice(line.as_bytes());
     out.push(b'\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn ffi_accepts_every_cli_command_and_alias_without_program_name() {
+        crate::cli::args::on_parser_stack(|| {
+            let cli = crate::cli::args::Cli::command();
+            for command in cli.get_subcommands() {
+                for name in std::iter::once(command.get_name()).chain(command.get_all_aliases()) {
+                    for spelling in [name.to_owned(), name.to_uppercase(), format!("/{name}")] {
+                        let normalized = normalize_raw_argv(vec![spelling.clone()]);
+                        assert_eq!(normalized, vec!["resx", &spelling], "{name}");
+                    }
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn generic_ffi_requests_json_for_analysis_commands_and_aliases() {
+        for command in [
+            "behavior",
+            "calls",
+            "driver",
+            "ioctl",
+            "contracts",
+            "crypto",
+            "BEHAVIOR",
+            "/behavior",
+        ] {
+            assert!(command_supports_json(command), "{command}");
+            let mut args = vec!["resx".to_owned(), command.to_owned()];
+            append_options(command, &mut args, None, command_supports_json(command)).unwrap();
+            assert!(args.iter().any(|arg| arg == "--json"));
+        }
+        assert!(!command_supports_json("not-a-command"));
+        assert!(!command_supports_json("version"));
+        assert_eq!(
+            normalize_raw_argv(vec!["version".into()]),
+            vec!["resx", "version"]
+        );
+    }
 }
