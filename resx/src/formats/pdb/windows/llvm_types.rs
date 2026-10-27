@@ -24,10 +24,11 @@ pub(super) struct LlvmDumpRecord {
 pub(super) fn load_pdb_types_via_llvm_dump(pdb_path: &str) -> Result<Vec<PdbTypeInfo>, String> {
     let tool = find_llvm_pdbutil()
         .ok_or_else(|| "llvm-pdbutil.exe not found for fallback type parsing".to_owned())?;
-    let output = std::process::Command::new(tool)
-        .args(["dump", "-types", pdb_path])
-        .output()
-        .map_err(|e| format!("spawn llvm-pdbutil: {}", e))?;
+    let output = crate::core::process::capture(
+        std::process::Command::new(tool).args(["dump", "-types", pdb_path]),
+        std::time::Duration::from_secs(30),
+        32 * 1024 * 1024,
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -243,16 +244,21 @@ pub(super) fn llvm_leaf_kind(leaf: &str) -> &'static str {
 pub(super) fn canonical_dump_type_id(type_id: u32, records: &HashMap<u32, LlvmDumpRecord>) -> u32 {
     let mut current = type_id;
     let mut seen = HashSet::new();
-    while seen.insert(current) {
+    // Every record can refer to another record. Acyclic chains also need a
+    // bound, otherwise canonicalizing all types can become quadratic work.
+    for _ in 0..64 {
+        if !seen.insert(current) {
+            return type_id;
+        }
         let Some(rec) = records.get(&current) else {
-            break;
+            return current;
         };
         if rec.forward_to == 0 {
-            break;
+            return current;
         }
         current = rec.forward_to;
     }
-    current
+    type_id
 }
 
 pub(super) fn resolve_dump_type_name(
@@ -288,5 +294,47 @@ pub(super) fn find_llvm_pdbutil() -> Option<String> {
             return Some(candidate.to_owned());
         }
     }
-    Some("llvm-pdbutil.exe".to_owned())
+    // Resolve PATH explicitly. A bare executable name also searches CWD on
+    // Windows, which may be the directory containing an untrusted sample.
+    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
+    for directory in std::env::split_paths(&std::env::var_os("PATH")?) {
+        if !directory.is_absolute() {
+            continue;
+        }
+        let Ok(directory) = directory.canonicalize() else {
+            continue;
+        };
+        if directory == cwd {
+            continue;
+        }
+        let candidate = directory.join("llvm-pdbutil.exe");
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_forwarders_bound_cycles_and_long_acyclic_chains() {
+        let mut records = HashMap::new();
+        for id in 1..=128 {
+            records.insert(
+                id,
+                LlvmDumpRecord {
+                    forward_to: id + 1,
+                    ..Default::default()
+                },
+            );
+        }
+        records.insert(129, LlvmDumpRecord::default());
+        assert_eq!(canonical_dump_type_id(1, &records), 1);
+        assert_eq!(canonical_dump_type_id(128, &records), 129);
+        records.get_mut(&129).unwrap().forward_to = 128;
+        assert_eq!(canonical_dump_type_id(128, &records), 128);
+    }
 }

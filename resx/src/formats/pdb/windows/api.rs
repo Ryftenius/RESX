@@ -38,7 +38,7 @@ pub fn load_pdb_symbol(
     // SAFETY: loaded DbgHelp exports are checked for null and transmuted to their documented signatures;
     // C strings and callback state remain live for each synchronous call.
     let result = unsafe {
-        let lib = LoadLibraryA(c"dbghelp.dll".as_ptr() as *const u8);
+        let lib = system_dbghelp();
         if lib.is_null() {
             return None;
         }
@@ -158,7 +158,7 @@ pub fn load_pdb_symbols(
     // SAFETY: loaded DbgHelp exports are checked for null and transmuted to their documented signatures;
     // C strings, callback context, and output records remain live for each synchronous call.
     let result = unsafe {
-        let lib = LoadLibraryA(c"dbghelp.dll".as_ptr() as *const u8);
+        let lib = system_dbghelp();
         if lib.is_null() {
             return Err("dbghelp.dll unavailable".to_owned());
         }
@@ -321,7 +321,7 @@ pub fn load_pdb_types(
     // SAFETY: loaded DbgHelp exports are checked for null and transmuted to their documented signatures;
     // all symbol/type buffers and callback state remain live for each synchronous call.
     let result = unsafe {
-        let lib = LoadLibraryA(c"dbghelp.dll".as_ptr() as *const u8);
+        let lib = system_dbghelp();
         if lib.is_null() {
             return Err("dbghelp.dll unavailable".to_owned());
         }

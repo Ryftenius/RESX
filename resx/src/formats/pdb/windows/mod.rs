@@ -44,10 +44,29 @@ type SymEnumSymbolsProc = unsafe extern "system" fn(*mut SymbolInfo, u32, usize)
 
 #[link(name = "kernel32")]
 extern "system" {
-    fn LoadLibraryA(name: *const u8) -> *mut c_void;
+    fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *const c_void;
     fn GetCurrentProcess() -> *mut c_void;
     fn LocalFree(ptr: *mut c_void) -> *mut c_void;
+}
+
+fn system_dbghelp() -> *mut c_void {
+    // Keep the module alive for the lifetime of all cached function pointers.
+    static MODULE: OnceLock<usize> = OnceLock::new();
+    *MODULE.get_or_init(|| {
+        let mut path = [0u16; 32768];
+        // SAFETY: Windows writes at most the declared capacity.
+        let len = unsafe { GetSystemDirectoryW(path.as_mut_ptr(), path.len() as u32) } as usize;
+        let suffix: Vec<_> = "\\dbghelp.dll\0".encode_utf16().collect();
+        if len == 0 || len + suffix.len() > path.len() {
+            return 0;
+        }
+        path[len..len + suffix.len()].copy_from_slice(&suffix);
+        // SAFETY: absolute, NUL-terminated system path. Dependencies also use
+        // LOAD_LIBRARY_SEARCH_SYSTEM32, never the sample directory or CWD.
+        unsafe { LoadLibraryExW(path.as_ptr(), std::ptr::null_mut(), 0x800) as usize }
+    }) as *mut c_void
 }
 
 #[link(name = "urlmon")]
@@ -214,4 +233,38 @@ const SYM_TAG_BASE_CLASS: u32 = 18;
 struct TiFindChildrenHeader {
     count: u32,
     start: u32,
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+
+    #[test]
+    fn dbghelp_is_loaded_from_the_windows_system_directory() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetModuleFileNameW(module: *mut c_void, buffer: *mut u16, size: u32) -> u32;
+        }
+        let module = system_dbghelp();
+        assert!(!module.is_null());
+        let mut actual = [0u16; 32768];
+        let mut system = [0u16; 32768];
+        // SAFETY: both output buffers have their declared capacities and the module is live.
+        let (a, s) = unsafe {
+            (
+                GetModuleFileNameW(module, actual.as_mut_ptr(), actual.len() as u32),
+                GetSystemDirectoryW(system.as_mut_ptr(), system.len() as u32),
+            )
+        };
+        assert!(a > 0 && a < actual.len() as u32 && s > 0 && s < system.len() as u32);
+        assert_eq!(
+            String::from_utf16_lossy(&actual[..a as usize]).to_lowercase(),
+            format!(
+                "{}\\dbghelp.dll",
+                String::from_utf16_lossy(&system[..s as usize])
+            )
+            .to_lowercase()
+        );
+        assert_eq!(module, system_dbghelp());
+    }
 }
