@@ -39,6 +39,13 @@ Conflict reports retain bounded overlapping-decode evidence without assigning
 intent. Instruction coordinates (`block_start`, `rva`, `va`, and optional
 `rebased_va`) are formatted hexadecimal strings; opcode bytes are lowercase hex.
 
+## Behavior scan limits
+
+The `behavior` object includes `analysis_limits` when an instruction or finding
+budget stops the scan. It is an array of explanatory strings and is omitted when
+no limit is reached. `finding_count` counts retained findings. A limited report
+can omit additional findings.
+
 ## PE triage
 
 `peinfo` may include a bounded `triage` array. Each item separates observed

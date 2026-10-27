@@ -2,7 +2,31 @@
 
 All notable public changes to RESX are recorded here.
 
-## Unreleased
+## 2.2.0 - 2026-10-27
+
+### Security patches
+
+- Fixed crashes from overflowing export, entry-point and rebased addresses.
+- Fixed function discovery slicing past EOF when a section declares unavailable file data. Discovery now shares checked section mappings and bounds prologue scanning.
+- Bounded behavior scanning to one million instructions and 8,192 findings, with partial-analysis details in text and JSON. Ambiguous section mappings no longer bypass the shared reader.
+- Indexed driver export and unwind ownership lookups to prevent repeated table scans on heavily aliased inputs.
+- Restricted DbgHelp loading to the Windows system directory, checked embedded module and PDB filenames, and bounded the LLVM PDB fallback's runtime and output.
+### Architecture and performance
+
+- Added shared, lazy image facts for calls, behavior, API arguments, driver, IOCTL and contract analysis.
+- Scoped dynamic API resolution reuse to an immutable analysis session. Fixed stale results when an image buffer was changed or reused.
+- Indexed behavior import lookups instead of parsing the import table at each call. Rejected import addresses that overflow the RVA range.
+- Made `ioctl` run its own analysis without building a full driver report.
+- Fixed ICEBP detection to use the decoder's `Int1` instruction kind.
+- Separated system-export and SDK loading from analysis. Rust callers can supply their own export dictionary and header text, with lazy providers for filesystem sources.
+- Bound resolver results to the selected export provider. Provider caches are bounded and recheck source metadata instead of reusing a process-wide SDK index by directory name.
+- Reused one SDK index throughout call-tree argument recovery and made export-name enumeration deterministic.
+- Used Windows directory notifications to refresh SDK snapshots without rescanning unchanged headers on every FFI request.
+- Fixed generic FFI routing and JSON selection to use the CLI grammar, including commands such as `behavior`, `calls`, `driver` and `ioctl`.
+- Preallocated bounded image reads from the validated file size, reducing allocations while loading DLLs.
+- Added explicit image/function report requests and focused decode options. Dump and calls now share a structured result between text and JSON rendering.
+- Shared data summaries and unwind records across reports, removed redundant function decoding, and built CFG blocks once for presentation. Released analysis caches before serializing JSON.
+- Moved driver flow-contract analysis and syscall lookup out of function rendering. Existing command defaults, JSON fields and Rust entry points remain supported.
 
 ## 2.1.0 - 2026-10-27
 
