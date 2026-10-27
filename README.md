@@ -584,6 +584,7 @@ The call at `0x1160` is six bytes long, so `0x1166` is the return address immedi
 - [VS Code extension documentation](docs/vscode-extension.md)
 - [DLL / FFI integration](docs/dll.md)
 - [Analysis surfaces](docs/analysis-surfaces.md)
+- [Architecture](docs/architecture.md)
 - [JSON schemas](docs/json-schemas.md)
 - [Security policy](SECURITY.md)
 
