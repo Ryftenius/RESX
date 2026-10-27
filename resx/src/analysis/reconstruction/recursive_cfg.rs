@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use iced_x86::Mnemonic;
 use serde::Serialize;
 
-use crate::analysis::disasm::{disassemble_at, is_ret, Instruction};
+use crate::analysis::disasm::{disassemble_at_with_options, is_ret, Instruction};
 use crate::analysis::ir::{summarize_typed_ir, IrOp};
+use crate::analysis::options::TraversalOptions;
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::config::Config;
 use crate::formats::pe::{read_runtime_function, Export, PeFile};
@@ -52,8 +53,35 @@ pub struct RecursiveCfgRequest<'a> {
     pub prototype: &'a str,
 }
 
+pub struct CfgRequest<'a> {
+    pub raw: &'a [u8],
+    pub pe: &'a PeFile,
+    pub start_rva: u32,
+    pub arch: u32,
+    pub image_base: u64,
+    pub exports: &'a [Export],
+    pub symbols: Option<&'a SymbolIndex>,
+    pub options: &'a TraversalOptions,
+    pub prototype: &'a str,
+}
+
 pub fn recover_recursive_cfg(request: RecursiveCfgRequest<'_>) -> RecursiveCfg {
-    let RecursiveCfgRequest {
+    let options = request.cfg.into();
+    recover_cfg(CfgRequest {
+        raw: request.raw,
+        pe: request.pe,
+        start_rva: request.start_rva,
+        arch: request.arch,
+        image_base: request.image_base,
+        exports: request.exports,
+        symbols: request.symbols,
+        options: &options,
+        prototype: request.prototype,
+    })
+}
+
+pub fn recover_cfg(request: CfgRequest<'_>) -> RecursiveCfg {
+    let CfgRequest {
         raw,
         pe,
         start_rva,
@@ -61,9 +89,10 @@ pub fn recover_recursive_cfg(request: RecursiveCfgRequest<'_>) -> RecursiveCfg {
         image_base,
         exports,
         symbols,
-        cfg,
+        options,
         prototype,
     } = request;
+    let cfg = &options.decode;
     let runtime = read_runtime_function(pe, raw, start_rva);
     let function_end_rva = runtime
         .as_ref()
@@ -80,7 +109,7 @@ pub fn recover_recursive_cfg(request: RecursiveCfgRequest<'_>) -> RecursiveCfg {
     let mut all_insns = Vec::new();
 
     while let Some(block_start) = queue.pop_front() {
-        if !seen.insert(block_start) || seen.len() > cfg.max_total.max(64) {
+        if !seen.insert(block_start) || seen.len() > options.max_total.max(64) {
             continue;
         }
         if !same_function_range(start_rva, function_end_rva, block_start) {
@@ -95,10 +124,10 @@ pub fn recover_recursive_cfg(request: RecursiveCfgRequest<'_>) -> RecursiveCfg {
             continue;
         };
 
-        let mut local_cfg = cfg.clone();
+        let mut local_cfg = *cfg;
         local_cfg.max_bytes = decode_limit.min(cfg.max_bytes.max(512) as u32) as usize;
         local_cfg.max_insns = cfg.max_insns.clamp(64, 2048);
-        let Ok(linear) = disassemble_at(
+        let Ok(linear) = disassemble_at_with_options(
             raw,
             pe,
             file_off,

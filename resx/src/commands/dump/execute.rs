@@ -1,4 +1,8 @@
+use super::request::DumpRequest;
 use super::*;
+use crate::analysis::inspection::{
+    decode_function, inspect_function, inspect_image, FunctionRequest,
+};
 
 pub fn run(
     dll_arg: &str,
@@ -57,10 +61,10 @@ fn run_with_chain(
     }
 
     let only_metadata = func_arg.is_empty() && cfg.at_rva.is_empty() && cfg.ordinal == 0;
+    let mut request = DumpRequest::from_config(cfg, only_metadata);
     let want_recomp = cfg.recomp || !cfg.c_out.is_empty();
     let want_cfg = cfg.cfg_view.eq_ignore_ascii_case("text");
     let want_hookchk = cfg.hookchk || cfg.edrchk;
-    let want_intelli = cfg.intelli;
     let compact_calls = cfg.no_disassembly && cfg.funcs_depth > 0 && !cfg.verbose;
     let mut progress = StageProgress::new(
         count_dump_steps(cfg, only_metadata, want_recomp),
@@ -145,26 +149,15 @@ fn run_with_chain(
     let imports = analysis.imports();
     progress.tick("reading import table");
     let import_count: usize = imports.iter().map(|dll| dll.entries.len()).sum();
-    let startup_routines = find_startup_routines(&pe, &raw);
-    let load_config = read_load_config(&pe, &raw);
-    // Table views (sections, pechk, eat, iat, syms) reuse this metadata report;
-    // whole-image discovery and data summaries are not part of them and reach
-    // tens of MB on large images.
-    let table_view = only_metadata
-        && (cfg.sections || cfg.pechk || cfg.show_eat || cfg.show_iat || cfg.show_syms);
-    let function_discovery = if cfg.json && !table_view {
-        Some(discover_functions(
-            &raw,
-            &pe,
-            exports,
-            &symbol_index,
-            &pdb_symbols,
-            &startup_routines,
-            cfg,
-        ))
-    } else {
-        None
-    };
+    let startup_routines = analysis.startup_routines();
+    let image_report = inspect_image(
+        &session,
+        request.image,
+        &symbol_index,
+        &pdb_symbols,
+        request.options.max_total,
+    );
+    let function_discovery = image_report.discovery;
     let yara_matches = if cfg.yara.is_empty() {
         Vec::new()
     } else {
@@ -194,16 +187,13 @@ fn run_with_chain(
         print_yara_matches(w, &yara_matches, c);
     }
 
-    let metadata_intelli = if want_intelli && only_metadata {
-        let findings = analyze_image(&raw, imports, None);
+    let metadata_intelli = image_report.intelli;
+    if request.image.intelli {
         if !cfg.json {
-            print_intelli_findings(w, &findings, c);
+            print_intelli_findings(w, &metadata_intelli, c);
         }
         progress.tick("running Intelli triage");
-        findings
-    } else {
-        Vec::new()
-    };
+    }
 
     if only_metadata {
         progress.finish();
@@ -240,21 +230,13 @@ fn run_with_chain(
                 instructions: Vec::new(),
                 xrefs: Vec::new(),
                 strings: Vec::new(),
-                data: (!table_view).then(|| to_data_summary_json(&read_data_summary(&pe, &raw))),
+                data: image_report.data.map(to_data_summary_json),
                 function_discovery,
                 recursive_cfg: None,
                 typed_ir: None,
                 signature: None,
                 decode_conflicts: None,
-                indirect_flow: (!table_view).then(|| {
-                    analyze_indirect_flow(
-                        &pe,
-                        imports,
-                        &read_data_summary(&pe, &raw),
-                        &[],
-                        load_config.as_ref(),
-                    )
-                }),
+                indirect_flow: image_report.indirect_flow,
                 intelli_findings: metadata_intelli,
                 recomp: String::new(),
                 cfg: String::new(),
@@ -264,9 +246,8 @@ fn run_with_chain(
                 api_call_tree: String::new(),
                 current_syscall: None,
             };
-            let json = serde_json::to_string_pretty(&versioned_object("dump", &result))
-                .unwrap_or_default();
-            writeln!(w, "{}", json).ok();
+            drop(session);
+            super::render::write_json(&result, w)?;
         }
         return Ok(());
     }
@@ -599,41 +580,27 @@ fn run_with_chain(
         }
     }
 
-    let linear_insns = disassemble_at(
-        &raw,
-        &pe,
-        file_off,
-        target_rva,
-        arch,
-        image_base,
-        exports,
-        Some(&symbol_index),
-        cfg,
-    )
-    .map_err(|e| format!("disassembly: {}", e))?;
-    let mut insns = recover_reachable_function_insns(
-        &raw,
-        &pe,
-        target_rva,
-        arch,
-        image_base,
-        exports,
-        Some(&symbol_index),
-        cfg,
-    )
-    .unwrap_or(linear_insns);
-    // Reachable recovery stitches separately decoded blocks; label loads whose trap
-    // landed in a different block.
-    crate::analysis::disasm::annotate_syscall_numbers(&mut insns);
-    if cfg.ssa {
-        crate::analysis::reconstruction::dataflow::annotate(&mut insns, arch);
-    }
-    progress.tick("disassembling function");
-
     if !cfg.at_rva.is_empty() {
         resolved_name = best_symbol_name_for_rva(&symbol_index, image_base, target_rva)
             .unwrap_or(resolved_name);
     }
+    let header_index = crate::providers::headers::configured(cfg.argument_headers());
+    request.function.arguments = header_index.is_some();
+    request.function.dynamic_resolution = request.function.calls || request.function.arguments;
+    let function_request = FunctionRequest {
+        rva: target_rva,
+        name: &resolved_name,
+        image_name: &dll_name,
+        arch,
+        options: request.options,
+        reports: request.function,
+        ssa: cfg.ssa,
+        annotate_conflicts: cfg.verbose,
+    };
+    let insns = decode_function(&session, &function_request, &symbol_index)
+        .map_err(|e| format!("disassembly: {}", e))?;
+    progress.tick("disassembling function");
+
     let edr_result = if cfg.edrchk {
         let max_len = insns
             .iter()
@@ -700,7 +667,7 @@ fn run_with_chain(
             &resolved_name,
         );
         x.extend(startup_xrefs_for_target(
-            &startup_routines,
+            startup_routines,
             target_rva,
             &resolved_name,
         ));
@@ -712,65 +679,32 @@ fn run_with_chain(
         Vec::new()
     };
 
-    let str_refs = if cfg.show_strings {
-        let s = find_string_refs(&raw, &pe, &insns);
+    let report = inspect_function(
+        &session,
+        &function_request,
+        &symbol_index,
+        header_index.as_deref(),
+        insns,
+        &switch_api_calls,
+    );
+    if request.function.strings {
         progress.tick("finding string references");
-        s
-    } else {
-        Vec::new()
-    };
-    let data_summary = if cfg.json || cfg.show_strings {
-        Some(read_data_summary(&pe, &raw))
-    } else {
-        None
-    };
-
-    let header_index = crate::providers::headers::configured(cfg.argument_headers());
-    let api_calls = if cfg.funcs_depth > 0 || header_index.is_some() {
-        let mut calls =
-            collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base, cfg.hostile);
-
-        // Merge switch-dispatch targets.  First drop any unresolved register-indirect
-        // entry at the same JMP site (they are superseded by the resolved targets).
-        let switch_jmp_rvas: std::collections::HashSet<u32> =
-            switch_api_calls.iter().map(|c| c.rva).collect();
-        if !switch_jmp_rvas.is_empty() {
-            calls.retain(|c| {
-                !(c.is_indirect && c.target_rva == 0 && switch_jmp_rvas.contains(&c.rva))
-            });
-        }
-        calls.extend(switch_api_calls.iter().cloned());
-        crate::analysis::disasm::apply_dynamic_resolution(&mut calls, &insns, session.resolution());
-        calls.sort_by_key(|c| c.rva);
-        progress.tick("building API call map");
-        calls
-    } else {
-        Vec::new()
-    };
-    let signatures = header_index
-        .as_ref()
-        .map(|index| {
-            crate::analysis::headers::enrich_calls_in(
-                index,
-                analysis,
-                session.exports(),
-                &insns,
-                &api_calls,
-            )
-        })
-        .unwrap_or_default();
-    for insn in &mut insns {
-        if let Some(signature) = signatures.get(&insn.rva) {
-            if !insn.comment.is_empty() {
-                insn.comment.push_str(" | ");
-            }
-            insn.comment.push_str(&signature.call);
-        }
     }
-    let call_tree = if cfg.funcs_depth > 0 {
+    if request.function.calls || request.function.arguments {
+        progress.tick("building API call map");
+    }
+    if request.function.intelli {
+        progress.tick("running Intelli triage");
+    }
+    if request.function.recomp {
+        progress.tick("reconstructing C output");
+    }
+    let insns = &report.instructions;
+    let api_calls = &report.calls;
+    let call_tree = if request.call_tree {
         Some(build_api_call_tree(
-            &api_calls,
-            &insns,
+            api_calls,
+            insns,
             &resolved_name,
             &dll_name,
             &session,
@@ -788,478 +722,85 @@ fn run_with_chain(
         .as_ref()
         .map(|tree| render_api_call_tree(tree, cfg))
         .unwrap_or_default();
-    let current_syscall = synthetic_syscall_api_call(&insns, &resolved_name, &dll_name)
-        .and_then(|call| resolve_syscall_call_details(&call, &insns, cfg));
-    let prototype = symbol_index
-        .exact(image_base + target_rva as u64)
-        .map(|sym| sym.type_name)
-        .unwrap_or_default();
-    let signature = crate::analysis::reconstruction::signature::infer(
-        &insns,
-        target_rva,
-        arch,
-        &resolved_name,
-        &prototype,
-    );
-    let decode_conflicts = crate::analysis::reconstruction::decode_conflicts::inspect(&insns, arch);
-    if cfg.verbose {
-        crate::analysis::reconstruction::decode_conflicts::annotate(&mut insns, &decode_conflicts);
+    let current_syscall = synthetic_syscall_api_call(insns, &resolved_name, &dll_name)
+        .and_then(|call| resolve_syscall_call_details(&call, insns, cfg));
+    let call_syscalls: Vec<_> = api_calls
+        .iter()
+        .map(|call| {
+            if request.call_syscalls && call_tree.as_ref().is_none_or(|tree| tree.keeps_root(call))
+            {
+                resolve_syscall_call_details(call, insns, cfg)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !cfg.c_out.is_empty() {
+        std::fs::write(&cfg.c_out, &report.recomp)
+            .map_err(|e| format!("write C output '{}': {}", cfg.c_out, e))?;
+        if !cfg.quiet && !cfg.json {
+            writeln!(
+                w,
+                "{}",
+                c.ok(&format!("Wrote C reconstruction to {}", cfg.c_out))
+            )
+            .ok();
+        }
     }
-    let typed_ir_summary = if cfg.json {
-        Some(summarize_typed_ir(
-            &insns,
-            image_base,
-            Some(&symbol_index),
-            &prototype,
-        ))
-    } else {
-        None
-    };
-    let recursive_cfg = if cfg.json || want_cfg {
-        Some(recover_recursive_cfg(RecursiveCfgRequest {
-            raw: &raw,
-            pe: &pe,
-            start_rva: target_rva,
-            arch,
-            image_base,
-            exports,
-            symbols: Some(&symbol_index),
-            cfg,
-            prototype: &prototype,
-        }))
-    } else {
-        None
-    };
-    let indirect_flow = if cfg.json {
-        data_summary
-            .as_ref()
-            .map(|data| analyze_indirect_flow(&pe, imports, data, &api_calls, load_config.as_ref()))
-    } else {
-        None
-    };
 
-    let intelli_findings = if want_intelli {
-        let findings = analyze_image(&raw, imports, Some(&insns));
-        progress.tick("running Intelli triage");
-        findings
+    let cfg_blocks = if want_cfg {
+        let blocks = crate::analysis::cfgview::build_basic_blocks_with_edges(
+            insns,
+            image_base,
+            &recovered_cfg_edges,
+        );
+        progress.tick("building control-flow graph");
+        blocks
     } else {
         Vec::new()
     };
 
-    let recomp_str = if want_recomp {
-        let runtime_function = read_runtime_function(&pe, &raw, target_rva);
-        let exp = Export {
-            name: resolved_name.clone(),
-            ordinal: 0,
-            rva: target_rva,
-            forward_to: String::new(),
-        };
-        let s = recomp_c(
-            &insns,
-            &exp,
-            arch,
-            image_base,
-            Some(&symbol_index),
-            runtime_function.as_ref(),
-            cfg,
-        );
-        progress.tick("reconstructing C output");
-        if !cfg.c_out.is_empty() {
-            std::fs::write(&cfg.c_out, &s)
-                .map_err(|e| format!("write C output '{}': {}", cfg.c_out, e))?;
-            if !cfg.quiet && !cfg.json {
-                writeln!(
-                    w,
-                    "{}",
-                    c.ok(&format!("Wrote C reconstruction to {}", cfg.c_out))
-                )
-                .ok();
-            }
-        }
-        s
-    } else {
-        String::new()
-    };
-
-    let cfg_text = if want_cfg {
-        let plain = render_cfg_text_with_edges(&insns, image_base, &recovered_cfg_edges);
-        progress.tick("building control-flow graph");
-        plain
-    } else {
-        String::new()
-    };
-
     progress.finish();
-    if !cfg.json {
-        writeln!(w).ok();
-        let mut title = format!("{}!{}  [RVA 0x{:08X}", dll_name, resolved_name, target_rva);
-        if let Some(base) = rebase {
-            title.push_str(&format!(", REBASE 0x{:X}", base + target_rva as u64));
-        } else {
-            title.push_str(&format!(", VA 0x{:X}", image_base + target_rva as u64));
-        }
-        title.push(']');
-        writeln!(w, "{}", c.bold(&c.b_yellow(&title))).ok();
-        if !compact_calls {
-            if let Some(base) = rebase {
-                writeln!(
-                    w,
-                    "{}",
-                    c.dim(&format!(
-                        "  Base0/RVA: 0x{:08X}  |  PE-VA: 0x{:X}  |  Rebased-VA: 0x{:X}",
-                        target_rva,
-                        image_base + target_rva as u64,
-                        base + target_rva as u64
-                    ))
-                )
-                .ok();
-            } else {
-                writeln!(
-                    w,
-                    "{}",
-                    c.dim(&format!(
-                        "  Base0/RVA: 0x{:08X}  |  VA: 0x{:X}",
-                        target_rva,
-                        image_base + target_rva as u64
-                    ))
-                )
-                .ok();
-            }
-            writeln!(
-                w,
-                "  {}",
-                c.b_blue(&format!(
-                    "Signature [{}]: {}",
-                    signature.source, signature.prototype
-                ))
-            )
-            .ok();
-        }
-        if cfg.verbose && signature.source != "pdb" {
-            writeln!(
-                w,
-                "  {}",
-                c.dim(&format!(
-                    "{}; tentative; visited={} truncated={} unresolved-flow={}",
-                    signature.calling_convention,
-                    signature.instructions_visited,
-                    signature.analysis_truncated,
-                    signature.unresolved_flow
-                ))
-            )
-            .ok();
-        }
-        if cfg.verbose {
-            for param in &signature.parameters {
-                writeln!(
-                    w,
-                    "  {}",
-                    c.dim(&format!(
-                        "param_{} {}: {} read={} write={} evidence={:X?}",
-                        param.index + 1,
-                        param.location,
-                        param.inferred_type,
-                        param.pointer_read,
-                        param.pointer_write,
-                        param.evidence_rvas
-                    ))
-                )
-                .ok();
-            }
-        }
-        if cfg.verbose && !decode_conflicts.findings.is_empty() {
-            writeln!(
-                w,
-                "  {}",
-                c.b_yellow(&format!(
-                    "Overlapping decode streams: {} finding(s), {} shown",
-                    decode_conflicts.findings.len(),
-                    decode_conflicts.findings.len().min(16)
-                ))
-            )
-            .ok();
-        }
-        for conflict in decode_conflicts
-            .findings
-            .iter()
-            .take(if cfg.verbose { 16 } else { 0 })
-        {
-            writeln!(
-                w,
-                "  {}",
-                c.b_yellow(&format!(
-                    "[INFO] {}: stream 0x{:08x} enters 0x{:08x} inside stream instruction 0x{:08x}",
-                    conflict.kind,
-                    conflict.source_rva,
-                    conflict.target_rva,
-                    conflict.covering_instruction_rva
-                ))
-            )
-            .ok();
-            writeln!(
-                w,
-                "    {} | {} | alternate: {}",
-                conflict.covering_bytes, conflict.covering_text, conflict.alternative_text
-            )
-            .ok();
-        }
-        if cfg.verbose && decode_conflicts.analysis_truncated {
-            writeln!(
-                w,
-                "  {}",
-                c.b_yellow("[WARN] overlapping-stream analysis/report budget reached")
-            )
-            .ok();
-        }
-        if !cfg.no_disassembly {
-            print_insns(w, &insns, cfg, c);
-        }
-        if cfg.verbose {
-            writeln!(
-                w,
-                "{}",
-                c.info(&format!(
-                    "~{} instructions, ~{} bytes",
-                    insns.len(),
-                    func_size_bytes
-                ))
-            )
-            .ok();
-        }
-
-        if let Some(dispatch) = recovered_switch.as_ref() {
-            print_switch_map(w, dispatch, switch_semantics.as_ref(), c);
-        }
-        if let Some(edr) = &edr_result {
-            print_edr_report(w, edr, c);
-        }
-        if want_hookchk {
-            writeln!(w).ok();
-            writeln!(w, "{}", c.bold(&c.b_mag("Hook Indicators:"))).ok();
-            if hook_indicators.is_empty() {
-                writeln!(w, "{}", c.dim("  (none detected)")).ok();
-            } else {
-                for finding in &hook_indicators {
-                    writeln!(w, "  {}", c.warn(finding)).ok();
-                }
-            }
-        }
-        if cfg.show_xrefs {
-            writeln!(w, "{}", c.bold("\nCross References:")).ok();
-            if xrefs.is_empty() {
-                writeln!(w, "{}", c.dim("  (none)")).ok();
-            }
-            for r in &xrefs {
-                writeln!(w, "  {}", c.cyan(r)).ok();
-            }
-        }
-        if cfg.show_strings {
-            writeln!(w, "{}", c.bold("\nString References:")).ok();
-            if str_refs.is_empty() {
-                writeln!(w, "{}", c.dim("  (none)")).ok();
-            }
-            for r in &str_refs {
-                writeln!(w, "  {}", c.green(r)).ok();
-            }
-        }
-        if cfg.funcs_depth > 0 {
-            if let Some(tree) = &call_tree {
-                print_api_calls(w, tree, &resolved_name, c, cfg);
-            }
-            let driver_report = crate::analysis::driver::analyze_driver_in(&dll_name, analysis);
-            super::super::driver::render_flow_contracts(w, c, &driver_report, cfg.max_subcalls);
-        }
-        if want_intelli {
-            print_intelli_findings(w, &intelli_findings, c);
-        }
-        if cfg.recomp {
-            writeln!(w).ok();
-            print_c_recomp(w, &recomp_str, c);
-        }
-        if want_cfg {
-            writeln!(w, "\n{}", c.bold(&c.b_blue("Control Flow Graph:"))).ok();
-            let colored =
-                render_cfg_colored_with_edges(&insns, image_base, c, &recovered_cfg_edges);
-            write!(w, "{}", colored).ok();
-            if !colored.ends_with('\n') {
-                writeln!(w).ok();
-            }
-        }
-        if cfg.verbose {
-            let disassembled_bytes: usize = insns.iter().map(|i| i.bytes.len()).sum();
-            writeln!(w).ok();
-            writeln!(w, "{}", c.bold(&c.b_blue("Extension:"))).ok();
-            writeln!(w, "  {:<20} {}", c.bold("FilesRead"), 1).ok();
-            writeln!(w, "  {:<20} {}", c.bold("BytesRead"), raw.len()).ok();
-            writeln!(
-                w,
-                "  {:<20} {}",
-                c.bold("BytesDisassembled"),
-                disassembled_bytes
-            )
-            .ok();
-            writeln!(w, "  {:<20} {}", c.bold("InstructionsDecoded"), insns.len()).ok();
-            writeln!(w, "  {:<20} {}", c.bold("ExportsScanned"), exports.len()).ok();
-            writeln!(w, "  {:<20} {}", c.bold("ImportsScanned"), import_count).ok();
-            writeln!(
-                w,
-                "  {:<20} {}",
-                c.bold("PdbSymbolsLoaded"),
-                pdb_symbols.len()
-            )
-            .ok();
-            if !cfg.yara.is_empty() {
-                writeln!(w, "  {:<20} {}", c.bold("YaraRules"), cfg.yara.len()).ok();
-                writeln!(w, "  {:<20} {}", c.bold("YaraMatches"), yara_matches.len()).ok();
-            }
-            if cfg.show_xrefs {
-                writeln!(w, "  {:<20} {}", c.bold("CrossReferences"), xrefs.len()).ok();
-            }
-            if cfg.show_strings {
-                writeln!(w, "  {:<20} {}", c.bold("StringRefs"), str_refs.len()).ok();
-            }
-            if want_intelli {
-                writeln!(
-                    w,
-                    "  {:<20} {}",
-                    c.bold("IntelliFindings"),
-                    intelli_findings.len()
-                )
-                .ok();
-            }
-            if want_cfg {
-                writeln!(
-                    w,
-                    "  {:<20} {}",
-                    c.bold("RecoveredCfgEdges"),
-                    recovered_cfg_edges.len()
-                )
-                .ok();
-            }
-        }
-    }
+    let view = super::render::FunctionView {
+        report,
+        pe: &pe,
+        dll_name,
+        dll_path_str,
+        resolved_name,
+        target_rva,
+        image_base,
+        arch_str,
+        rebase,
+        startup_routines,
+        yara_matches,
+        function_discovery,
+        pdb_loaded,
+        pdb_count: pdb_symbols.len(),
+        bytes_read: raw.len(),
+        export_count: exports.len(),
+        import_count,
+        followed_desc,
+        import_slot_target,
+        func_size_bytes,
+        recovered_switch,
+        switch_semantics,
+        recovered_cfg_edges,
+        hook_indicators,
+        xrefs,
+        edr_result,
+        call_tree,
+        api_call_tree,
+        current_syscall,
+        call_syscalls,
+        cfg_blocks,
+    };
     if cfg.json {
-        let result = FuncResult {
-            dll: dll_name,
-            dll_path: dll_path_str,
-            function: resolved_name,
-            rva: format!("0x{:08X}", target_rva),
-            va: format!("0x{:016X}", image_base + target_rva as u64),
-            rebased_va: rebase
-                .map(|base| format!("0x{:016X}", base + target_rva as u64))
-                .unwrap_or_default(),
-            image_base: format!("0x{:016X}", image_base),
-            arch: arch_str,
-            entry_point: format!("0x{:08X}", pe.entry_point),
-            size_of_image: format!("0x{:08X}", pe.size_of_image),
-            size_of_headers: format!("0x{:08X}", pe.size_of_headers),
-            section_alignment: format!("0x{:08X}", pe.section_alignment),
-            file_alignment: format!("0x{:08X}", pe.file_alignment),
-            checksum: format!("0x{:08X}", pe.checksum),
-            subsystem: format!("0x{:04X}", pe.subsystem),
-            dll_characteristics: format!("0x{:04X}", pe.dll_characteristics),
-            header_corrupt: pe.header_corruption_detected(),
-            pe_anomalies: pe.anomalies.iter().map(to_anomaly_json).collect(),
-            startup_routines: startup_routines.iter().map(to_startup_json).collect(),
-            sections: pe.sections.iter().map(to_section_json).collect(),
-            yara_matches: yara_matches.iter().map(to_yara_json).collect(),
-            size_bytes: func_size_bytes,
-            insn_count: insns.len(),
-            pdb_loaded: pdb_loaded || !pdb_symbols.is_empty(),
-            followed_jmp: followed_desc,
-            is_import_slot: import_slot_target.is_some(),
-            import_target_dll: import_slot_target
-                .as_ref()
-                .map(|(dll, _)| dll.clone())
-                .unwrap_or_default(),
-            import_target_name: import_slot_target
-                .as_ref()
-                .map(|(_, name)| name.clone())
-                .unwrap_or_default(),
-            instructions: insns
-                .iter()
-                .map(|i| InsnJson {
-                    block_start: format!("0x{:08x}", i.block_start),
-                    rva: format!("0x{:08x}", i.rva),
-                    va: format!("0x{:016x}", i.va),
-                    rebased_va: rebase
-                        .map(|base| format!("0x{:016x}", base + i.rva as u64))
-                        .unwrap_or_default(),
-                    bytes: i
-                        .bytes
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    text: i.text.clone(),
-                    comment: i.comment.clone(),
-                })
-                .collect(),
-            xrefs,
-            strings: str_refs,
-            data: data_summary.as_ref().map(to_data_summary_json),
-            function_discovery,
-            recursive_cfg,
-            typed_ir: typed_ir_summary,
-            signature: Some(signature),
-            decode_conflicts: Some(decode_conflicts),
-            indirect_flow,
-            intelli_findings: if only_metadata {
-                metadata_intelli
-            } else {
-                intelli_findings
-            },
-            recomp: recomp_str,
-            cfg: cfg_text,
-            hook_indicators,
-            edrchk: edr_result.as_ref().map(to_edr_json),
-            api_calls: api_calls
-                .iter()
-                .filter(|ac| call_tree.as_ref().is_none_or(|tree| tree.keeps_root(ac)))
-                .map(|ac| {
-                    let syscall = resolve_syscall_call_details(ac, &insns, cfg).map(|details| {
-                        self::json::SyscallJson {
-                            service_number: details.service_number.map(|n| format!("0x{:X}", n)),
-                            kernel_module: details.kernel_module,
-                            kernel_symbol: details.kernel_symbol,
-                            kernel_rva: format!("0x{:08X}", details.kernel_rva),
-                        }
-                    });
-                    ApiCallJson {
-                        signature: signatures.get(&ac.rva).cloned(),
-                        rva: format!("0x{:08X}", ac.rva),
-                        kind: ac.kind.clone(),
-                        target_rva: if ac.target_rva != 0 {
-                            format!("0x{:08X}", ac.target_rva)
-                        } else {
-                            String::new()
-                        },
-                        label: ac.label.clone(),
-                        dll: ac.dll.clone(),
-                        is_import: ac.is_import,
-                        is_indirect: ac.is_indirect,
-                        indirect_method: ac.indirect_method.clone(),
-                        switch_cases: ac.switch_cases.clone(),
-                        dynamic: ac.dynamic.clone(),
-                        resolves: ac.resolves.clone(),
-                        syscall,
-                    }
-                })
-                .collect(),
-            api_call_tree,
-            current_syscall: current_syscall.map(|details| self::json::SyscallJson {
-                service_number: details.service_number.map(|n| format!("0x{:X}", n)),
-                kernel_module: details.kernel_module,
-                kernel_symbol: details.kernel_symbol,
-                kernel_rva: format!("0x{:08X}", details.kernel_rva),
-            }),
-        };
-        let json =
-            serde_json::to_string_pretty(&versioned_object("dump", &result)).unwrap_or_default();
-        writeln!(w, "{}", json).ok();
+        let result = super::render::into_json(view, cfg);
+        drop(session);
+        super::render::write_json(&result, w)
+    } else {
+        super::render::render_text(view, cfg, w, c)
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

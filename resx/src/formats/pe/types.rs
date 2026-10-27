@@ -353,6 +353,33 @@ pub struct PeDataSummary {
     pub runtime_functions: Vec<PeRuntimeFunctionInfo>,
 }
 
+/// Borrowed data and unwind records. Sessions can share both without duplicating
+/// the owning vectors required by the legacy `PeDataSummary` API.
+#[derive(Debug, Clone, Copy)]
+pub struct PeDataView<'a> {
+    pub strings: &'a [PeDataString],
+    pub vtables: &'a [PeVTable],
+    pub pointers: &'a [PeDataPointer],
+    pub runtime_functions: &'a [PeRuntimeFunctionInfo],
+}
+
+impl<'a> From<&'a PeDataSummary> for PeDataView<'a> {
+    fn from(summary: &'a PeDataSummary) -> Self {
+        Self {
+            strings: &summary.strings,
+            vtables: &summary.vtables,
+            pointers: &summary.pointers,
+            runtime_functions: &summary.runtime_functions,
+        }
+    }
+}
+
+pub(crate) struct PeDataContents {
+    pub strings: Vec<PeDataString>,
+    pub vtables: Vec<PeVTable>,
+    pub pointers: Vec<PeDataPointer>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeDataString {
     pub rva: u32,

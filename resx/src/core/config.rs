@@ -672,3 +672,24 @@ impl Config {
             .map_err(|_| format!("invalid --rebase value: {}", self.rebase))
     }
 }
+
+// CLI compatibility adapters for the format-independent analysis inputs.
+impl From<&Config> for crate::analysis::options::DecodeOptions {
+    fn from(cfg: &Config) -> Self {
+        Self {
+            max_insns: cfg.max_insns,
+            max_bytes: cfg.max_bytes,
+            intel_syntax: cfg.intel_syntax,
+            detailed_comments: cfg.verbose,
+            hostile: cfg.hostile,
+        }
+    }
+}
+impl From<&Config> for crate::analysis::options::TraversalOptions {
+    fn from(cfg: &Config) -> Self {
+        Self {
+            decode: cfg.into(),
+            max_total: cfg.max_total,
+        }
+    }
+}

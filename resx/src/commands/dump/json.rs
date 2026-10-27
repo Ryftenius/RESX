@@ -7,7 +7,7 @@ use crate::analysis::intelli::IntelliFinding;
 use crate::analysis::ir::TypedIrSummary;
 use crate::analysis::recursive_cfg::RecursiveCfg;
 use crate::analysis::yara::YaraMatch;
-use crate::formats::pe::{PeAnomaly, PeDataSummary, PeSection, PeStartupRoutine};
+use crate::formats::pe::{PeAnomaly, PeDataView, PeSection, PeStartupRoutine};
 
 #[derive(Serialize)]
 pub(crate) struct InsnJson {
@@ -307,7 +307,7 @@ pub(crate) fn to_yara_json(m: &YaraMatch) -> YaraJson {
     }
 }
 
-pub(crate) fn to_data_summary_json(summary: &PeDataSummary) -> PeDataSummaryJson {
+pub(crate) fn to_data_summary_json(summary: PeDataView<'_>) -> PeDataSummaryJson {
     PeDataSummaryJson {
         strings: summary
             .strings

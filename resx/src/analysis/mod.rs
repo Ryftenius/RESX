@@ -7,6 +7,8 @@ pub mod edr;
 pub mod follow;
 pub mod headers;
 pub mod image;
+pub mod inspection;
+pub mod options;
 pub mod reconstruction;
 pub mod resolution;
 pub mod session;

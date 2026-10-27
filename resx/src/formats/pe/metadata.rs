@@ -4,9 +4,9 @@ use super::constants::{
 };
 use super::types::{
     read_cstr, read_u16, read_u32, read_u64, PeChainedRuntimeFunction, PeClrInfo, PeCodeViewInfo,
-    PeDataPointer, PeDataString, PeDataSummary, PeDebugEntry, PeDebugInfo, PeEpilogScope, PeFile,
-    PeLoadConfigInfo, PeRuntimeFunctionInfo, PeSavedRegister, PeStartupRoutine, PeTlsCallback,
-    PeTlsInfo, PeUnwindOperation, PeVTable,
+    PeDataContents, PeDataPointer, PeDataString, PeDataSummary, PeDebugEntry, PeDebugInfo,
+    PeEpilogScope, PeFile, PeLoadConfigInfo, PeRuntimeFunctionInfo, PeSavedRegister,
+    PeStartupRoutine, PeTlsCallback, PeTlsInfo, PeUnwindOperation, PeVTable,
 };
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -215,14 +215,23 @@ pub fn read_runtime_functions(pe: &PeFile, raw: &[u8]) -> Vec<PeRuntimeFunctionI
 
 pub fn read_data_summary(pe: &PeFile, raw: &[u8]) -> PeDataSummary {
     let runtime_functions = read_runtime_functions(pe, raw);
+    let contents = read_data_contents(pe, raw);
+    PeDataSummary {
+        strings: contents.strings,
+        vtables: contents.vtables,
+        pointers: contents.pointers,
+        runtime_functions,
+    }
+}
+
+pub(crate) fn read_data_contents(pe: &PeFile, raw: &[u8]) -> PeDataContents {
     let strings = read_data_strings(pe, raw, 256);
     let pointers = read_data_pointers(pe, raw, 512);
     let vtables = read_vtables_from_pointers(pe, &pointers, 128);
-    PeDataSummary {
+    PeDataContents {
         strings,
         vtables,
         pointers,
-        runtime_functions,
     }
 }
 

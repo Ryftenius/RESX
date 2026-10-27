@@ -6,10 +6,7 @@ use serde::Serialize;
 use crate::analysis::symbols::{display_symbol_name, SymbolIndex};
 use crate::core::config::Config;
 use crate::formats::pdb::PdbSymbol;
-use crate::formats::pe::{
-    read_data_summary, read_runtime_functions, Export, PeFile, PeRuntimeFunctionInfo,
-    PeStartupRoutine,
-};
+use crate::formats::pe::{Export, PeFile, PeRuntimeFunctionInfo, PeStartupRoutine};
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct FunctionDiscoveryReport {
@@ -67,6 +64,27 @@ pub fn discover_functions(
     startup_routines: &[PeStartupRoutine],
     cfg: &Config,
 ) -> FunctionDiscoveryReport {
+    let facts = crate::analysis::image::ImageFacts::new(pe, raw);
+    discover_functions_in(
+        &facts,
+        exports,
+        symbol_index,
+        pdb_symbols,
+        startup_routines,
+        cfg.max_total,
+    )
+}
+
+pub fn discover_functions_in(
+    facts: &crate::analysis::image::ImageFacts<'_>,
+    exports: &[Export],
+    symbol_index: &SymbolIndex,
+    pdb_symbols: &[PdbSymbol],
+    startup_routines: &[PeStartupRoutine],
+    max_total: usize,
+) -> FunctionDiscoveryReport {
+    let pe = facts.pe();
+    let raw = facts.raw();
     let mut map: BTreeMap<u32, FunctionSeed> = BTreeMap::new();
     let mut stats = FunctionDiscoveryStats::default();
 
@@ -109,7 +127,7 @@ pub fn discover_functions(
         );
     }
 
-    for runtime in read_runtime_functions(pe, raw) {
+    for runtime in facts.runtime_functions() {
         if !executable_rva(pe, runtime.begin_rva) {
             continue;
         }
@@ -164,7 +182,7 @@ pub fn discover_functions(
         );
     }
 
-    for target_rva in collect_direct_targets(raw, pe, cfg.max_total.max(256)) {
+    for target_rva in collect_direct_targets(raw, pe, max_total.max(256)) {
         stats.call_targets += 1;
         merge_seed(
             &mut map,
@@ -182,7 +200,7 @@ pub fn discover_functions(
         );
     }
 
-    let data = read_data_summary(pe, raw);
+    let data = facts.data_summary();
     for pointer in data.pointers.iter().filter(|p| p.kind == "code") {
         stats.data_pointers += 1;
         let mut flags = BTreeSet::new();

@@ -17,6 +17,7 @@ use iced_x86::{
     OpKind, Register,
 };
 
+use crate::analysis::options::DecodeOptions;
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::config::Config;
 use crate::core::known::describe_known_address;
@@ -138,7 +139,16 @@ pub fn disassemble_at(
     cfg: &Config,
 ) -> Result<Vec<Instruction>, String> {
     disassemble_at_inner(
-        raw, pe, file_off, start_rva, arch, image_base, exports, symbols, cfg, true,
+        raw,
+        pe,
+        file_off,
+        start_rva,
+        arch,
+        image_base,
+        exports,
+        symbols,
+        &cfg.into(),
+        true,
     )
 }
 
@@ -153,6 +163,49 @@ pub fn disassemble_at_unbounded(
     exports: &[Export],
     symbols: Option<&SymbolIndex>,
     cfg: &Config,
+) -> Result<Vec<Instruction>, String> {
+    disassemble_at_inner(
+        raw,
+        pe,
+        file_off,
+        start_rva,
+        arch,
+        image_base,
+        exports,
+        symbols,
+        &cfg.into(),
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn disassemble_at_with_options(
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    file_off: usize,
+    start_rva: u32,
+    arch: u32,
+    image_base: u64,
+    exports: &[Export],
+    symbols: Option<&SymbolIndex>,
+    cfg: &DecodeOptions,
+) -> Result<Vec<Instruction>, String> {
+    disassemble_at_inner(
+        raw, pe, file_off, start_rva, arch, image_base, exports, symbols, cfg, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn disassemble_at_unbounded_with_options(
+    raw: &[u8],
+    pe: &crate::formats::pe::PeFile,
+    file_off: usize,
+    start_rva: u32,
+    arch: u32,
+    image_base: u64,
+    exports: &[Export],
+    symbols: Option<&SymbolIndex>,
+    cfg: &DecodeOptions,
 ) -> Result<Vec<Instruction>, String> {
     disassemble_at_inner(
         raw, pe, file_off, start_rva, arch, image_base, exports, symbols, cfg, false,
@@ -194,7 +247,7 @@ fn disassemble_at_inner(
     image_base: u64,
     exports: &[Export],
     symbols: Option<&SymbolIndex>,
-    cfg: &Config,
+    cfg: &DecodeOptions,
     honor_runtime_bounds: bool,
 ) -> Result<Vec<Instruction>, String> {
     if file_off >= raw.len() {
@@ -328,7 +381,7 @@ fn disassemble_at_inner(
                 let destination = symbol_index
                     .describe(tgt)
                     .unwrap_or_else(|| format!("loc_{t_rva:08x}"));
-                if cfg.verbose {
+                if cfg.detailed_comments {
                     let flow = if m == Mnemonic::Call {
                         "call"
                     } else if is_jmp(m) {
@@ -342,7 +395,7 @@ fn disassemble_at_inner(
                 } else {
                     comment_parts.push(format!("→ {destination}"));
                 }
-                if cfg.verbose && is_jcc(m) {
+                if cfg.detailed_comments && is_jcc(m) {
                     let fallthrough = pc.saturating_add(i_len as u64);
                     let fallthrough_rva = fallthrough.wrapping_sub(image_base) as u32;
                     comment_parts.push(format!(

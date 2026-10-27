@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::formats::pe::{
-    self, Export, ImportDll, PeFile, PeLoadConfigInfo, PeRuntimeFunctionInfo, PeTlsInfo,
+    self, Export, ImportDll, PeDataContents, PeDataView, PeFile, PeLoadConfigInfo,
+    PeRuntimeFunctionInfo, PeStartupRoutine, PeTlsInfo,
 };
 
 pub struct ImageFacts<'a> {
@@ -19,6 +20,8 @@ pub struct ImageFacts<'a> {
     runtime_functions: OnceLock<Vec<PeRuntimeFunctionInfo>>,
     tls: OnceLock<Option<PeTlsInfo>>,
     load_config: OnceLock<Option<PeLoadConfigInfo>>,
+    data_summary: OnceLock<PeDataContents>,
+    startup_routines: OnceLock<Vec<PeStartupRoutine>>,
 }
 
 impl<'a> ImageFacts<'a> {
@@ -34,6 +37,8 @@ impl<'a> ImageFacts<'a> {
             runtime_functions: OnceLock::new(),
             tls: OnceLock::new(),
             load_config: OnceLock::new(),
+            data_summary: OnceLock::new(),
+            startup_routines: OnceLock::new(),
         }
     }
 
@@ -89,12 +94,69 @@ impl<'a> ImageFacts<'a> {
             .get_or_init(|| pe::read_load_config(self.pe, self.raw))
             .as_ref()
     }
+
+    pub fn data_summary(&self) -> PeDataView<'_> {
+        let contents = self
+            .data_summary
+            .get_or_init(|| pe::read_data_contents(self.pe, self.raw));
+        PeDataView {
+            strings: &contents.strings,
+            vtables: &contents.vtables,
+            pointers: &contents.pointers,
+            runtime_functions: self.runtime_functions(),
+        }
+    }
+
+    pub fn startup_routines(&self) -> &[PeStartupRoutine] {
+        self.startup_routines
+            .get_or_init(|| pe::find_startup_routines(self.pe, self.raw))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn data_summary_initialized(&self) -> bool {
+        self.data_summary.get().is_some()
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::formats::pe::{PeSection, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ};
+
+    #[test]
+    fn data_views_share_nonempty_unwind_records_in_either_request_order() {
+        let mut pe = image();
+        let mut raw = vec![0; 0x400];
+        pe.data_dirs[pe::IMAGE_DIRECTORY_ENTRY_EXCEPTION] = (0x1100, 12);
+        raw[0x300..0x304].copy_from_slice(&0x1000u32.to_le_bytes());
+        raw[0x304..0x308].copy_from_slice(&0x1001u32.to_le_bytes());
+        raw[0x308..0x30c].copy_from_slice(&0x1120u32.to_le_bytes());
+        raw[0x320] = 1; // version 1, no unwind codes
+        for unwind_first in [false, true] {
+            let facts = ImageFacts::new(&pe, &raw);
+            if unwind_first {
+                assert_eq!(facts.runtime_functions().len(), 1);
+                assert!(!facts.data_summary_initialized());
+            }
+            let first = facts.data_summary();
+            let second = facts.data_summary();
+            assert_eq!(first.runtime_functions.len(), 1);
+            assert!(std::ptr::eq(
+                first.runtime_functions,
+                facts.runtime_functions()
+            ));
+            assert!(std::ptr::eq(
+                first.runtime_functions,
+                second.runtime_functions
+            ));
+            assert!(std::ptr::eq(first.pointers, second.pointers));
+            assert_eq!(
+                format!("{:?}", first.runtime_functions),
+                format!("{:?}", pe::read_data_summary(&pe, &raw).runtime_functions)
+            );
+        }
+    }
+
     pub(crate) fn image() -> PeFile {
         PeFile {
             arch: 64,

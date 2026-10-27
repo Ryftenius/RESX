@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 
 use crate::analysis::disasm::ApiCall;
-use crate::formats::pe::{ImportDll, PeDataSummary, PeFile, PeLoadConfigInfo};
+use crate::formats::pe::{ImportDll, PeDataSummary, PeDataView, PeFile, PeLoadConfigInfo};
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct IndirectFlowReport {
@@ -35,6 +35,16 @@ pub fn analyze_indirect_flow(
     pe: &PeFile,
     imports: &[ImportDll],
     data: &PeDataSummary,
+    api_calls: &[ApiCall],
+    load_config: Option<&PeLoadConfigInfo>,
+) -> IndirectFlowReport {
+    analyze_indirect_flow_view(pe, imports, data.into(), api_calls, load_config)
+}
+
+pub fn analyze_indirect_flow_view(
+    pe: &PeFile,
+    imports: &[ImportDll],
+    data: PeDataView<'_>,
     api_calls: &[ApiCall],
     load_config: Option<&PeLoadConfigInfo>,
 ) -> IndirectFlowReport {
@@ -73,7 +83,7 @@ pub fn analyze_indirect_flow(
         });
     }
 
-    for vtable in &data.vtables {
+    for vtable in data.vtables {
         report.tables.push(IndirectTable {
             rva: hex32(vtable.rva),
             kind: "vtable".to_owned(),

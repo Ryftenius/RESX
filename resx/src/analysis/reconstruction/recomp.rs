@@ -187,6 +187,17 @@ pub fn recomp_c(
     unwind: Option<&PeRuntimeFunctionInfo>,
     _cfg: &crate::core::config::Config,
 ) -> String {
+    reconstruct_c(insns, exp, arch, image_base, symbols, unwind)
+}
+
+pub fn reconstruct_c(
+    insns: &[Instruction],
+    exp: &Export,
+    arch: u32,
+    image_base: u64,
+    symbols: Option<&SymbolIndex>,
+    unwind: Option<&PeRuntimeFunctionInfo>,
+) -> String {
     if insns.is_empty() {
         return "// No instructions to reconstruct.".to_owned();
     }

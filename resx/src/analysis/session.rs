@@ -43,6 +43,11 @@ impl<'a> AnalysisSession<'a> {
         self.exports
     }
 
+    #[cfg(test)]
+    pub(crate) fn resolution_initialized(&self) -> bool {
+        self.resolution.get().is_some()
+    }
+
     pub fn resolution(&self) -> &ResolutionReport {
         self.resolution
             .get_or_init(|| super::resolution::analyze_in(&self.image, self.exports))
