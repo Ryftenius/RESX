@@ -9,7 +9,7 @@ pub fn run(options: &Options, output: &mut dyn Write, colors: &Colors) -> Result
         preferences.headers = if dir.eq_ignore_ascii_case("off") {
             None
         } else {
-            let root = crate::analysis::headers::resolve_root(std::path::Path::new(dir))
+            let root = crate::providers::headers::resolve_root(std::path::Path::new(dir))
                 .ok_or_else(|| {
                     format!("{dir} has no um/windows.h; specify a Windows SDK Include directory")
                 })?;

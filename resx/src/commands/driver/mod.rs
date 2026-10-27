@@ -29,40 +29,46 @@ pub fn run(
     let raw = crate::core::input::read_image(&path).map_err(|error| error.to_string())?;
     let pe = crate::formats::pe::parse_pe(&raw).map_err(|error| error.to_string())?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let imports = crate::formats::pe::read_imports(&pe, &raw);
-    let mut report = crate::analysis::driver::analyze_driver(&name, &pe, &raw, &imports);
-    if let Some(endpoint) = cfg.device_security.as_deref() {
-        let mut live = security::observe(&path, endpoint);
-        crate::analysis::driver::devices::match_live(&report.ioctl.devices, &mut live);
-        report.ioctl.live_security = Some(live);
-    }
-
-    if cfg.json {
-        let mut value = if ioctls_only {
-            versioned_object("ioctl", &report.ioctl)
-        } else {
-            versioned_object("driver", &report)
-        };
-        if !cfg.api_args {
-            let ioctl = if ioctls_only {
-                &mut value["ioctl"]
-            } else {
-                &mut value["driver"]["ioctl"]
-            };
-            crate::core::json::omit_call_arguments(&mut ioctl["call_sites"]);
+    let analysis = crate::analysis::image::ImageFacts::new(&pe, &raw);
+    let mut value = if ioctls_only {
+        let mut report = crate::analysis::driver::analyze_ioctls_in(&name, &analysis);
+        observe_security(&path, &mut report, cfg);
+        if !cfg.json {
+            render_ioctl(output, colors, &report, cfg.verbose, cfg.api_args);
+            return Ok(());
         }
-        writeln!(
-            output,
-            "{}",
-            serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
-        )
-        .map_err(|e| e.to_string())?;
-    } else if ioctls_only {
-        render_ioctl(output, colors, &report.ioctl, cfg.verbose, cfg.api_args);
+        versioned_object("ioctl", &report)
     } else {
-        render_driver(output, colors, &report, cfg.verbose, cfg.api_args);
+        let mut report = crate::analysis::driver::analyze_driver_in(&name, &analysis);
+        observe_security(&path, &mut report.ioctl, cfg);
+        if !cfg.json {
+            render_driver(output, colors, &report, cfg.verbose, cfg.api_args);
+            return Ok(());
+        }
+        versioned_object("driver", &report)
+    };
+    if !cfg.api_args {
+        let ioctl = if ioctls_only {
+            &mut value["ioctl"]
+        } else {
+            &mut value["driver"]["ioctl"]
+        };
+        crate::core::json::omit_call_arguments(&mut ioctl["call_sites"]);
     }
-    Ok(())
+    writeln!(
+        output,
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn observe_security(path: &std::path::Path, report: &mut IoctlReport, cfg: &Config) {
+    if let Some(endpoint) = cfg.device_security.as_deref() {
+        let mut live = security::observe(path, endpoint);
+        crate::analysis::driver::devices::match_live(&report.devices, &mut live);
+        report.live_security = Some(live);
+    }
 }
 
 fn render_driver(

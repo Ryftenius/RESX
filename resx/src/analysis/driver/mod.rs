@@ -1,3 +1,4 @@
+use crate::analysis::image::ImageFacts;
 use std::collections::BTreeSet;
 
 mod calls;
@@ -17,9 +18,7 @@ pub use ioctl::{Coverage as IoctlCoverage, LengthCheck as IoctlLengthCheck};
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Formatter, IntelFormatter};
 use serde::Serialize;
 
-use crate::formats::pe::{
-    read_exports, read_runtime_functions, Export, ImportDll, PeFile, PeRuntimeFunctionInfo,
-};
+use crate::formats::pe::{Export, ImportDll, PeFile, PeRuntimeFunctionInfo};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DriverReport {
@@ -124,13 +123,14 @@ struct DecodedInsn {
 }
 
 pub fn analyze_contracts(pe: &PeFile, raw: &[u8]) -> serde_json::Value {
-    let insns = decode_executable(
-        pe,
-        raw,
-        &read_exports(pe, raw),
-        &read_runtime_functions(pe, raw),
-    );
-    let mut calls = calls::recover(pe, raw, &insns);
+    analyze_contracts_in(&ImageFacts::new(pe, raw))
+}
+
+pub fn analyze_contracts_in(analysis: &ImageFacts<'_>) -> serde_json::Value {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
+    let insns = decode_executable(pe, raw, analysis.exports(), analysis.runtime_functions());
+    let mut calls = calls::recover(analysis, &insns);
     for call in &mut calls {
         if call.category == "io"
             && call.details["strings"].as_array().is_some_and(|strings| {
@@ -152,15 +152,27 @@ pub fn analyze_contracts(pe: &PeFile, raw: &[u8]) -> serde_json::Value {
 }
 
 pub fn analyze_driver(image: &str, pe: &PeFile, raw: &[u8], imports: &[ImportDll]) -> DriverReport {
-    let exports = read_exports(pe, raw);
-    let runtime_functions = read_runtime_functions(pe, raw);
-    let insns = decode_executable(pe, raw, &exports, &runtime_functions);
+    analyze_driver_with_context(image, &ImageFacts::new(pe, raw), imports)
+}
+
+pub fn analyze_driver_in(image: &str, analysis: &ImageFacts<'_>) -> DriverReport {
+    analyze_driver_with_context(image, analysis, analysis.imports())
+}
+
+fn analyze_driver_with_context(
+    image: &str,
+    analysis: &ImageFacts<'_>,
+    imports: &[ImportDll],
+) -> DriverReport {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
+    let insns = decode_executable(pe, raw, analysis.exports(), analysis.runtime_functions());
     let api_hits = classify_imports(imports);
     let mut capabilities = capabilities::analyze(imports);
     let hypervisor = hypervisor::analyze(&insns, imports);
     capabilities::add_hypervisor_capabilities(&mut capabilities, &hypervisor);
-    let discovery = dispatch::recover(pe, raw, &insns);
-    let ioctl = analyze_ioctls_with_context(image, pe, raw, &insns, &discovery);
+    let discovery = dispatch::recover_in(analysis, &insns);
+    let ioctl = analyze_ioctls_with_context(image, analysis, &insns, &discovery);
     let major_functions = discovery.major_functions;
     let interesting_strings = driver_strings(image, pe, raw);
     let (mut classification, mut confidence, framework_indicators) =
@@ -191,21 +203,26 @@ pub fn analyze_driver(image: &str, pe: &PeFile, raw: &[u8], imports: &[ImportDll
 }
 
 pub fn analyze_ioctls(image: &str, pe: &PeFile, raw: &[u8]) -> IoctlReport {
-    let exports = read_exports(pe, raw);
-    let runtime_functions = read_runtime_functions(pe, raw);
-    let insns = decode_executable(pe, raw, &exports, &runtime_functions);
-    let discovery = dispatch::recover(pe, raw, &insns);
-    analyze_ioctls_with_context(image, pe, raw, &insns, &discovery)
+    analyze_ioctls_in(image, &ImageFacts::new(pe, raw))
+}
+
+pub fn analyze_ioctls_in(image: &str, analysis: &ImageFacts<'_>) -> IoctlReport {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
+    let insns = decode_executable(pe, raw, analysis.exports(), analysis.runtime_functions());
+    let discovery = dispatch::recover_in(analysis, &insns);
+    analyze_ioctls_with_context(image, analysis, &insns, &discovery)
 }
 
 fn analyze_ioctls_with_context(
     image: &str,
-    pe: &PeFile,
-    raw: &[u8],
+    analysis: &ImageFacts<'_>,
     insns: &[DecodedInsn],
     discovery: &dispatch::Recovery,
 ) -> IoctlReport {
-    let calls = calls::recover(pe, raw, insns);
+    let pe = analysis.pe();
+    let raw = analysis.raw();
+    let calls = calls::recover(analysis, insns);
     let devices = devices::recover(&calls, discovery);
     let mut coverage = IoctlCoverage {
         linear_instruction_limit_reached: insns.len() == 65_536,

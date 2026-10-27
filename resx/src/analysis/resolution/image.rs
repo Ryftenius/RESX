@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind, Register};
 
-use crate::formats::pe::{read_exports, read_runtime_functions, read_tls_info, PeFile};
+use crate::analysis::image::ImageFacts;
+use crate::formats::pe::PeFile;
 
 /// Upper bound on the bodies one image contributes, so a hostile image cannot make
 /// discovery unbounded.
@@ -61,11 +62,13 @@ fn decode_range(pe: &PeFile, raw: &[u8], start: u32, end: u32, out: &mut Vec<Ins
     }
 }
 
-pub(super) fn discover(pe: &PeFile, raw: &[u8]) -> Vec<Function> {
+pub(super) fn discover(analysis: &ImageFacts<'_>) -> Vec<Function> {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let mut known: BTreeMap<u32, Function> = BTreeMap::new();
 
     // Each .pdata entry either begins a function or continues one through its chain.
-    let runtime = read_runtime_functions(pe, raw);
+    let runtime = analysis.runtime_functions();
     let parents: HashMap<u32, u32> = runtime
         .iter()
         .filter_map(|entry| {
@@ -84,7 +87,7 @@ pub(super) fn discover(pe: &PeFile, raw: &[u8]) -> Vec<Function> {
         }
         rva
     };
-    for entry in &runtime {
+    for entry in runtime {
         if !is_code(pe, entry.begin_rva) {
             continue;
         }
@@ -105,8 +108,8 @@ pub(super) fn discover(pe: &PeFile, raw: &[u8]) -> Vec<Function> {
 
     let mut seeds: VecDeque<u32> = VecDeque::new();
     seeds.push_back(pe.entry_point);
-    seeds.extend(read_exports(pe, raw).iter().map(|export| export.rva));
-    if let Some(tls) = read_tls_info(pe, raw) {
+    seeds.extend(analysis.exports().iter().map(|export| export.rva));
+    if let Some(tls) = analysis.tls() {
         seeds.extend(tls.callbacks.iter().map(|callback| callback.rva));
     }
     let mut scanned: Vec<u32> = known.keys().copied().collect();

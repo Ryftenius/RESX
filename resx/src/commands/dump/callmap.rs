@@ -5,7 +5,7 @@ use std::io::Write;
 use crate::analysis::disasm::{
     apply_dynamic_resolution, collect_api_calls, disassemble_at, ApiCall, Instruction,
 };
-use crate::analysis::symbols::SymbolIndex;
+use crate::analysis::{image::ImageFacts, session::AnalysisSession, symbols::SymbolIndex};
 use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::search::find_dll_path;
@@ -70,10 +70,9 @@ pub(super) fn build_api_call_tree(
     insns: &[Instruction],
     func_name: &str,
     source_image_name: &str,
-    raw: &[u8],
-    pe: &crate::formats::pe::PeFile,
+    session: &AnalysisSession<'_>,
+    headers: Option<&crate::analysis::headers::HeaderIndex>,
     symbol_index: &crate::analysis::symbols::SymbolIndex,
-    exports: &[Export],
     arch: u32,
     image_base: u64,
     cfg: &Config,
@@ -94,19 +93,19 @@ pub(super) fn build_api_call_tree(
         };
 
     let filter = CallFilter::parse(&cfg.funcs_filter);
-    let dynamic = crate::analysis::resolution::cached(pe, raw);
     let root_image = TraceImageView {
-        raw,
-        pe,
+        analysis: session.image(),
         symbol_index,
-        exports,
+        exports: session.image().exports(),
         arch,
         image_base,
-        dynamic: Some(&dynamic),
+        dynamic: Some(session.resolution()),
     };
     let mut sub_cfg = cfg.clone();
     sub_cfg.max_insns = sub_cfg.max_insns.min(300);
     let mut builder = TreeBuilder {
+        headers,
+        exports: session.exports(),
         cfg,
         sub_cfg,
         filter: filter.as_ref(),
@@ -267,8 +266,7 @@ pub(super) fn resolve_syscall_call_details(
 }
 
 struct TraceImageView<'a> {
-    raw: &'a [u8],
-    pe: &'a crate::formats::pe::PeFile,
+    analysis: &'a ImageFacts<'a>,
     symbol_index: &'a crate::analysis::symbols::SymbolIndex,
     exports: &'a [Export],
     arch: u32,
@@ -288,7 +286,7 @@ fn call_location(call: &ApiCall, image: &TraceImageView<'_>, cfg: &Config) -> St
         parts.push(format!("RVA 0x{:08X}", call.rva));
     }
     if cfg.show_offsets {
-        if let Some(offset) = image.pe.rva_to_offset(call.rva) {
+        if let Some(offset) = image.analysis.pe().rva_to_offset(call.rva) {
             parts.push(format!("off 0x{offset:X}"));
         } else {
             parts.push("off ?".to_owned());
@@ -326,10 +324,9 @@ struct LoadedTraceImage {
 }
 
 impl LoadedTraceImage {
-    fn as_view(&self) -> TraceImageView<'_> {
+    fn as_view<'a>(&'a self, analysis: &'a ImageFacts<'a>) -> TraceImageView<'a> {
         TraceImageView {
-            raw: &self.raw,
-            pe: &self.pe,
+            analysis,
             symbol_index: &self.symbol_index,
             exports: &self.exports,
             arch: self.arch,
@@ -340,6 +337,8 @@ impl LoadedTraceImage {
 }
 
 struct TreeBuilder<'a> {
+    headers: Option<&'a crate::analysis::headers::HeaderIndex>,
+    exports: &'a dyn crate::analysis::resolution::ExportProvider,
     cfg: &'a Config,
     sub_cfg: Config,
     filter: Option<&'a CallFilter>,
@@ -364,12 +363,13 @@ impl TreeBuilder<'_> {
             calls.len().min(self.cfg.max_subcalls)
         };
         let mut nodes = Vec::new();
-        let signatures = crate::analysis::headers::configured(self.cfg.argument_headers())
+        let signatures = self
+            .headers
             .map(|index| {
-                crate::analysis::headers::enrich_calls(
-                    &index,
-                    image.pe,
-                    image.raw,
+                crate::analysis::headers::enrich_calls_in(
+                    index,
+                    image.analysis,
+                    self.exports,
                     insns,
                     &calls[..budget],
                 )
@@ -406,7 +406,7 @@ impl TreeBuilder<'_> {
         let mut unbuilt = 0;
         let mut expanded_here = false;
         if can_recurse {
-            if let Some(file_off) = image.pe.rva_to_offset(call.target_rva) {
+            if let Some(file_off) = image.analysis.pe().rva_to_offset(call.target_rva) {
                 self.visited.insert(call.target_rva);
                 expanded_here = true;
                 if let Some((sub_insns, sub_calls)) =
@@ -419,7 +419,8 @@ impl TreeBuilder<'_> {
             }
         } else if let Some(target) = syscall_target.as_ref().filter(|_| descend) {
             if let Some(file_off) = target.image.pe.rva_to_offset(target.rva) {
-                let kernel_view = target.image.as_view();
+                let facts = ImageFacts::new(&target.image.pe, &target.image.raw);
+                let kernel_view = target.image.as_view(&facts);
                 if let Some((sub_insns, sub_calls)) =
                     self.trace_callee(&kernel_view, file_off, target.rva)
                 {
@@ -468,8 +469,8 @@ impl TreeBuilder<'_> {
         rva: u32,
     ) -> Option<(Vec<Instruction>, Vec<ApiCall>)> {
         let insns = disassemble_at(
-            image.raw,
-            image.pe,
+            image.analysis.raw(),
+            image.analysis.pe(),
             file_off,
             rva,
             image.arch,
@@ -481,8 +482,8 @@ impl TreeBuilder<'_> {
         .ok()?;
         let mut calls = collect_api_calls(
             &insns,
-            image.pe,
-            image.raw,
+            image.analysis.pe(),
+            image.analysis.raw(),
             image.symbol_index,
             image.image_base,
             self.cfg.hostile,

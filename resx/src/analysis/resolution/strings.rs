@@ -5,7 +5,7 @@
 
 use crate::formats::pe::PeFile;
 
-use super::dictionary::{self, Dictionary};
+use super::{ExportDictionary, ExportProvider};
 
 /// Longest name considered, in characters.
 const MAX_NAME: usize = 128;
@@ -117,11 +117,16 @@ impl Scheme {
 /// The name `cipher` decodes to under one of the simple schemes, with the scheme.
 /// `keys` are immediates seen near the decode; they are tried first and also as
 /// repeating multi-byte XOR keys.
-pub(super) fn crack(cipher: &[u8], keys: &[u64], want: Want) -> Option<(String, String)> {
+pub(super) fn crack(
+    cipher: &[u8],
+    keys: &[u64],
+    want: Want,
+    exports: &dyn ExportProvider,
+) -> Option<(String, String)> {
     if cipher.len() < MIN_DECODED {
         return None;
     }
-    let dictionary = dictionary::get();
+    let dictionary = exports.dictionary();
     if dictionary.apis.is_empty() && dictionary.modules.is_empty() {
         return None;
     }
@@ -228,7 +233,12 @@ pub(super) fn crack(cipher: &[u8], keys: &[u64], want: Want) -> Option<(String, 
 /// The longest prefix of `decoded` that is a known export or module name. A cipher
 /// region often runs past its string into unrelated bytes, so the name need not be
 /// terminated.
-fn longest_name(decoded: &[u8], wide: bool, want: Want, dictionary: &Dictionary) -> Option<String> {
+fn longest_name(
+    decoded: &[u8],
+    wide: bool,
+    want: Want,
+    dictionary: &ExportDictionary,
+) -> Option<String> {
     let step = if wide { 2 } else { 1 };
     let mut text = String::new();
     for unit in decoded.chunks_exact(step).take(MAX_NAME) {
@@ -279,8 +289,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn simple_ciphers_decode_to_known_names() {
+        let mut dictionary = ExportDictionary::default();
+        dictionary.add_exports("kernel32.dll", ["CreateThread", "VirtualProtect"]);
+        for module in ["user32.dll", "normaliz.dll"] {
+            dictionary.add_module(module);
+        }
+        let crack = |bytes: &[u8], keys: &[u64], want| super::crack(bytes, keys, want, &dictionary);
         let xor: Vec<u8> = b"CreateThread\0".iter().map(|b| b ^ 0x5A).collect();
         assert_eq!(
             crack(&xor, &[], Want::Api),

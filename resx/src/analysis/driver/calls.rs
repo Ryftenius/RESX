@@ -1,6 +1,7 @@
 //! Bounded static x64 call-site facts. No target execution or kernel-object lookup.
 use super::{DecodedInsn, PeFile};
-use crate::formats::pe::{read_imports, read_u32, IMAGE_SCN_MEM_WRITE};
+use crate::analysis::image::ImageFacts;
+use crate::formats::pe::{read_u32, IMAGE_SCN_MEM_WRITE};
 use iced_x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
 };
@@ -684,19 +685,22 @@ fn oid_value(
     }
 }
 
-pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Vec<CallEvidence> {
+pub(super) fn recover(analysis: &ImageFacts<'_>, insns: &[DecodedInsn]) -> Vec<CallEvidence> {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     if pe.machine != 0x8664 {
         return Vec::new();
     }
-    let imports: BTreeMap<_, _> = read_imports(pe, raw)
-        .into_iter()
+    let imports: BTreeMap<_, _> = analysis
+        .imports()
+        .iter()
         .flat_map(|dll| {
-            dll.entries.into_iter().map(move |entry| {
+            dll.entries.iter().map(move |entry| {
                 (
                     entry.slot_rva,
                     Value::Import {
                         dll: dll.dll.clone(),
-                        name: entry.name,
+                        name: entry.name.clone(),
                     },
                 )
             })

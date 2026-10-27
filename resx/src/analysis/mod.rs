@@ -6,8 +6,10 @@ pub mod driver;
 pub mod edr;
 pub mod follow;
 pub mod headers;
+pub mod image;
 pub mod reconstruction;
 pub mod resolution;
+pub mod session;
 pub mod symbols;
 pub mod wdf;
 

@@ -1,11 +1,12 @@
 use std::io::Write;
 
-use crate::analysis::behavior::analyze_image_with_headers;
+use crate::analysis::behavior::analyze_in;
+use crate::analysis::session::AnalysisSession;
 use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::json::versioned_object;
 use crate::core::search::find_dll_path;
-use crate::formats::pe::{parse_pe, read_imports};
+use crate::formats::pe::parse_pe;
 
 pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     if dll_arg.is_empty() {
@@ -20,9 +21,10 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         .to_string();
     let raw = crate::core::input::read_image(&dll_path).map_err(|e| format!("read file: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
-    let imports = read_imports(&pe, &raw);
-    let headers = crate::analysis::headers::configured(cfg.argument_headers());
-    let report = analyze_image_with_headers(&image, &pe, &raw, &imports, headers.as_deref());
+    let exports = crate::providers::exports::SystemExports::discover();
+    let analysis = AnalysisSession::with_exports(&pe, &raw, &exports);
+    let headers = crate::providers::headers::configured(cfg.argument_headers());
+    let report = analyze_in(&image, &analysis, headers.as_deref());
 
     if cfg.json {
         writeln!(

@@ -10,19 +10,25 @@
 //! indirect calls made through resolved pointers and grades the techniques used, from
 //! a plain GetProcAddress lookup to hashed lookups through the loader lists.
 
-mod dictionary;
+pub(crate) mod dictionary;
 mod hashes;
 mod image;
 mod machine;
 mod strings;
 
+pub use crate::providers::legacy::{
+    resolution_analyze as analyze, resolution_arguments as call_arguments,
+    resolution_cached as cached,
+};
+pub use dictionary::{ExportDictionary, ExportProvider};
+
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 use serde::{Serialize, Serializer};
 
-use crate::formats::pe::{read_imports, read_load_config, PeFile};
+use crate::analysis::image::ImageFacts;
+use crate::formats::pe::PeFile;
 use machine::{Context, Facts, Module, Name, ResId, Summary, Through, Val, Via};
 use strings::How;
 
@@ -154,45 +160,28 @@ fn hex_list<S: Serializer>(values: &[u32], serializer: S) -> Result<S::Ok, S::Er
     serializer.collect_seq(values.iter().map(|value| format!("0x{value:08X}")))
 }
 
-/// [`analyze`], once per image per process.
-pub fn cached(pe: &PeFile, raw: &[u8]) -> Arc<ResolutionReport> {
-    type Key = (usize, usize, u64, u32, u32);
-    static CACHE: Mutex<Vec<(Key, Arc<ResolutionReport>)>> = Mutex::new(Vec::new());
-    // A freed buffer can be reused for another image, so identity is included.
-    let key = (
-        raw.as_ptr() as usize,
-        raw.len(),
-        pe.image_base,
-        pe.timestamp,
-        pe.entry_point,
-    );
-    if let Some((_, report)) = CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter()
-        .find(|(cached, _)| *cached == key)
-    {
-        return report.clone();
-    }
-    let report = Arc::new(analyze(pe, raw));
-    let mut cache = CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.push((key, report.clone()));
-    if cache.len() > 4 {
-        cache.remove(0);
-    }
-    report
+/// Analyze using an explicit export source. An empty dictionary disables host-name inference.
+pub fn analyze_with_exports(
+    pe: &PeFile,
+    raw: &[u8],
+    exports: &dyn ExportProvider,
+) -> ResolutionReport {
+    analyze_in(&ImageFacts::new(pe, raw), exports)
 }
 
-pub fn analyze(pe: &PeFile, raw: &[u8]) -> ResolutionReport {
+pub(crate) fn analyze_in(
+    analysis: &ImageFacts<'_>,
+    exports: &dyn ExportProvider,
+) -> ResolutionReport {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let layout = match pe.machine {
         0x8664 => &machine::X64,
         0x014C => &machine::X86,
         _ => return ResolutionReport::default(),
     };
-    let functions = image::discover(pe, raw);
-    let mut ctx = context(pe, raw, layout, &functions);
+    let functions = image::discover(analysis);
+    let mut ctx = context(analysis, exports, layout, &functions);
     let run = |ctx: &Context<'_>, function: &image::Function| {
         machine::run(ctx, function, &image::decode(pe, raw, function))
     };
@@ -272,17 +261,19 @@ pub fn analyze(pe: &PeFile, raw: &[u8]) -> ResolutionReport {
 }
 
 fn context<'a>(
-    pe: &'a PeFile,
-    raw: &'a [u8],
+    analysis: &'a ImageFacts<'_>,
+    exports: &'a dyn ExportProvider,
     layout: &'static machine::Layout,
     functions: &[image::Function],
 ) -> Context<'a> {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let mut imports = HashMap::new();
-    for dll in read_imports(pe, raw) {
-        for entry in dll.entries {
+    for dll in analysis.imports() {
+        for entry in &dll.entries {
             imports.insert(
                 pe.image_base + u64::from(entry.slot_rva),
-                (dll.dll.clone(), entry.name),
+                (dll.dll.clone(), entry.name.clone()),
             );
         }
     }
@@ -306,8 +297,9 @@ fn context<'a>(
             )
         })
         .collect();
-    let guard_dispatch =
-        read_load_config(pe, raw).map_or(0, |load| load.guard_cf_dispatch_function_pointer);
+    let guard_dispatch = analysis
+        .load_config()
+        .map_or(0, |load| load.guard_cf_dispatch_function_pointer);
     let mut ret_pops = HashMap::new();
     if layout.args.is_empty() {
         for function in functions {
@@ -328,6 +320,7 @@ fn context<'a>(
         }
     }
     Context {
+        exports,
         pe,
         raw,
         layout,
@@ -344,13 +337,14 @@ fn context<'a>(
     }
 }
 
-/// Argument values at every call in one function's instructions, by call RVA, as
-/// argument slots (see [`crate::analysis::headers::HeaderIndex::render_call`]).
-pub fn call_arguments(
-    pe: &PeFile,
-    raw: &[u8],
+/// Argument values at each call, using explicit image and export inputs.
+pub fn call_arguments_in(
+    analysis: &ImageFacts<'_>,
+    exports: &dyn ExportProvider,
     insns: &[iced_x86::Instruction],
 ) -> HashMap<u32, Vec<crate::analysis::headers::ArgValue>> {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let layout = match pe.machine {
         0x8664 => &machine::X64,
         0x014C => &machine::X86,
@@ -377,7 +371,7 @@ pub fn call_arguments(
         })
         .map(|insn| image::function_at(pe, raw, rva(insn.near_branch_target())))
         .collect();
-    let mut ctx = context(pe, raw, layout, &callees);
+    let mut ctx = context(analysis, exports, layout, &callees);
     ctx.capture = true;
     machine::run(&ctx, &function, insns)
         .call_args
@@ -543,7 +537,11 @@ impl Inverted {
 
 /// Hash constants grouped by the function whose walk compares them, inverted over the
 /// export and module dictionaries with that function's (and its callees') hints.
-fn invert_hashes(rvas: &HashMap<u32, usize>, facts: &[Facts]) -> Inverted {
+fn invert_hashes(
+    rvas: &HashMap<u32, usize>,
+    facts: &[Facts],
+    exports: &dyn ExportProvider,
+) -> Inverted {
     let mut api_groups: HashMap<u32, BTreeSet<u64>> = HashMap::new();
     let mut module_groups: HashMap<u32, BTreeSet<u64>> = HashMap::new();
     for (index, function_facts) in facts.iter().enumerate() {
@@ -601,8 +599,9 @@ fn invert_hashes(rvas: &HashMap<u32, usize>, facts: &[Facts]) -> Inverted {
         .copied()
         .filter(|&rva| hints(rva).any())
         .collect();
-    let dictionary = dictionary::get();
-    let api_names: Vec<&str> = dictionary.apis.keys().map(String::as_str).collect();
+    let dictionary = exports.dictionary();
+    let mut api_names: Vec<&str> = dictionary.apis.keys().map(String::as_str).collect();
+    api_names.sort_unstable();
     let module_names: Vec<&str> = dictionary.module_names.iter().map(String::as_str).collect();
     for (groups, names, out) in [
         (&api_groups, &api_names, &mut inverted.apis),
@@ -659,7 +658,7 @@ fn report(functions: &[image::Function], facts: &[Facts], ctx: &Context<'_>) -> 
         .enumerate()
         .map(|(index, function)| (function.rva, index))
         .collect();
-    let inverted = invert_hashes(&rvas, facts);
+    let inverted = invert_hashes(&rvas, facts, ctx.exports);
     let dictionary_needed = facts.iter().any(|function_facts| {
         function_facts
             .resolutions
@@ -717,7 +716,7 @@ fn report(functions: &[image::Function], facts: &[Facts], ctx: &Context<'_>) -> 
             if module.is_none() && dictionary_needed {
                 if let Some(owner) = api
                     .as_deref()
-                    .and_then(|api| dictionary::get().module_of(api))
+                    .and_then(|api| ctx.exports.dictionary().module_of(api))
                 {
                     module = Some(owner.to_owned());
                     module_source = format!("{module_source}, inferred from export name");
@@ -1108,4 +1107,22 @@ fn summary(techniques: &[Technique]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::analysis::image::tests::image;
+
+    #[test]
+    fn same_allocation_and_headers_do_not_reuse_stale_resolution() {
+        let pe = image();
+        let mut raw = vec![0u8; 0x400];
+        raw[0x200..0x203].copy_from_slice(&[0xc3, 0x90, 0xc3]);
+        let first = cached(&pe, &raw);
+        assert!(first.function_containing(&pe, &raw, 0x1001).is_none());
+        raw[0x200] = 0x90;
+        let second = cached(&pe, &raw);
+        assert!(second.function_containing(&pe, &raw, 0x1001).is_some());
+    }
 }

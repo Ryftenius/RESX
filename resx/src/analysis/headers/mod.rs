@@ -11,19 +11,15 @@ mod families;
 mod parse;
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 pub use parse::{Direction, Param, Prototype};
 use parse::{TypeDef, TypeKind};
 
-/// Bumped when the parser or index layout changes, so stale caches are rebuilt.
-const FORMAT: u32 = 2;
-/// Include subdirectories holding C API declarations, in precedence order.
-const SCANNED: &[&str] = &["um", "shared", "ucrt", "km"];
+// Host-aware compatibility aliases. New analyses receive an index as data.
+pub use crate::providers::headers::{configured, installed_sdk, load, resolve_root};
+pub use crate::providers::legacy::header_enrich as enrich_calls;
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct HeaderIndex {
@@ -79,14 +75,16 @@ pub struct CallSignature {
     pub arguments: Vec<ArgValue>,
 }
 
-/// Recover arguments once per function, only when an identified API has a header.
-pub fn enrich_calls(
+/// Recover arguments using the caller's shared immutable image facts.
+pub fn enrich_calls_in(
     index: &HeaderIndex,
-    pe: &crate::formats::pe::PeFile,
-    raw: &[u8],
+    analysis: &crate::analysis::image::ImageFacts<'_>,
+    exports: &dyn crate::analysis::resolution::ExportProvider,
     insns: &[crate::analysis::disasm::Instruction],
     calls: &[crate::analysis::disasm::ApiCall],
 ) -> HashMap<u32, CallSignature> {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let known: Vec<_> = calls
         .iter()
         .filter_map(|call| {
@@ -101,7 +99,7 @@ pub fn enrich_calls(
         return HashMap::new();
     }
     let decoded: Vec<_> = insns.iter().map(|insn| insn.iced).collect();
-    let arguments = crate::analysis::resolution::call_arguments(pe, raw, &decoded);
+    let arguments = crate::analysis::resolution::call_arguments_in(analysis, exports, &decoded);
     known
         .into_iter()
         .map(|(call, prototype)| {
@@ -512,163 +510,6 @@ fn primitive(text: &str) -> Option<Class> {
     }
 }
 
-/// The directory holding `um/windows.h` for `dir`: an SDK version directory, its
-/// `Include` parent, the kit root, or (for convenience) any directory from which the
-/// newest installed Windows 10/11 SDK is found.
-pub fn resolve_root(dir: &Path) -> Option<PathBuf> {
-    let has_headers = |path: &Path| path.join("um").join("windows.h").is_file();
-    if has_headers(dir) {
-        return Some(dir.to_path_buf());
-    }
-    let newest = |include: &Path| -> Option<PathBuf> {
-        let mut versions: Vec<PathBuf> = std::fs::read_dir(include)
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| has_headers(path))
-            .collect();
-        versions.sort();
-        versions.pop()
-    };
-    newest(dir).or_else(|| newest(&dir.join("Include")))
-}
-
-/// An installed Windows SDK, for pointing out where Windows.h lives when the
-/// configured directory (an MSVC toolset, say) does not have it.
-pub fn installed_sdk() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(dir) = std::env::var_os("WindowsSdkDir") {
-        candidates.push(PathBuf::from(dir));
-    }
-    for var in ["ProgramFiles(x86)", "ProgramFiles"] {
-        if let Some(dir) = std::env::var_os(var) {
-            candidates.push(PathBuf::from(dir).join("Windows Kits").join("10"));
-        }
-    }
-    candidates.iter().find_map(|dir| resolve_root(dir))
-}
-
-/// The index for the headers the user configured, loaded once per process.
-pub fn configured(dir: Option<&str>) -> Option<Arc<HeaderIndex>> {
-    let dir = dir.filter(|dir| !dir.is_empty())?;
-    static LOADED: Mutex<Option<(String, Option<Arc<HeaderIndex>>)>> = Mutex::new(None);
-    let mut loaded = LOADED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some((cached, index)) = loaded.as_ref() {
-        if cached == dir {
-            return index.clone();
-        }
-    }
-    let index = match load(Path::new(dir)) {
-        Ok(index) => Some(Arc::new(index)),
-        Err(error) => {
-            eprintln!("[resx] Windows headers unavailable: {error}");
-            None
-        }
-    };
-    *loaded = Some((dir.to_owned(), index.clone()));
-    index
-}
-
-/// Loads the index for `dir` from the per-user cache, building it first if the
-/// headers changed since it was written.
-pub fn load(dir: &Path) -> Result<HeaderIndex, String> {
-    let root = resolve_root(dir).ok_or_else(|| {
-        format!(
-            "{} has no um\\windows.h; point --headers at a Windows SDK Include directory",
-            dir.display()
-        )
-    })?;
-    let fingerprint = fingerprint(&root);
-    let cache = cache_dir().map(|dir| dir.join(format!("headers-{fingerprint:016x}.json")));
-    if let Some(index) = cache
-        .as_ref()
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<HeaderIndex>(&bytes).ok())
-    {
-        return Ok(index.finish());
-    }
-    let index = build(&root)?;
-    if let Some(path) = cache {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(bytes) = serde_json::to_vec(&index) {
-            let _ = std::fs::write(path, bytes);
-        }
-    }
-    Ok(index.finish())
-}
-
-fn cache_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|dir| dir.join("RESX").join("cache"))
-}
-
-fn header_files(root: &Path) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
-    for sub in SCANNED {
-        let mut stack = vec![root.join(sub)];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            let mut entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
-            entries.sort();
-            for path in entries {
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("h"))
-                {
-                    let relative = path
-                        .strip_prefix(root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    out.push((relative, path));
-                }
-            }
-        }
-    }
-    out
-}
-
-fn fingerprint(root: &Path) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    FORMAT.hash(&mut hasher);
-    root.to_string_lossy()
-        .to_ascii_lowercase()
-        .hash(&mut hasher);
-    for (relative, path) in header_files(root) {
-        relative.hash(&mut hasher);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            meta.len().hash(&mut hasher);
-            if let Ok(modified) = meta.modified() {
-                modified.hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
-fn build(root: &Path) -> Result<HeaderIndex, String> {
-    let files = header_files(root);
-    if files.is_empty() {
-        return Err(format!("no headers under {}", root.display()));
-    }
-    let mut parsed = parse::Parsed::default();
-    for (relative, path) in &files {
-        if let Ok(bytes) = std::fs::read(path) {
-            parse::parse(&String::from_utf8_lossy(&bytes), relative, &mut parsed);
-        }
-    }
-    Ok(from_parsed(root.to_string_lossy().into_owned(), parsed))
-}
-
 fn from_parsed(root: String, parsed: parse::Parsed) -> HeaderIndex {
     let mut index = HeaderIndex {
         root,
@@ -759,7 +600,24 @@ fn resolve(
 }
 
 impl HeaderIndex {
-    fn finish(mut self) -> Self {
+    /// Parse caller-supplied `(relative name, text)` sources in precedence order.
+    /// This performs no file lookup or cache access.
+    pub fn from_sources<N, T>(
+        root: impl Into<String>,
+        sources: impl IntoIterator<Item = (N, T)>,
+    ) -> Self
+    where
+        N: AsRef<str>,
+        T: AsRef<str>,
+    {
+        let mut parsed = parse::Parsed::default();
+        for (name, text) in sources {
+            parse::parse(text.as_ref(), name.as_ref(), &mut parsed);
+        }
+        from_parsed(root.into(), parsed).finish()
+    }
+
+    pub(crate) fn finish(mut self) -> Self {
         self.families = families::Candidates::build(&self.constants);
         self
     }
@@ -770,9 +628,7 @@ mod tests {
     use super::*;
 
     fn index(text: &str) -> HeaderIndex {
-        let mut parsed = parse::Parsed::default();
-        parse::parse(text, "um/test.h", &mut parsed);
-        from_parsed(String::new(), parsed).finish()
+        HeaderIndex::from_sources("", [("um/test.h", text)])
     }
 
     const SDK: &str = r#"
@@ -905,7 +761,9 @@ mod tests {
             return;
         };
         // Parse directly: validation must not write a user-wide cache or preferences.
-        let index = build(&root).unwrap().finish();
+        let index = crate::providers::headers::SdkHeaders::new(root, None)
+            .get()
+            .unwrap();
         let alloc = index.prototype("VirtualAlloc").unwrap();
         assert_eq!(alloc.params.len(), 4);
         assert_eq!(alloc.params[1].name, "dwSize");

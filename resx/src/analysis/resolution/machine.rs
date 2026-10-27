@@ -288,6 +288,7 @@ pub(super) struct Facts {
 
 /// Image-wide state the interpreter reads; updated between passes.
 pub(super) struct Context<'a> {
+    pub exports: &'a dyn super::ExportProvider,
     pub pe: &'a PeFile,
     pub raw: &'a [u8],
     pub layout: &'static Layout,
@@ -1963,7 +1964,7 @@ impl<'c, 'a> Machine<'c, 'a> {
             return Name::Unknown;
         };
         let bytes = &bytes[..bytes.len().min(256)];
-        match strings::crack(bytes, &self.keys, want) {
+        match strings::crack(bytes, &self.keys, want, self.ctx.exports) {
             Some((text, scheme)) => Name::Text(text, How::Decoded(scheme)),
             None => Name::Unknown,
         }
@@ -2000,7 +2001,7 @@ impl<'c, 'a> Machine<'c, 'a> {
                 return Name::Text(text, How::StackString);
             }
         }
-        if let Some((text, scheme)) = strings::crack(&cipher, &self.keys, want) {
+        if let Some((text, scheme)) = strings::crack(&cipher, &self.keys, want, self.ctx.exports) {
             return Name::Text(text, How::Decoded(scheme));
         }
         // Data written at the buffer's own start first, then nearer writes; within a

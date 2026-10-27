@@ -80,7 +80,7 @@ fn build_grammar() -> Grammar {
     Grammar { commands, options }
 }
 
-fn canonical_command(name: &str) -> Option<&'static str> {
+pub(crate) fn canonical_command(name: &str) -> Option<&'static str> {
     grammar()
         .commands
         .get(&name.to_ascii_lowercase())

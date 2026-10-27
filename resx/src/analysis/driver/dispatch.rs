@@ -1,8 +1,10 @@
 //! Path-bounded DRIVER_OBJECT assignment recovery under the Windows x64 ABI.
 //! These are conditional static stores, not a recovered live dispatch table.
 use super::ioctl::Root;
-use super::{major_function_name, DecodedInsn, MajorFunctionAssignment, PeFile};
-use crate::formats::pe::read_imports;
+#[cfg(test)]
+use super::PeFile;
+use super::{major_function_name, DecodedInsn, MajorFunctionAssignment};
+use crate::analysis::image::ImageFacts;
 use iced_x86::{
     Decoder, DecoderOptions, FlowControl, Formatter, Instruction, InstructionInfoFactory,
     IntelFormatter, Mnemonic, OpAccess, OpKind, Register,
@@ -112,18 +114,27 @@ pub(super) struct Recovery {
     pub truncated: bool,
 }
 
+#[cfg(test)]
 pub(super) fn recover(pe: &PeFile, raw: &[u8], insns: &[DecodedInsn]) -> Recovery {
+    recover_in(&ImageFacts::new(pe, raw), insns)
+}
+
+pub(super) fn recover_in(analysis: &ImageFacts<'_>, insns: &[DecodedInsn]) -> Recovery {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     if pe.machine != 0x8664 || pe.subsystem != 1 {
         return Recovery::default();
     }
-    let class_initialize: BTreeSet<_> = read_imports(pe, raw)
+    let class_initialize: BTreeSet<_> = analysis
+        .imports()
         .iter()
         .filter(|dll| dll.dll.eq_ignore_ascii_case("classpnp.sys"))
         .flat_map(|dll| dll.entries.iter())
         .filter(|entry| entry.name == "ClassInitialize")
         .map(|entry| entry.slot_rva)
         .collect();
-    let device_creates: BTreeSet<_> = read_imports(pe, raw)
+    let device_creates: BTreeSet<_> = analysis
+        .imports()
         .iter()
         .filter(|dll| {
             dll.dll.eq_ignore_ascii_case("ntoskrnl.exe")

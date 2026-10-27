@@ -85,6 +85,10 @@ fn run_with_chain(
     progress.tick("reading image");
 
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
+    let exports_provider = crate::providers::exports::SystemExports::discover();
+    let session =
+        crate::analysis::session::AnalysisSession::with_exports(&pe, &raw, &exports_provider);
+    let analysis = session.image();
     progress.tick("parsing PE headers");
     let pe_arch = pe.arch;
     let arch = cfg.effective_arch(pe_arch);
@@ -103,7 +107,7 @@ fn run_with_chain(
         writeln!(w, "{}", c.info(&line)).ok();
     }
 
-    let exports = read_exports(&pe, &raw);
+    let exports = analysis.exports();
     progress.tick("reading export table");
     if cfg.verbose && !cfg.quiet && !cfg.json && !exports.is_empty() {
         writeln!(w, "{}", c.info(&format!("Exports: {}", exports.len()))).ok();
@@ -137,8 +141,8 @@ fn run_with_chain(
     if !cfg.no_pdb {
         progress.tick("loading symbols");
     }
-    let symbol_index = SymbolIndex::from_exports_and_pdb(&exports, &pdb_symbols, image_base);
-    let imports = read_imports(&pe, &raw);
+    let symbol_index = SymbolIndex::from_exports_and_pdb(exports, &pdb_symbols, image_base);
+    let imports = analysis.imports();
     progress.tick("reading import table");
     let import_count: usize = imports.iter().map(|dll| dll.entries.len()).sum();
     let startup_routines = find_startup_routines(&pe, &raw);
@@ -152,7 +156,7 @@ fn run_with_chain(
         Some(discover_functions(
             &raw,
             &pe,
-            &exports,
+            exports,
             &symbol_index,
             &pdb_symbols,
             &startup_routines,
@@ -171,11 +175,11 @@ fn run_with_chain(
     }
 
     if cfg.show_eat {
-        print_eat(w, &exports, &dll_name, c);
+        print_eat(w, exports, &dll_name, c);
     }
 
     if cfg.show_iat {
-        print_iat(w, &imports, &dll_name, c);
+        print_iat(w, imports, &dll_name, c);
     }
 
     if cfg.sections && !cfg.json {
@@ -191,7 +195,7 @@ fn run_with_chain(
     }
 
     let metadata_intelli = if want_intelli && only_metadata {
-        let findings = analyze_image(&raw, &imports, None);
+        let findings = analyze_image(&raw, imports, None);
         if !cfg.json {
             print_intelli_findings(w, &findings, c);
         }
@@ -245,7 +249,7 @@ fn run_with_chain(
                 indirect_flow: (!table_view).then(|| {
                     analyze_indirect_flow(
                         &pe,
-                        &imports,
+                        imports,
                         &read_data_summary(&pe, &raw),
                         &[],
                         load_config.as_ref(),
@@ -272,7 +276,7 @@ fn run_with_chain(
     progress.finish();
     let (target_rva, mut resolved_name, pdb_loaded) = match resolve_function(
         func_arg,
-        &exports,
+        exports,
         &pdb_symbols,
         &pe,
         &raw,
@@ -297,7 +301,7 @@ fn run_with_chain(
         let mut xrefs = find_xrefs(
             &raw,
             &pe,
-            &exports,
+            exports,
             Some(&symbol_index),
             target_rva,
             &resolved_name,
@@ -346,7 +350,7 @@ fn run_with_chain(
             find_xrefs(
                 &raw,
                 &pe,
-                &exports,
+                exports,
                 Some(&symbol_index),
                 target_rva,
                 &resolved_name,
@@ -389,7 +393,7 @@ fn run_with_chain(
             let mut xrefs = find_xrefs(
                 &raw,
                 &pe,
-                &exports,
+                exports,
                 Some(&symbol_index),
                 target_rva,
                 &resolved_name,
@@ -510,7 +514,7 @@ fn run_with_chain(
                             target_rva,
                             arch,
                             image_base,
-                            &exports,
+                            exports,
                             Some(&symbol_index),
                             cfg,
                         ) {
@@ -602,7 +606,7 @@ fn run_with_chain(
         target_rva,
         arch,
         image_base,
-        &exports,
+        exports,
         Some(&symbol_index),
         cfg,
     )
@@ -613,7 +617,7 @@ fn run_with_chain(
         target_rva,
         arch,
         image_base,
-        &exports,
+        exports,
         Some(&symbol_index),
         cfg,
     )
@@ -690,7 +694,7 @@ fn run_with_chain(
         let mut x = find_xrefs(
             &raw,
             &pe,
-            &exports,
+            exports,
             Some(&symbol_index),
             target_rva,
             &resolved_name,
@@ -721,7 +725,7 @@ fn run_with_chain(
         None
     };
 
-    let header_index = crate::analysis::headers::configured(cfg.argument_headers());
+    let header_index = crate::providers::headers::configured(cfg.argument_headers());
     let api_calls = if cfg.funcs_depth > 0 || header_index.is_some() {
         let mut calls =
             collect_api_calls(&insns, &pe, &raw, &symbol_index, image_base, cfg.hostile);
@@ -736,11 +740,7 @@ fn run_with_chain(
             });
         }
         calls.extend(switch_api_calls.iter().cloned());
-        crate::analysis::disasm::apply_dynamic_resolution(
-            &mut calls,
-            &insns,
-            &crate::analysis::resolution::cached(&pe, &raw),
-        );
+        crate::analysis::disasm::apply_dynamic_resolution(&mut calls, &insns, session.resolution());
         calls.sort_by_key(|c| c.rva);
         progress.tick("building API call map");
         calls
@@ -749,7 +749,15 @@ fn run_with_chain(
     };
     let signatures = header_index
         .as_ref()
-        .map(|index| crate::analysis::headers::enrich_calls(index, &pe, &raw, &insns, &api_calls))
+        .map(|index| {
+            crate::analysis::headers::enrich_calls_in(
+                index,
+                analysis,
+                session.exports(),
+                &insns,
+                &api_calls,
+            )
+        })
         .unwrap_or_default();
     for insn in &mut insns {
         if let Some(signature) = signatures.get(&insn.rva) {
@@ -765,10 +773,9 @@ fn run_with_chain(
             &insns,
             &resolved_name,
             &dll_name,
-            &raw,
-            &pe,
+            &session,
+            header_index.as_deref(),
             &symbol_index,
-            &exports,
             arch,
             image_base,
             cfg,
@@ -815,7 +822,7 @@ fn run_with_chain(
             start_rva: target_rva,
             arch,
             image_base,
-            exports: &exports,
+            exports,
             symbols: Some(&symbol_index),
             cfg,
             prototype: &prototype,
@@ -824,15 +831,15 @@ fn run_with_chain(
         None
     };
     let indirect_flow = if cfg.json {
-        data_summary.as_ref().map(|data| {
-            analyze_indirect_flow(&pe, &imports, data, &api_calls, load_config.as_ref())
-        })
+        data_summary
+            .as_ref()
+            .map(|data| analyze_indirect_flow(&pe, imports, data, &api_calls, load_config.as_ref()))
     } else {
         None
     };
 
     let intelli_findings = if want_intelli {
-        let findings = analyze_image(&raw, &imports, Some(&insns));
+        let findings = analyze_image(&raw, imports, Some(&insns));
         progress.tick("running Intelli triage");
         findings
     } else {
@@ -1059,8 +1066,7 @@ fn run_with_chain(
             if let Some(tree) = &call_tree {
                 print_api_calls(w, tree, &resolved_name, c, cfg);
             }
-            let driver_report =
-                crate::analysis::driver::analyze_driver(&dll_name, &pe, &raw, &imports);
+            let driver_report = crate::analysis::driver::analyze_driver_in(&dll_name, analysis);
             super::super::driver::render_flow_contracts(w, c, &driver_report, cfg.max_subcalls);
         }
         if want_intelli {

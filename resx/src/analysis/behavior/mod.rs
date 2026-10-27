@@ -1,7 +1,9 @@
 use iced_x86::{Decoder, DecoderOptions, Formatter, Mnemonic, OpKind, Register};
 use serde::Serialize;
 
-use crate::formats::pe::{read_clr_info, read_tls_info, resolve_iat_slot, ImportDll, PeFile};
+use crate::formats::pe::{read_clr_info, ImportDll, PeFile};
+
+use crate::analysis::{image::ImageFacts, session::AnalysisSession};
 
 const COMIMAGE_FLAGS_ILONLY: u32 = 0x0000_0001;
 
@@ -49,33 +51,46 @@ pub fn analyze_image(
     analyze_image_with_headers(image, pe, raw, imports, None)
 }
 
-pub fn analyze_image_with_headers(
+pub use crate::providers::legacy::behavior_with_headers as analyze_image_with_headers;
+
+pub fn analyze_in(
     image: &str,
-    pe: &PeFile,
-    raw: &[u8],
+    session: &AnalysisSession<'_>,
+    headers: Option<&crate::analysis::headers::HeaderIndex>,
+) -> BehaviorReport {
+    analyze_with_context(image, session, session.image().imports(), headers)
+}
+
+pub(crate) fn analyze_with_context(
+    image: &str,
+    session: &AnalysisSession<'_>,
     imports: &[ImportDll],
     headers: Option<&crate::analysis::headers::HeaderIndex>,
 ) -> BehaviorReport {
+    let analysis = session.image();
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let mut findings = Vec::new();
     let mut api_signatures = std::collections::BTreeMap::new();
-    findings.extend(scan_tls(pe, raw));
+    findings.extend(scan_tls(analysis));
     findings.extend(scan_sections(pe));
     findings.extend(scan_imports(imports));
 
-    let mut resolution = crate::analysis::resolution::ResolutionReport::default();
+    let mut resolution = None;
     if let Some(managed_finding) = managed_native_scan_suppression(pe, raw) {
         findings.push(managed_finding);
     } else {
-        let insns = scan_executable_instructions(pe, raw);
+        let insns = scan_executable_instructions(analysis);
         findings.extend(scan_instruction_signals(&insns));
         findings.extend(scan_syscall_stubs(&insns));
         findings.extend(scan_medium_clusters(&insns));
-        resolution = crate::analysis::resolution::analyze(pe, raw);
+        let resolved = session.resolution();
+        resolution = Some(resolved);
         if let Some(headers) = headers {
             let mut arguments = std::collections::HashMap::new();
             let mut visited = std::collections::HashSet::new();
             for insn in &insns {
-                let name = resolution
+                let name = resolved
                     .call_target(insn.rva)
                     .and_then(|api| api.api.as_deref())
                     .or_else(|| insn.import_call.as_ref().map(|(_, name)| name.as_str()));
@@ -83,10 +98,12 @@ pub fn analyze_image_with_headers(
                     continue;
                 };
                 if !arguments.contains_key(&insn.rva) {
-                    if let Some(body) = resolution.function_containing(pe, raw, insn.rva) {
+                    if let Some(body) = resolved.function_containing(pe, raw, insn.rva) {
                         if body.first().is_some_and(|first| visited.insert(first.ip())) {
-                            arguments.extend(crate::analysis::resolution::call_arguments(
-                                pe, raw, &body,
+                            arguments.extend(crate::analysis::resolution::call_arguments_in(
+                                analysis,
+                                session.exports(),
+                                &body,
                             ));
                         }
                     }
@@ -108,7 +125,7 @@ pub fn analyze_image_with_headers(
                 );
             }
         }
-        findings.extend(resolution.techniques.iter().map(|technique| {
+        findings.extend(resolved.techniques.iter().map(|technique| {
             finding(
                 "api-resolution",
                 &technique.rule,
@@ -136,8 +153,8 @@ pub fn analyze_image_with_headers(
         image: image.to_owned(),
         finding_count: findings.len(),
         findings,
-        api_resolution: resolution.summary,
-        resolved_apis: resolution.resolved,
+        api_resolution: resolution.map(|r| r.summary.clone()).unwrap_or_default(),
+        resolved_apis: resolution.map(|r| r.resolved.clone()).unwrap_or_default(),
     }
 }
 
@@ -171,10 +188,10 @@ fn managed_native_scan_suppression(pe: &PeFile, raw: &[u8]) -> Option<BehaviorFi
     ))
 }
 
-fn scan_tls(pe: &PeFile, raw: &[u8]) -> Vec<BehaviorFinding> {
+fn scan_tls(analysis: &ImageFacts<'_>) -> Vec<BehaviorFinding> {
     let mut findings = Vec::new();
-    if let Some(tls) = read_tls_info(pe, raw) {
-        for callback in tls.callbacks {
+    if let Some(tls) = analysis.tls() {
+        for callback in &tls.callbacks {
             findings.push(finding(
                 "loader",
                 "tls-callback",
@@ -284,7 +301,9 @@ fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn scan_executable_instructions(pe: &PeFile, raw: &[u8]) -> Vec<ScannedInsn> {
+fn scan_executable_instructions(analysis: &ImageFacts<'_>) -> Vec<ScannedInsn> {
+    let pe = analysis.pe();
+    let raw = analysis.raw();
     let mut out = Vec::new();
     for section in &pe.sections {
         if !section.is_executable() || section.raw_size == 0 {
@@ -315,7 +334,7 @@ fn scan_executable_instructions(pe: &PeFile, raw: &[u8]) -> Vec<ScannedInsn> {
             let rva = section.virtual_address + pos as u32;
             let mut text = String::new();
             formatter.format(&instr, &mut text);
-            let import_call = resolve_import_call(pe, raw, &instr);
+            let import_call = resolve_import_call(analysis, &instr);
             out.push(ScannedInsn {
                 rva,
                 mnemonic: instr.mnemonic(),
@@ -333,7 +352,7 @@ fn scan_instruction_signals(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
     let mut findings = Vec::new();
     for (idx, insn) in insns.iter().enumerate() {
         let m = insn.mnemonic;
-        let m_name = format!("{:?}", m).to_ascii_lowercase();
+
         if m == Mnemonic::Cpuid {
             findings.push(finding(
                 "anti-analysis",
@@ -373,7 +392,7 @@ fn scan_instruction_signals(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
                 vec![insn.text.clone()],
             ));
         }
-        if m_name == "icebp" || m == Mnemonic::Int && immediate_value(&insn.instr) == Some(0x2D) {
+        if m == Mnemonic::Int1 || m == Mnemonic::Int && immediate_value(&insn.instr) == Some(0x2D) {
             findings.push(finding(
                 "anti-debug",
                 "debug-exception-instruction",
@@ -550,8 +569,7 @@ fn scan_medium_clusters(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
 }
 
 fn resolve_import_call(
-    pe: &PeFile,
-    raw: &[u8],
+    analysis: &ImageFacts<'_>,
     instr: &iced_x86::Instruction,
 ) -> Option<(String, String)> {
     if !matches!(instr.mnemonic(), Mnemonic::Call | Mnemonic::Jmp) || instr.op_count() == 0 {
@@ -568,11 +586,10 @@ fn resolve_import_call(
         }
         _ => 0,
     };
-    if slot_va < pe.image_base {
-        return None;
-    }
-    let slot_rva = (slot_va - pe.image_base) as u32;
-    resolve_iat_slot(pe, raw, slot_rva)
+    let slot_rva = u32::try_from(slot_va.checked_sub(analysis.pe().image_base)?).ok()?;
+    analysis
+        .import_at_rva(slot_rva)
+        .map(|(dll, name)| (dll.to_owned(), name.to_owned()))
 }
 
 fn syscall_window_start(insns: &[ScannedInsn], idx: usize) -> usize {
@@ -731,3 +748,66 @@ pub mod apis;
 pub mod contract_flows;
 pub mod discovery;
 pub mod intelli;
+
+#[cfg(test)]
+mod instruction_tests {
+    use super::*;
+    use crate::analysis::image::tests::{image, imported_image};
+
+    #[test]
+    fn debug_exception_detection_uses_decoded_instruction_semantics() {
+        let pe = image();
+        let mut raw = vec![0x90; 0x400];
+        // ICEBP, INT 2D, INT 2E, INT3, NOP.
+        raw[0x200..0x207].copy_from_slice(&[0xf1, 0xcd, 0x2d, 0xcd, 0x2e, 0xcc, 0x90]);
+        let insns = scan_executable_instructions(&ImageFacts::new(&pe, &raw));
+        let findings = scan_instruction_signals(&insns);
+        let rvas: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule == "debug-exception-instruction")
+            .map(|f| f.rva.as_deref())
+            .collect();
+        assert_eq!(rvas, [Some("0x00001000"), Some("0x00001001")]);
+    }
+
+    #[test]
+    fn import_addresses_do_not_wrap_into_an_existing_iat_slot() {
+        let (pe, raw) = imported_image();
+        let facts = ImageFacts::new(&pe, &raw);
+        let mut insn = Decoder::with_ip(
+            64,
+            &[0xff, 0x15, 0, 0, 0, 0],
+            pe.image_base + 0x1000,
+            DecoderOptions::NONE,
+        )
+        .decode();
+        insn.set_memory_displacement64(pe.image_base + 0x1160);
+        assert_eq!(
+            resolve_import_call(&facts, &insn),
+            Some(("KERNEL32.dll".into(), "Sleep".into()))
+        );
+        insn.set_memory_displacement64(pe.image_base + 0x1_0000_1160);
+        assert_eq!(resolve_import_call(&facts, &insn), None);
+        insn.set_memory_displacement64(pe.image_base - 1);
+        assert_eq!(resolve_import_call(&facts, &insn), None);
+    }
+
+    #[test]
+    fn imports_in_file_headers_remain_resolvable() {
+        let (pe, mut raw) = imported_image();
+        raw[0x310..0x314].copy_from_slice(&0x180u32.to_le_bytes());
+        raw[0x180..0x188].copy_from_slice(&0x11a0u64.to_le_bytes());
+        let facts = ImageFacts::new(&pe, &raw);
+        let insn = Decoder::with_ip(
+            64,
+            &[0xff, 0x15, 0, 0, 0, 0],
+            pe.image_base + 0x180 - 6,
+            DecoderOptions::NONE,
+        )
+        .decode();
+        assert_eq!(
+            resolve_import_call(&facts, &insn),
+            Some(("KERNEL32.dll".into(), "Sleep".into()))
+        );
+    }
+}

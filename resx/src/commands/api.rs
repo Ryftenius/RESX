@@ -1,7 +1,7 @@
 use std::io::Write;
 
-use crate::analysis::headers;
 use crate::core::config::Config;
+use crate::providers::headers;
 
 pub fn run(name: &str, cfg: &Config, w: &mut dyn Write) -> Result<(), String> {
     let dir = cfg.headers.as_deref().ok_or_else(|| {

@@ -80,7 +80,8 @@ pub fn run(cfg: &Config, category: &str, output: &mut dyn Write) -> Result<(), S
         )
         .map_err(|e| e.to_string());
     }
-    let mut report = crate::analysis::driver::analyze_contracts(&pe, &raw);
+    let analysis = crate::analysis::image::ImageFacts::new(&pe, &raw);
+    let mut report = crate::analysis::driver::analyze_contracts_in(&analysis);
     if category != "contracts" {
         if let Some(calls) = report["calls"].as_array_mut() {
             calls.retain(|c| c["category"] == category);

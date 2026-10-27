@@ -51,8 +51,8 @@ use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};
 use crate::formats::pe::{
     find_iat_slots_by_name, find_startup_routines, parse_pe, read_clr_info, read_data_summary,
-    read_exports, read_imports, read_load_config, read_runtime_function, resolve_iat_slot, Export,
-    PeFile, PeStartupRoutine, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
+    read_load_config, read_runtime_function, resolve_iat_slot, Export, PeFile, PeStartupRoutine,
+    IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
 };
 
 #[derive(Debug, Clone)]

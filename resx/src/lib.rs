@@ -7,3 +7,4 @@ pub mod core;
 pub mod ffi;
 pub mod formats;
 pub mod presentation;
+pub mod providers;
