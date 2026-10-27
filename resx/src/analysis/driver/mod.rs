@@ -1,5 +1,5 @@
 use crate::analysis::image::ImageFacts;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod calls;
 mod capabilities;
@@ -329,6 +329,7 @@ fn decode_executable(
     }
     let mut sorted_runtime = runtime_functions.to_vec();
     sorted_runtime.sort_by_key(|function| function.begin_rva);
+    let owners = OwnerIndex::new(exports, &sorted_runtime);
     let mut sections: Vec<_> = pe.sections.iter().collect();
     sections.sort_by_key(|section| !section.contains_rva(pe.entry_point));
     for section in sections {
@@ -351,10 +352,8 @@ fn decode_executable(
                 break;
             }
             let rva = instr.ip().wrapping_sub(pe.image_base) as u32;
-            let mut owner = owner_for_rva(rva, exports, &sorted_runtime);
-            let begins_export = exports
-                .iter()
-                .find(|export| export.rva == rva && export.forward_to.is_empty());
+            let mut owner = owners.for_rva(rva);
+            let begins_export = owners.direct.get(&rva);
             if let Some(export) = begins_export {
                 leaf_export_owner = Some((export.rva, export.name.clone()));
             } else if owner.0 == rva {
@@ -389,52 +388,80 @@ fn decode_executable(
     out
 }
 
-fn owner_for_rva(
-    rva: u32,
-    exports: &[Export],
-    runtime_functions: &[PeRuntimeFunctionInfo],
-) -> (u32, String) {
-    let index = runtime_functions.partition_point(|runtime| runtime.begin_rva <= rva);
-    if let Some(runtime) = index
-        .checked_sub(1)
-        .and_then(|index| runtime_functions.get(index))
-        .filter(|runtime| rva < runtime.end_rva)
-    {
-        let mut canonical_rva = runtime.begin_rva;
-        let mut current = runtime;
-        let mut visited = BTreeSet::new();
-        visited.insert(runtime.begin_rva);
-        for _ in 0..8 {
-            let Some(parent) = &current.chained_parent else {
-                break;
-            };
-            if !visited.insert(parent.begin_rva) {
-                break;
+// Build once per decode. Hostile tables can alias thousands of export names
+// to the same RVA; rescanning them for every instruction is quadratic work.
+struct OwnerIndex<'a> {
+    names: BTreeMap<u32, &'a Export>,
+    direct: BTreeMap<u32, &'a Export>,
+    runtime: &'a [PeRuntimeFunctionInfo],
+    parents: BTreeMap<(u32, u32, u32), &'a PeRuntimeFunctionInfo>,
+}
+
+impl<'a> OwnerIndex<'a> {
+    fn new(exports: &'a [Export], runtime: &'a [PeRuntimeFunctionInfo]) -> Self {
+        let mut names = BTreeMap::new();
+        let mut direct = BTreeMap::new();
+        let mut parents = BTreeMap::new();
+        for export in exports {
+            names.entry(export.rva).or_insert(export);
+            if export.forward_to.is_empty() {
+                direct.entry(export.rva).or_insert(export);
             }
-            canonical_rva = parent.begin_rva;
-            let Some(parent_record) = runtime_functions.iter().find(|candidate| {
-                candidate.begin_rva == parent.begin_rva
-                    && candidate.end_rva == parent.end_rva
-                    && candidate.unwind_info_rva == parent.unwind_info_rva
-            }) else {
-                break;
-            };
-            current = parent_record;
         }
-        let name = exports
-            .iter()
-            .find(|export| export.rva == canonical_rva)
-            .map(|export| export.name.clone())
-            .unwrap_or_else(|| format!("sub_{canonical_rva:08X}"));
-        return (canonical_rva, name);
+        for record in runtime {
+            parents
+                .entry((record.begin_rva, record.end_rva, record.unwind_info_rva))
+                .or_insert(record);
+        }
+        Self {
+            names,
+            direct,
+            runtime,
+            parents,
+        }
     }
-    if let Some(export) = exports
-        .iter()
-        .find(|export| export.rva == rva && export.forward_to.is_empty())
-    {
-        return (export.rva, export.name.clone());
+
+    fn for_rva(&self, rva: u32) -> (u32, String) {
+        let index = self
+            .runtime
+            .partition_point(|runtime| runtime.begin_rva <= rva);
+        if let Some(runtime) = index
+            .checked_sub(1)
+            .and_then(|index| self.runtime.get(index))
+            .filter(|runtime| rva < runtime.end_rva)
+        {
+            let mut canonical_rva = runtime.begin_rva;
+            let mut current = runtime;
+            let mut visited = BTreeSet::new();
+            visited.insert(runtime.begin_rva);
+            for _ in 0..8 {
+                let Some(parent) = &current.chained_parent else {
+                    break;
+                };
+                if !visited.insert(parent.begin_rva) {
+                    break;
+                }
+                canonical_rva = parent.begin_rva;
+                let Some(parent_record) =
+                    self.parents
+                        .get(&(parent.begin_rva, parent.end_rva, parent.unwind_info_rva))
+                else {
+                    break;
+                };
+                current = parent_record;
+            }
+            let name = self
+                .names
+                .get(&canonical_rva)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| format!("sub_{canonical_rva:08X}"));
+            return (canonical_rva, name);
+        }
+        if let Some(export) = self.direct.get(&rva) {
+            return (export.rva, export.name.clone());
+        }
+        (rva, format!("sub_{rva:08X}"))
     }
-    (rva, format!("sub_{rva:08X}"))
 }
 
 #[derive(Default)]
@@ -755,8 +782,38 @@ mod tests {
             }),
         );
         assert_eq!(
-            owner_for_rva(0x10a0, &exports, &[parent, child]),
+            OwnerIndex::new(&exports, &[parent, child]).for_rva(0x10a0),
             (0x1000, "ExportedWrapper".into())
+        );
+    }
+
+    #[test]
+    fn alias_index_preserves_first_export_and_terminates_parent_cycles() {
+        let exports: Vec<_> = (0..128)
+            .map(|i| Export {
+                name: format!("alias{i}"),
+                ordinal: i,
+                rva: 0x1000,
+                forward_to: String::new(),
+            })
+            .collect();
+        let parent = runtime(
+            0x1000,
+            0x1080,
+            0x2000,
+            Some(PeChainedRuntimeFunction {
+                begin_rva: 0x1000,
+                end_rva: 0x1080,
+                unwind_info_rva: 0x2000,
+            }),
+        );
+        let records = [parent];
+        let index = OwnerIndex::new(&exports, &records);
+        assert_eq!(index.names.len(), 1);
+        assert_eq!(index.for_rva(0x1004), (0x1000, "alias0".into()));
+        assert_eq!(
+            OwnerIndex::new(&exports, &[]).for_rva(0x1000),
+            (0x1000, "alias0".into())
         );
     }
 
