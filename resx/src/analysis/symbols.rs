@@ -57,11 +57,14 @@ impl SymbolIndex {
             if e.name.is_empty() {
                 continue;
             }
+            let Some(va) = image_base.checked_add(u64::from(e.rva)) else {
+                continue;
+            };
             let sym = ResolvedSymbol {
                 name: display_symbol_name(&e.name),
                 kind: "function".to_owned(),
                 type_name: String::new(),
-                va: image_base + e.rva as u64,
+                va,
                 size: 0,
             };
             insert_symbol(&mut inner, sym);
@@ -183,5 +186,26 @@ fn insert_symbol(index: &mut SymbolIndexInner, sym: ResolvedSymbol) {
     if !keep_existing {
         index.exact.insert(sym.va, sym.clone());
         index.ordered.insert(sym.va, sym);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn externally_supplied_exports_cannot_wrap_symbol_addresses() {
+        let mut export = Export {
+            name: "Entry".into(),
+            ordinal: 1,
+            rva: u32::MAX,
+            forward_to: String::new(),
+        };
+        let base = u64::MAX - 0x4000;
+        let index = SymbolIndex::from_exports_and_pdb(&[export.clone()], &[], base);
+        assert!(index.inner.exact.is_empty());
+        export.rva = 0x1000;
+        let index = SymbolIndex::from_exports_and_pdb(&[export], &[], base);
+        assert_eq!(index.exact_name(base + 0x1000), Some("Entry"));
     }
 }

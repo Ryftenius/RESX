@@ -125,6 +125,9 @@ pub fn parse_pe(raw: &[u8]) -> Result<PeFile, PeError> {
     if image_base.checked_add(u64::from(size_of_headers)).is_none() {
         return Err(PeError("Header VA range overflows".to_owned()));
     }
+    if image_base.checked_add(u64::from(entry_point)).is_none() {
+        return Err(PeError("Entry point VA overflows".to_owned()));
+    }
 
     if file_alignment == 0 {
         anomalies.push(anomaly(
@@ -446,6 +449,18 @@ fn calc_entropy(raw: &[u8], offset: usize, size: usize) -> f64 {
 
 #[cfg(test)]
 mod section_name_tests {
+    #[test]
+    fn entry_va_is_checked_independently_of_the_declared_image_extent() {
+        let mut raw = image_with_directory(0, 0, 0);
+        raw[0xb0..0xb8].copy_from_slice(&(u64::MAX - 0x4000).to_le_bytes());
+        raw[0xa8..0xac].copy_from_slice(&0x1000u32.to_le_bytes());
+        assert!(super::parse_pe(&raw).is_ok());
+        raw[0xa8..0xac].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(super::parse_pe(&raw)
+            .unwrap_err()
+            .0
+            .contains("Entry point VA"));
+    }
     #[test]
     fn section_names_preserve_spaces_and_stop_at_nul_only() {
         assert_eq!(super::parse_section_name(b"        "), "        ");

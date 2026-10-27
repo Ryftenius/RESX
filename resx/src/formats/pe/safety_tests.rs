@@ -41,6 +41,33 @@ fn zero_fill_is_not_file_data() {
 }
 
 #[test]
+fn exports_cannot_wrap_the_image_address_space_or_name_null_slots() {
+    let mut pe = image();
+    pe.image_base = u64::MAX - 0x4000;
+    pe.data_dirs[0] = (0x1000, 0x80);
+    let mut raw = vec![0; 0x400];
+    for (offset, value) in [
+        (0x210, 1u32),
+        (0x214, 2),
+        (0x218, 1),
+        (0x21c, 0x1080),
+        (0x220, 0x1088),
+        (0x224, 0x108c),
+        (0x288, 0x1090),
+    ] {
+        raw[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    raw[0x290..0x296].copy_from_slice(b"Entry\0");
+    for invalid in [0, u32::MAX] {
+        raw[0x280..0x284].copy_from_slice(&invalid.to_le_bytes());
+        raw[0x284..0x288].copy_from_slice(&invalid.to_le_bytes());
+        assert!(read_exports(&pe, &raw).is_empty());
+    }
+    raw[0x280..0x284].copy_from_slice(&0x1100u32.to_le_bytes());
+    assert_eq!(read_exports(&pe, &raw)[0].name, "Entry");
+}
+
+#[test]
 fn tls_startup_order_preserves_duplicates_instead_of_sorting_by_address() {
     let mut pe = image();
     pe.entry_point = 0;

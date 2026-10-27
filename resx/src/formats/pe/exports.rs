@@ -83,6 +83,9 @@ pub fn read_exports(pe: &PeFile, raw: &[u8]) -> Vec<Export> {
         };
         string_budget = budget;
         let f_rva = func_rvas[ord_idx];
+        if f_rva == 0 || pe.image_base.checked_add(u64::from(f_rva)).is_none() {
+            continue;
+        }
         let ordinal = base + ord_idx as u32;
 
         let forward_to = forward(f_rva);
@@ -101,7 +104,10 @@ pub fn read_exports(pe: &PeFile, raw: &[u8]) -> Vec<Export> {
     }
 
     for (i, func_rva) in func_rvas.iter().copied().enumerate().take(num_funcs) {
-        if !name_set.contains(&i) && func_rva != 0 {
+        if !name_set.contains(&i)
+            && func_rva != 0
+            && pe.image_base.checked_add(u64::from(func_rva)).is_some()
+        {
             let forward_to = forward(func_rva);
             let Some(budget) = string_budget.checked_sub(forward_to.len() + 16) else {
                 break;

@@ -662,14 +662,16 @@ impl Config {
             return Ok(None);
         }
         let s = self.rebase.trim();
-        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            return u64::from_str_radix(hex, 16)
-                .map(Some)
-                .map_err(|_| format!("invalid --rebase value: {}", self.rebase));
+        let base = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16)
+        } else {
+            s.parse::<u64>()
         }
-        s.parse::<u64>()
-            .map(Some)
-            .map_err(|_| format!("invalid --rebase value: {}", self.rebase))
+        .map_err(|_| format!("invalid --rebase value: {}", self.rebase))?;
+        if base.checked_add(u64::from(u32::MAX)).is_none() {
+            return Err("--rebase leaves insufficient address space for 32-bit RVAs".to_owned());
+        }
+        Ok(Some(base))
     }
 }
 
@@ -690,6 +692,24 @@ impl From<&Config> for crate::analysis::options::TraversalOptions {
         Self {
             decode: cfg.into(),
             max_total: cfg.max_total,
+        }
+    }
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+
+    #[test]
+    fn rebase_cannot_overflow_when_rendering_an_rva() {
+        let mut cfg = Config::from_options(&Options::default(), false);
+        for value in ["0xfffffffffffffff0", "18446744073709551615"] {
+            cfg.rebase = value.into();
+            assert!(cfg.rebase_addr().is_err());
+        }
+        for value in ["0x10000000", "268435456"] {
+            cfg.rebase = value.into();
+            assert_eq!(cfg.rebase_addr().unwrap(), Some(0x10000000));
         }
     }
 }
