@@ -221,7 +221,8 @@ pub fn discover_functions_in(
         );
     }
 
-    for prologue in find_prologue_candidates(raw, pe, 256) {
+    let (prologues, prologue_limited) = find_prologue_candidates(raw, pe, 256, 16 * 1024 * 1024);
+    for prologue in prologues {
         stats.prologues += 1;
         merge_seed(
             &mut map,
@@ -269,6 +270,9 @@ pub fn discover_functions_in(
     stats.total = functions.len();
 
     let mut notes = Vec::new();
+    if prologue_limited {
+        notes.push("prologue scan stopped at its 16 MiB byte budget".to_owned());
+    }
     if stats.pdb == 0 {
         notes.push("PDB function symbols unavailable or disabled".to_owned());
     }
@@ -327,24 +331,13 @@ fn collect_direct_targets(raw: &[u8], pe: &PeFile, max_targets: usize) -> BTreeS
         {
             continue;
         }
-        let Some(file_off) = pe.rva_to_offset(start_rva) else {
+        let Some(bytes) = pe.rva_bytes(raw, start_rva) else {
             continue;
         };
-        let section_limit = pe
-            .rva_to_section(start_rva)
-            .map(|section| {
-                section
-                    .virtual_address
-                    .saturating_add(section.virtual_size.max(section.raw_size))
-                    .saturating_sub(start_rva) as usize
-            })
-            .unwrap_or(4096);
-        let chunk_len = section_limit
-            .min(16 * 1024)
-            .min(raw.len().saturating_sub(file_off));
+        let bytes = &bytes[..bytes.len().min(16 * 1024)];
         let mut decoder = Decoder::with_ip(
             pe.arch,
-            &raw[file_off..file_off + chunk_len],
+            bytes,
             pe.image_base + start_rva as u64,
             DecoderOptions::NONE,
         );
@@ -368,16 +361,24 @@ fn collect_direct_targets(raw: &[u8], pe: &PeFile, max_targets: usize) -> BTreeS
     out
 }
 
-fn find_prologue_candidates(raw: &[u8], pe: &PeFile, limit: usize) -> BTreeSet<u32> {
+fn find_prologue_candidates(
+    raw: &[u8],
+    pe: &PeFile,
+    limit: usize,
+    mut remaining: usize,
+) -> (BTreeSet<u32>, bool) {
     let mut out = BTreeSet::new();
     for section in pe.sections.iter().filter(|section| section.is_executable()) {
-        let start = section.raw_offset as usize;
-        let end = start
-            .saturating_add(section.raw_size as usize)
-            .min(raw.len());
-        let mut off = start;
-        while off + 4 <= end && out.len() < limit {
-            let bytes = &raw[off..end.min(off + 8)];
+        let Some(mapped) = pe.rva_bytes(raw, section.virtual_address) else {
+            continue;
+        };
+        let mut off = 0;
+        while off + 4 <= mapped.len() && out.len() < limit {
+            if remaining == 0 {
+                return (out, true);
+            }
+            remaining -= 1;
+            let bytes = &mapped[off..mapped.len().min(off + 8)];
             let is_x64_frame = bytes.starts_with(&[0x40, 0x53])
                 || bytes.starts_with(&[0x48, 0x89, 0x5C])
                 || bytes.starts_with(&[0x48, 0x83, 0xEC])
@@ -385,13 +386,13 @@ fn find_prologue_candidates(raw: &[u8], pe: &PeFile, limit: usize) -> BTreeSet<u
             let is_x86_frame =
                 bytes.starts_with(&[0x55, 0x8B, 0xEC]) || bytes.starts_with(&[0x53, 0x56, 0x57]);
             if is_x64_frame || is_x86_frame {
-                let rva = section.virtual_address + (off - start) as u32;
+                let rva = section.virtual_address + off as u32;
                 out.insert(rva);
             }
             off += 1;
         }
     }
-    out
+    (out, false)
 }
 
 fn branch_target_rva(pe: &PeFile, instr: &iced_x86::Instruction) -> Option<u32> {
@@ -432,4 +433,40 @@ fn hex64(value: u64) -> String {
 #[allow(dead_code)]
 fn runtime_size(runtime: &PeRuntimeFunctionInfo) -> u64 {
     runtime.end_rva.saturating_sub(runtime.begin_rva) as u64
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    use crate::analysis::image::tests::image;
+
+    #[test]
+    fn section_offsets_past_eof_are_unavailable_to_discovery() {
+        let mut pe = image();
+        let raw = vec![0x90; 0x400];
+        for offset in [0x400, 0xffff, u32::MAX] {
+            pe.sections[0].raw_offset = offset;
+            assert!(collect_direct_targets(&raw, &pe, 256).is_empty());
+            assert!(find_prologue_candidates(&raw, &pe, 256, 4096).0.is_empty());
+        }
+    }
+
+    #[test]
+    fn discovery_does_not_decode_across_ambiguous_section_boundaries() {
+        let mut pe = image();
+        let mut raw = vec![0x90; 0x400];
+        // CALL 0x1010; a prologue after it.
+        raw[0x200..0x205].copy_from_slice(&[0xe8, 0x0b, 0, 0, 0]);
+        raw[0x210..0x214].copy_from_slice(&[0x55, 0x48, 0x8b, 0xec]);
+        assert!(collect_direct_targets(&raw, &pe, 256).contains(&0x1010));
+        assert!(find_prologue_candidates(&raw, &pe, 256, 4096)
+            .0
+            .contains(&0x1010));
+        assert!(find_prologue_candidates(&raw, &pe, 256, 1).1);
+        let mut alias = pe.sections[0].clone();
+        alias.virtual_address = 0x1002;
+        pe.sections.push(alias);
+        assert!(collect_direct_targets(&raw, &pe, 256).is_empty());
+        assert!(find_prologue_candidates(&raw, &pe, 256, 4096).0.is_empty());
+    }
 }
