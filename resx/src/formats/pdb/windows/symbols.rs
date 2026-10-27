@@ -98,7 +98,8 @@ pub(super) fn ensure_exact_pdb_cached(
     verbose: bool,
     reload: bool,
 ) -> Result<Option<String>, String> {
-    let raw = std::fs::read(dll_path).map_err(|e| format!("read image for debug info: {}", e))?;
+    let raw = crate::core::input::read_image(dll_path)
+        .map_err(|e| format!("read image for debug info: {}", e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
     let info = match extract_codeview_info(&pe, &raw) {
         Some(info) => info,
@@ -165,18 +166,22 @@ pub(super) fn extract_codeview_info(
         return None;
     }
 
-    let mut off = pe.rva_to_offset(dir_rva)?;
-    let end = off.checked_add(dir_size as usize)?.min(raw.len());
-    while off + 28 <= end {
-        let debug_type = read_u32(raw, off + 12);
-        let size_of_data = read_u32(raw, off + 16) as usize;
-        let ptr_to_raw = read_u32(raw, off + 24) as usize;
-        if debug_type == IMAGE_DEBUG_TYPE_CODEVIEW && ptr_to_raw + size_of_data <= raw.len() {
-            if let Some(info) = parse_rsds(&raw[ptr_to_raw..ptr_to_raw + size_of_data]) {
+    let directory = pe.rva_slice(raw, dir_rva, dir_size as usize)?;
+    for entry in directory.as_chunks::<28>().0.iter().take(4096) {
+        let debug_type = read_u32(entry, 12);
+        let size = read_u32(entry, 16) as usize;
+        let rva = read_u32(entry, 20);
+        let ptr = read_u32(entry, 24) as usize;
+        if rva != 0
+            && (pe.rva_to_offset(rva) != Some(ptr) || pe.rva_slice(raw, rva, size).is_none())
+        {
+            continue;
+        }
+        if debug_type == IMAGE_DEBUG_TYPE_CODEVIEW && size <= 4096 {
+            if let Some(info) = raw.get(ptr..ptr.checked_add(size)?).and_then(parse_rsds) {
                 return Some(info);
             }
         }
-        off += 28;
     }
     None
 }
@@ -194,20 +199,18 @@ pub(super) fn parse_rsds(raw: &[u8]) -> Option<CodeViewInfo> {
         raw[12], raw[13], raw[14], raw[15], raw[16], raw[17], raw[18], raw[19],
     );
     let age = read_u32(raw, 20);
-    let pdb_full = cstr_from_bytes(&raw[24..]);
-    let pdb_name = Path::new(&pdb_full)
-        .file_name()?
-        .to_string_lossy()
-        .into_owned();
+    let path = raw.get(24..)?;
+    let end = path.iter().take(4096).position(|&b| b == 0)?;
+    let pdb_full = std::str::from_utf8(&path[..end]).ok()?;
+    let pdb_name = pdb_full.rsplit(['\\', '/']).next()?;
+    if !crate::core::input::is_safe_basename(pdb_name) {
+        return None;
+    }
+    let pdb_name = pdb_name.to_owned();
     Some(CodeViewInfo {
         pdb_name,
         guid_age: format!("{}{}", guid, age),
     })
-}
-
-pub(super) fn cstr_from_bytes(raw: &[u8]) -> String {
-    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-    String::from_utf8_lossy(&raw[..end]).into_owned()
 }
 
 pub(super) fn effective_symbol_server(sym_server: &str) -> String {
@@ -230,6 +233,17 @@ pub(super) fn effective_symbol_server(sym_server: &str) -> String {
 }
 
 pub(super) fn candidate_symbol_urls(server: &str, pdb_name: &str, guid_age: &str) -> Vec<String> {
+    // Encode a path segment, so '#'/'%' in a valid filename cannot alter the URL.
+    let pdb_name: String = pdb_name
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
     let mut servers = Vec::new();
     push_unique(&mut servers, server.trim_end_matches('/').to_owned());
     if let Some(http) = msdl_http_variant(server) {
@@ -450,5 +464,43 @@ pub(super) fn is_server_entry(entry: &str) -> bool {
 pub(super) fn push_entry(entries: &mut Vec<String>, seen: &mut HashSet<String>, value: String) {
     if seen.insert(value.to_ascii_lowercase()) {
         entries.push(value);
+    }
+}
+
+#[cfg(test)]
+mod hostile_codeview_tests {
+    use super::*;
+
+    fn record(path: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0; 24];
+        raw[..4].copy_from_slice(b"RSDS");
+        raw.extend_from_slice(path);
+        raw
+    }
+
+    #[test]
+    fn cache_names_require_terminated_utf8_and_safe_filename_components() {
+        for path in [
+            b"a.pdb".as_slice(),
+            b"a:stream\0",
+            b"NUL.pdb\0",
+            b"..\0",
+            b"a\n.pdb\0",
+            b"a\xff.pdb\0",
+            b"a.\0",
+        ] {
+            assert!(parse_rsds(&record(path)).is_none(), "{path:?}");
+        }
+        let info = parse_rsds(&record(b"C:\\build\\sample.pdb\0")).unwrap();
+        assert_eq!(info.pdb_name, "sample.pdb");
+    }
+
+    #[test]
+    fn symbol_filename_is_one_url_segment() {
+        let urls = candidate_symbol_urls("https://example.invalid/symbols", "a #%.pdb", "0123");
+        assert_eq!(
+            urls,
+            ["https://example.invalid/symbols/a%20%23%25.pdb/0123/a%20%23%25.pdb"]
+        );
     }
 }

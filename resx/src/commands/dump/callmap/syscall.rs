@@ -124,6 +124,9 @@ pub(super) fn is_probable_win32k_syscall_name(name: &str) -> bool {
 }
 
 pub(super) fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceImage> {
+    if !crate::core::input::is_safe_basename(name) {
+        return None;
+    }
     let dll_path = find_dll_path(name, cfg).ok()?;
     let dll_name = dll_path.file_name()?.to_string_lossy().to_string();
     let dll_path_str = dll_path.to_string_lossy().to_string();

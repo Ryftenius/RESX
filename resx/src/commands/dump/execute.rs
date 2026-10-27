@@ -52,6 +52,9 @@ fn run_with_chain(
     c: &Colors,
     chain: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
+    if !chain.is_empty() && !crate::core::input::is_safe_basename(dll_arg) {
+        return Err("Embedded module reference is not a plain filename".to_owned());
+    }
     enter_follow_chain(chain, dll_arg, func_arg)?;
     if !cfg.cfg_view.is_empty() && !cfg.cfg_view.eq_ignore_ascii_case("text") {
         return Err(format!(
