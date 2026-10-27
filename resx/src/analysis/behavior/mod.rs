@@ -6,6 +6,35 @@ use crate::formats::pe::{read_clr_info, ImportDll, PeFile};
 use crate::analysis::{image::ImageFacts, session::AnalysisSession};
 
 const COMIMAGE_FLAGS_ILONLY: u32 = 0x0000_0001;
+const MAX_SCAN_INSTRUCTIONS: usize = 1_000_000;
+const MAX_BEHAVIOR_FINDINGS: usize = 8192;
+
+#[derive(Default)]
+struct Findings {
+    items: Vec<BehaviorFinding>,
+    truncated: bool,
+}
+
+impl Findings {
+    fn push(&mut self, finding: BehaviorFinding) {
+        if self.items.len() < MAX_BEHAVIOR_FINDINGS {
+            self.items.push(finding);
+        } else {
+            self.truncated = true;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.truncated |= other.truncated;
+        self.extend(other.items);
+    }
+
+    fn extend(&mut self, items: impl IntoIterator<Item = BehaviorFinding>) {
+        for item in items {
+            self.push(item);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BehaviorFinding {
@@ -21,6 +50,8 @@ pub struct BehaviorFinding {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BehaviorReport {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub analysis_limits: Vec<String>,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub api_signatures: std::collections::BTreeMap<u32, crate::analysis::headers::CallSignature>,
     pub image: String,
@@ -34,12 +65,12 @@ pub struct BehaviorReport {
 }
 
 #[derive(Debug, Clone)]
-struct ScannedInsn {
+struct ScannedInsn<'a> {
     rva: u32,
     mnemonic: Mnemonic,
     text: String,
     instr: iced_x86::Instruction,
-    import_call: Option<(String, String)>,
+    import_call: Option<(&'a str, &'a str)>,
 }
 
 pub fn analyze_image(
@@ -70,20 +101,26 @@ pub(crate) fn analyze_with_context(
     let analysis = session.image();
     let pe = analysis.pe();
     let raw = analysis.raw();
-    let mut findings = Vec::new();
+    let mut findings = Findings::default();
     let mut api_signatures = std::collections::BTreeMap::new();
-    findings.extend(scan_tls(analysis));
-    findings.extend(scan_sections(pe));
-    findings.extend(scan_imports(imports));
+    findings.merge(scan_tls(analysis));
+    findings.merge(scan_sections(pe));
+    findings.merge(scan_imports(imports));
 
+    let mut analysis_limits = Vec::new();
     let mut resolution = None;
     if let Some(managed_finding) = managed_native_scan_suppression(pe, raw) {
         findings.push(managed_finding);
     } else {
-        let insns = scan_executable_instructions(analysis);
-        findings.extend(scan_instruction_signals(&insns));
-        findings.extend(scan_syscall_stubs(&insns));
-        findings.extend(scan_medium_clusters(&insns));
+        let (insns, limited) = scan_executable_instructions(analysis, MAX_SCAN_INSTRUCTIONS);
+        if limited {
+            analysis_limits.push(format!(
+                "Native instruction scan stopped at {MAX_SCAN_INSTRUCTIONS} instructions"
+            ));
+        }
+        findings.merge(scan_instruction_signals(&insns));
+        findings.merge(scan_syscall_stubs(&insns));
+        findings.merge(scan_medium_clusters(&insns));
         let resolved = session.resolution();
         resolution = Some(resolved);
         if let Some(headers) = headers {
@@ -93,7 +130,7 @@ pub(crate) fn analyze_with_context(
                 let name = resolved
                     .call_target(insn.rva)
                     .and_then(|api| api.api.as_deref())
-                    .or_else(|| insn.import_call.as_ref().map(|(_, name)| name.as_str()));
+                    .or_else(|| insn.import_call.map(|(_, name)| name));
                 let Some(prototype) = name.and_then(|name| headers.prototype(name)) else {
                     continue;
                 };
@@ -139,7 +176,12 @@ pub(crate) fn analyze_with_context(
         }));
     }
 
-    findings = dedup_findings(findings);
+    if findings.truncated {
+        analysis_limits.push(format!(
+            "Behavior findings limited to {MAX_BEHAVIOR_FINDINGS}"
+        ));
+    }
+    let mut findings = dedup_findings(findings.items);
     findings.sort_by(|a, b| {
         severity_rank(&b.severity)
             .cmp(&severity_rank(&a.severity))
@@ -149,6 +191,7 @@ pub(crate) fn analyze_with_context(
     });
 
     BehaviorReport {
+        analysis_limits,
         api_signatures,
         image: image.to_owned(),
         finding_count: findings.len(),
@@ -188,8 +231,8 @@ fn managed_native_scan_suppression(pe: &PeFile, raw: &[u8]) -> Option<BehaviorFi
     ))
 }
 
-fn scan_tls(analysis: &ImageFacts<'_>) -> Vec<BehaviorFinding> {
-    let mut findings = Vec::new();
+fn scan_tls(analysis: &ImageFacts<'_>) -> Findings {
+    let mut findings = Findings::default();
     if let Some(tls) = analysis.tls() {
         for callback in &tls.callbacks {
             findings.push(finding(
@@ -207,8 +250,8 @@ fn scan_tls(analysis: &ImageFacts<'_>) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn scan_sections(pe: &PeFile) -> Vec<BehaviorFinding> {
-    let mut findings = Vec::new();
+fn scan_sections(pe: &PeFile) -> Findings {
+    let mut findings = Findings::default();
     for section in &pe.sections {
         let prot = section.protection_string();
         if prot.contains('W') && prot.contains('X') {
@@ -241,8 +284,8 @@ fn scan_sections(pe: &PeFile) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
-    let mut findings = Vec::new();
+fn scan_imports(imports: &[ImportDll]) -> Findings {
+    let mut findings = Findings::default();
     for dll in imports {
         let dll_lower = dll.dll.to_ascii_lowercase();
         for entry in &dll.entries {
@@ -301,37 +344,44 @@ fn scan_imports(imports: &[ImportDll]) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn scan_executable_instructions(analysis: &ImageFacts<'_>) -> Vec<ScannedInsn> {
+fn scan_executable_instructions<'a>(
+    analysis: &'a ImageFacts<'_>,
+    limit: usize,
+) -> (Vec<ScannedInsn<'a>>, bool) {
     let pe = analysis.pe();
     let raw = analysis.raw();
     let mut out = Vec::new();
+    if !matches!(pe.machine, 0x014c | 0x8664) {
+        return (out, false);
+    }
     for section in &pe.sections {
         if !section.is_executable() || section.raw_size == 0 {
             continue;
         }
-        let start = section.raw_offset as usize;
-        if start >= raw.len() {
+        // Use the same ambiguity and file-backing rules as every other decoder.
+        let Some(bytes) = pe.rva_bytes(raw, section.virtual_address) else {
             continue;
-        }
-        let len = (section.raw_size as usize).min(raw.len().saturating_sub(start));
-        let bytes = &raw[start..start + len];
-        let ip = pe.image_base + section.virtual_address as u64;
+        };
+        let Some(ip) = pe
+            .image_base
+            .checked_add(u64::from(section.virtual_address))
+        else {
+            continue;
+        };
         let mut decoder = Decoder::with_ip(pe.arch, bytes, ip, DecoderOptions::NONE);
         let mut formatter = iced_x86::IntelFormatter::new();
-        let mut instr = iced_x86::Instruction::default();
-        let mut pos = 0usize;
-        while pos < bytes.len() {
-            decoder.set_position(pos).ok();
-            decoder.set_ip(ip + pos as u64);
-            if !decoder.can_decode() {
-                break;
+        while decoder.can_decode() {
+            if out.len() >= limit {
+                return (out, true);
             }
-            decoder.decode_out(&mut instr);
-            let len = instr.len();
-            if len == 0 || pos + len > bytes.len() {
+            let instr = decoder.decode();
+            let Some(rva) = instr
+                .ip()
+                .checked_sub(pe.image_base)
+                .and_then(|r| u32::try_from(r).ok())
+            else {
                 break;
-            }
-            let rva = section.virtual_address + pos as u32;
+            };
             let mut text = String::new();
             formatter.format(&instr, &mut text);
             let import_call = resolve_import_call(analysis, &instr);
@@ -342,15 +392,18 @@ fn scan_executable_instructions(analysis: &ImageFacts<'_>) -> Vec<ScannedInsn> {
                 instr,
                 import_call,
             });
-            pos += len;
         }
     }
-    out
+    (out, false)
 }
 
-fn scan_instruction_signals(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
-    let mut findings = Vec::new();
+fn scan_instruction_signals(insns: &[ScannedInsn]) -> Findings {
+    let mut findings = Findings::default();
     for (idx, insn) in insns.iter().enumerate() {
+        if findings.items.len() >= MAX_BEHAVIOR_FINDINGS {
+            findings.truncated = true;
+            break;
+        }
         let m = insn.mnemonic;
 
         if m == Mnemonic::Cpuid {
@@ -481,9 +534,13 @@ fn scan_instruction_signals(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn scan_syscall_stubs(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
-    let mut findings = Vec::new();
+fn scan_syscall_stubs(insns: &[ScannedInsn]) -> Findings {
+    let mut findings = Findings::default();
     for (idx, insn) in insns.iter().enumerate() {
+        if findings.items.len() >= MAX_BEHAVIOR_FINDINGS {
+            findings.truncated = true;
+            break;
+        }
         if !matches!(
             insn.mnemonic,
             Mnemonic::Syscall | Mnemonic::Sysenter | Mnemonic::Int
@@ -527,9 +584,13 @@ fn scan_syscall_stubs(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn scan_medium_clusters(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
-    let mut findings = Vec::new();
+fn scan_medium_clusters(insns: &[ScannedInsn]) -> Findings {
+    let mut findings = Findings::default();
     for (idx, insn) in insns.iter().enumerate() {
+        if findings.items.len() >= MAX_BEHAVIOR_FINDINGS {
+            findings.truncated = true;
+            break;
+        }
         let Some((dll, name)) = &insn.import_call else {
             continue;
         };
@@ -568,10 +629,10 @@ fn scan_medium_clusters(insns: &[ScannedInsn]) -> Vec<BehaviorFinding> {
     findings
 }
 
-fn resolve_import_call(
-    analysis: &ImageFacts<'_>,
+fn resolve_import_call<'a>(
+    analysis: &'a ImageFacts<'_>,
     instr: &iced_x86::Instruction,
-) -> Option<(String, String)> {
+) -> Option<(&'a str, &'a str)> {
     if !matches!(instr.mnemonic(), Mnemonic::Call | Mnemonic::Jmp) || instr.op_count() == 0 {
         return None;
     }
@@ -587,9 +648,7 @@ fn resolve_import_call(
         _ => 0,
     };
     let slot_rva = u32::try_from(slot_va.checked_sub(analysis.pe().image_base)?).ok()?;
-    analysis
-        .import_at_rva(slot_rva)
-        .map(|(dll, name)| (dll.to_owned(), name.to_owned()))
+    analysis.import_at_rva(slot_rva)
 }
 
 fn syscall_window_start(insns: &[ScannedInsn], idx: usize) -> usize {
@@ -755,14 +814,56 @@ mod instruction_tests {
     use crate::analysis::image::tests::{image, imported_image};
 
     #[test]
+    fn instruction_budget_is_global_across_aliased_sections() {
+        let mut pe = image();
+        let raw = vec![0x90; 0x400];
+        let mut alias = pe.sections[0].clone();
+        alias.virtual_address = 0x2000;
+        pe.sections.push(alias);
+        let facts = ImageFacts::new(&pe, &raw);
+        let (insns, limited) = scan_executable_instructions(&facts, 513);
+        assert_eq!(insns.len(), 513);
+        assert!(limited);
+        assert_eq!(insns[512].rva, 0x2000);
+        let (insns, limited) = scan_executable_instructions(&facts, 1024);
+        assert_eq!(insns.len(), 1024);
+        assert!(!limited);
+        pe.sections[1].virtual_address = 0x1000;
+        assert!(
+            scan_executable_instructions(&ImageFacts::new(&pe, &raw), 1024)
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn finding_limit_is_reported_and_does_not_grow_with_instruction_count() {
+        let mut pe = image();
+        pe.sections[0].raw_size = 9000;
+        pe.sections[0].virtual_size = 9000;
+        let raw = vec![0xf1; 0x200 + 9000];
+        let facts = ImageFacts::new(&pe, &raw);
+        let (insns, _) = scan_executable_instructions(&facts, 9000);
+        let findings = scan_instruction_signals(&insns);
+        assert_eq!(findings.items.len(), MAX_BEHAVIOR_FINDINGS);
+        assert!(findings.truncated);
+        let mut merged = Findings::default();
+        merged.merge(findings);
+        assert!(merged.truncated);
+        assert_eq!(merged.items.len(), MAX_BEHAVIOR_FINDINGS);
+    }
+
+    #[test]
     fn debug_exception_detection_uses_decoded_instruction_semantics() {
         let pe = image();
         let mut raw = vec![0x90; 0x400];
         // ICEBP, INT 2D, INT 2E, INT3, NOP.
         raw[0x200..0x207].copy_from_slice(&[0xf1, 0xcd, 0x2d, 0xcd, 0x2e, 0xcc, 0x90]);
-        let insns = scan_executable_instructions(&ImageFacts::new(&pe, &raw));
+        let facts = ImageFacts::new(&pe, &raw);
+        let (insns, _) = scan_executable_instructions(&facts, MAX_SCAN_INSTRUCTIONS);
         let findings = scan_instruction_signals(&insns);
         let rvas: Vec<_> = findings
+            .items
             .iter()
             .filter(|f| f.rule == "debug-exception-instruction")
             .map(|f| f.rva.as_deref())
@@ -784,7 +885,7 @@ mod instruction_tests {
         insn.set_memory_displacement64(pe.image_base + 0x1160);
         assert_eq!(
             resolve_import_call(&facts, &insn),
-            Some(("KERNEL32.dll".into(), "Sleep".into()))
+            Some(("KERNEL32.dll", "Sleep"))
         );
         insn.set_memory_displacement64(pe.image_base + 0x1_0000_1160);
         assert_eq!(resolve_import_call(&facts, &insn), None);
@@ -807,7 +908,7 @@ mod instruction_tests {
         .decode();
         assert_eq!(
             resolve_import_call(&facts, &insn),
-            Some(("KERNEL32.dll".into(), "Sleep".into()))
+            Some(("KERNEL32.dll", "Sleep"))
         );
     }
 }

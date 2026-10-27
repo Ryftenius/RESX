@@ -48,6 +48,9 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         ))
     )
     .ok();
+    for limit in &report.analysis_limits {
+        writeln!(w, "Partial analysis: {limit}").ok();
+    }
     if !report.api_resolution.is_empty() {
         writeln!(
             w,
