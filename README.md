@@ -574,6 +574,42 @@ The call at `0x1160` is six bytes long, so `0x1166` is the return address immedi
 
 </details>
 
+<details>
+<summary><h3 style="display: inline;">Tested Example: Encoded APIs &amp; Manual Resolution</h3></summary>
+
+Let's say I want to analyze a binary that hides its Windows API names with XOR and resolves them by walking the PEB loader list and the module's export table. The checked-in [C sample](resx/tests/data/manual_resolver.c) allocates a page, writes an inert byte, changes the page protection, releases it, and attempts a protected-directory listing. Its [compiled EXE](resx/tests/data/manual_resolver.exe) has no PDB, and none of the seven APIs below appear in its import table.
+
+```powershell
+> resx behavior .\resx\tests\data\manual_resolver.exe --no-pdb --no-headers
+Dynamic API resolution: PEB loader-list walk; manual export-table walk
+[HIGH] api-resolution export-table-walk (high @ 0x0000138C)
+[HIGH] api-resolution peb-module-walk (high @ 0x00001179)
+
+Dynamically resolved APIs (7):
+  0x0000155C  kernelbase!VirtualAlloc  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x00001578  kernelbase!VirtualProtect  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 2 call sites]
+  0x00001594  kernelbase!VirtualFree  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 3 call sites]
+  0x000015B0  kernelbase!FindFirstFileW  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x000015CC  kernelbase!FindNextFileW  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x000015E8  kernelbase!FindClose  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x00001604  kernelbase!GetLastError  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+```
+
+The `calls` view connects those resolutions to the indirect calls in the sample:
+
+```powershell
+> resx calls .\resx\tests\data\manual_resolver.exe rentry --depth 8 --only dynamic --no-pdb --no-headers
+      ├── 0x155C  CALL  sub_00001240
+      │   resolves: kernelbase!VirtualAlloc (export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal)
+      ├── 0x1678  CALL  kernelbase!VirtualAlloc [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
+      ├── 0x16BA  CALL  kernelbase!VirtualProtect [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
+      └── 0x17C8  CALL  kernelbase!FindClose [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
+```
+
+With one small sample, RESX recovers the API names, the XOR key, the manual resolution path, and the actual indirect call sites without debug symbols. The executable page contains only `RET` and is never executed; the directory attempt returned `ACCESS_DENIED` in this test.
+
+</details>
+
 </details>
 
 ## Documentation

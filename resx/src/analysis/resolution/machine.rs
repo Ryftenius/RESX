@@ -190,7 +190,7 @@ pub(super) enum Val {
     Teb,
     Peb,
     Ldr,
-    Link(Order),
+    Link(Order, i64),
     Module(Module),
     Lfanew(u32),
     NtHeaders(u32),
@@ -516,6 +516,26 @@ fn equality_guard(insn: &Instruction) -> Option<(Register, u64)> {
     }
 }
 
+/// A branch to a short stack-only epilogue returns the current RAX value.
+/// Capture it before another incoming branch's snapshot replaces that path.
+fn return_epilogue(insns: &[Instruction], target: u64) -> bool {
+    let Ok(start) = insns.binary_search_by_key(&target, Instruction::ip) else {
+        return false;
+    };
+    for insn in insns.iter().skip(start).take(8) {
+        match insn.mnemonic() {
+            Mnemonic::Ret | Mnemonic::Retf => return true,
+            Mnemonic::Nop => {}
+            Mnemonic::Add
+                if insn.op0_kind() == OpKind::Register
+                    && matches!(insn.op0_register(), Register::RSP | Register::ESP)
+                    && Machine::is_imm(insn.op1_kind()) => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Registers at a forward branch, for the block it reaches.
 struct Snapshot {
     regs: Vec<Val>,
@@ -568,6 +588,18 @@ pub(super) fn run(ctx: &Context<'_>, function: &Function, insns: &[Instruction])
             .and_then(|prev| equality_guard(&insns[prev]))
             .filter(|_| matches!(insn.mnemonic(), Mnemonic::Je | Mnemonic::Jne));
         let flow = insn.flow_control();
+        if flow == FlowControl::UnconditionalBranch
+            && matches!(
+                insn.op0_kind(),
+                OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+            )
+            && return_epilogue(insns, insn.near_branch_target())
+        {
+            let value = machine.reg(Register::RAX);
+            if !machine.facts.returns.contains(&value) && machine.facts.returns.len() < 8 {
+                machine.facts.returns.push(value);
+            }
+        }
         if matches!(
             flow,
             FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
@@ -778,7 +810,7 @@ impl<'c, 'a> Machine<'c, 'a> {
     fn loc(&mut self, insn: &Instruction) -> Loc {
         let base = insn.memory_base();
         let index_reg = insn.memory_index();
-        let indexed = index_reg != Register::None;
+        let indexed = index_reg != Register::None && !matches!(self.reg(index_reg), Val::Const(0));
         let segment = insn.memory_segment();
         if matches!(segment, Register::FS | Register::GS) && base == Register::None {
             return Loc::Segment(segment, insn.memory_displacement64());
@@ -961,17 +993,17 @@ impl<'c, 'a> Machine<'c, 'a> {
                 if let Some(i) = layout.ldr_lists.iter().position(|&off| off == disp) {
                     Self::note(&mut events.list, rva);
                     events.list_order.get_or_insert(ORDERS[i]);
-                    return Val::Link(ORDERS[i]);
+                    return Val::Link(ORDERS[i], 0);
                 }
                 return Val::Unknown;
             }
-            (Val::Link(order), None) => {
-                if disp == 0 || disp == layout.ptr {
+            (Val::Link(order, delta), None) => {
+                if *delta == 0 && (disp == 0 || disp == layout.ptr) {
                     Self::note(&mut events.list, rva);
-                    return Val::Link(*order);
+                    return Val::Link(*order, 0);
                 }
                 let link = layout.entry_links[*order as usize];
-                let field = disp + link;
+                let field = disp + delta + link;
                 if field == layout.entry_dll_base {
                     Self::note(&mut events.entry, rva);
                     return Val::Module(Module::Walk {
@@ -998,8 +1030,14 @@ impl<'c, 'a> Machine<'c, 'a> {
         );
         if index.is_none() && disp == 0x3C && size == 4 && pointer_like {
             Self::note(&mut events.lfanew, rva);
-            if let Val::Module(module) = &base {
-                self.origins.insert(base_id, module.clone());
+            match &base {
+                Val::Module(module) => {
+                    self.origins.insert(base_id, module.clone());
+                }
+                Val::Param(param) => {
+                    self.origins.insert(base_id, Module::Param(*param));
+                }
+                _ => {}
             }
             return Val::Lfanew(base_id);
         }
@@ -1315,7 +1353,7 @@ impl<'c, 'a> Machine<'c, 'a> {
             .iter()
             .position(|&off| off == disp)
         {
-            Some(i) => Val::Link(ORDERS[i]),
+            Some(i) => Val::Link(ORDERS[i], 0),
             None => Val::Unknown,
         }
     }
@@ -1327,16 +1365,49 @@ impl<'c, 'a> Machine<'c, 'a> {
                 stack_value(d, self.signed(c))
             }
             (Val::Ldr, Val::Const(c)) => self.list_head(c as i64),
-            (Val::Lfanew(b), _) if b == b_id => Val::NtHeaders(b),
-            (_, Val::Lfanew(b)) if b == a_id => Val::NtHeaders(b),
-            (Val::DirRva(dir, b), _) if b == b_id => Val::Dir(dir, b),
-            (_, Val::DirRva(dir, b)) if b == a_id => Val::Dir(dir, b),
-            (Val::FuncArrayRva(b), _) if b == b_id => Val::FuncArray(b),
-            (_, Val::FuncArrayRva(b)) if b == a_id => Val::FuncArray(b),
-            (Val::FuncRva(b), _) if b == b_id => Val::Export(b),
-            (_, Val::FuncRva(b)) if b == a_id => Val::Export(b),
+            (Val::Link(order, delta), Val::Const(c)) | (Val::Const(c), Val::Link(order, delta)) => {
+                self.signed(c)
+                    .checked_add(delta)
+                    .map_or(Val::Unknown, |next| Val::Link(order, next))
+            }
+            (Val::Lfanew(base), other) if self.same_origin(base, &other, b_id) => {
+                Val::NtHeaders(base)
+            }
+            (other, Val::Lfanew(base)) if self.same_origin(base, &other, a_id) => {
+                Val::NtHeaders(base)
+            }
+            (Val::DirRva(dir, base), other) if self.same_origin(base, &other, b_id) => {
+                Val::Dir(dir, base)
+            }
+            (other, Val::DirRva(dir, base)) if self.same_origin(base, &other, a_id) => {
+                Val::Dir(dir, base)
+            }
+            (Val::FuncArrayRva(base), other) if self.same_origin(base, &other, b_id) => {
+                Val::FuncArray(base)
+            }
+            (other, Val::FuncArrayRva(base)) if self.same_origin(base, &other, a_id) => {
+                Val::FuncArray(base)
+            }
+            (Val::FuncRva(base), other) if self.same_origin(base, &other, b_id) => {
+                Val::Export(base)
+            }
+            (other, Val::FuncRva(base)) if self.same_origin(base, &other, a_id) => {
+                Val::Export(base)
+            }
             (a, b) => Self::mix(a, b, ADD),
         }
+    }
+
+    fn same_origin(&self, base: u32, other: &Val, other_id: u32) -> bool {
+        base == other_id
+            || matches!(
+                (self.origins.get(&base), other),
+                (Some(Module::Param(expected)), Val::Param(actual)) if expected == actual
+            )
+            || matches!(
+                (self.origins.get(&base), other),
+                (Some(expected), Val::Module(actual)) if expected == actual
+            )
     }
 
     /// Arithmetic on encoded or image-derived data keeps its provenance.
@@ -1386,7 +1457,11 @@ impl<'c, 'a> Machine<'c, 'a> {
                 if m == Mnemonic::Imul && insn.op_count() == 3 {
                     let factor = Self::unsigned_imm(insn, 2) as u32;
                     self.facts.hints.multipliers.insert(factor);
-                    Self::mix(b, Val::Unknown, ADD)
+                    match b {
+                        Val::Const(value) => Val::Const(value.wrapping_mul(u64::from(factor))),
+                        _ if factor == 0 => Val::Const(0),
+                        other => Self::mix(other, Val::Unknown, ADD),
+                    }
                 } else {
                     self.arith(m, a, a_id, b, b_id, same, immediate, reg)
                 }
@@ -1452,6 +1527,11 @@ impl<'c, 'a> Machine<'c, 'a> {
             },
             Mnemonic::Sub => match (a, b) {
                 (Val::Stack(d), Val::Const(c)) => stack_value(d, self.signed(c).wrapping_neg()),
+                (Val::Link(order, delta), Val::Const(c)) => self
+                    .signed(c)
+                    .checked_neg()
+                    .and_then(|amount| delta.checked_add(amount))
+                    .map_or(Val::Unknown, |next| Val::Link(order, next)),
                 (Val::Const(x), Val::Const(y)) => Val::Const(x.wrapping_sub(y)),
                 (a, b) => Self::mix(a, b, SUB),
             },
@@ -2180,7 +2260,11 @@ impl<'c, 'a> Machine<'c, 'a> {
                 keys.push(name);
             }
         }
-        keys.pop().unwrap_or(Name::Unknown)
+        keys.iter()
+            .find(|name| matches!(name, Name::Text(..)))
+            .cloned()
+            .or_else(|| keys.pop())
+            .unwrap_or(Name::Unknown)
     }
 
     fn walker_module(&mut self, args: &[Val], via: &Via) -> Module {

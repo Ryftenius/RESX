@@ -2,6 +2,10 @@
 
 All notable public changes to RESX are recorded here.
 
+## 2.2.1 - 2026-11-15
+
+- Recovered XOR-encoded API names and their indirect call sites through MSVC-generated PEB and export-table walkers, including a checked-in PDB-free C sample.
+
 ## 2.2.0 - 2026-10-27
 
 ### Security patches
