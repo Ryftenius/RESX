@@ -2,9 +2,21 @@
 
 All notable public changes to RESX are recorded here.
 
-## 2.2.1 - 2026-11-15
+## 2.2.1 - 2026-11-16
+
+### Security patches
+
+- Overrode the VS Code extension's transitive `minimatch`, `glob` and `qs` development dependencies to patched releases (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4, GHSA-6pq8-jhm2-2vcw).
+
+### Feature additions
 
 - Recovered XOR-encoded API names and their indirect call sites through MSVC-generated PEB and export-table walkers, including a checked-in PDB-free C sample.
+
+### Documentation
+
+- Rewrote the security policy and added private vulnerability reporting through GitHub Security Advisories.
+- Rewrote the analysis-surface, architecture and IOCTL guides. Documented `--unsafe-map-image` as retired.
+- Aligned the VS Code extension version with RESX.
 
 ## 2.2.0 - 2026-10-27
 
