@@ -1,57 +1,92 @@
 # IOCTL device and security evidence
 
-`resx ioctl DRIVER.sys` and `resx driver DRIVER.sys` show decoded method/access bits,
-recovered input/output length guards, external/internal dispatch channels, candidate
-device IDs, and code-check RVAs. `--verbose` adds dispatch roots and recovery evidence;
-`--json` preserves the structured records. RIVA provides the same options.
+`resx ioctl DRIVER.sys` and `resx driver DRIVER.sys` show, per IOCTL:
+
+- decoded method and access bits
+- recovered input/output length guards
+- external and internal dispatch channels
+- candidate device IDs
+- the RVAs where the code is checked
+
+`--verbose` adds dispatch roots and how each result was recovered. `--json` keeps the
+full structured records. RIVA takes the same options.
 
 ```powershell
 resx ioctl C:\Windows\System32\drivers\beep.sys --verbose
 resx ioctl C:\Windows\System32\drivers\null.sys --device-security '\Device\Null'
-riva ioctl C:\Windows\System32\drivers\null.sys --device-security '\\.\NUL' --json
+resx ioctl C:\Windows\System32\drivers\null.sys --device-security '\\.\NUL' --json
 ```
 
-Static device declarations require resolved arguments at named `IoCreateDevice`,
-`IoCreateDeviceSecure`/`WdmlibIoCreateDeviceSecure`, and symbolic-link creation APIs.
-Counted Unicode strings may be immutable globals or known caller locals initialized
-by `RtlInitUnicodeString`. Unrelated strings, unknown initializers and malformed lengths
-do not establish a name or SDDL. Each declaration includes its creation RVA and whether
-the constructor's driver argument is traced to the DriverEntry object.
+## Static Device Declarations
 
-Device IDs on IOCTL rows are candidates sharing that recovered DRIVER_OBJECT. Several
-devices can share a dispatch routine; this does not prove a per-code target, successful
-creation, loaded image identity, kernel DEVICE_OBJECT address, or attached driver stack.
-Dynamic PnP/KMDF device naming and registry/INF security can remain unresolved.
-`FILE_DEVICE_SECURE_OPEN` describes namespace access checking, not a permissive DACL.
+A device declaration is only reported when the arguments to one of these are resolved:
 
-The optional `--device-security PATH` lookup queries one explicitly supplied local
-endpoint. It resolves an object name and (where applicable) DOS alias, then queries
-owner/group/DACL SDDL from an opened handle. It never loads a driver or sends an IOCTL.
-Opening a device does execute its create/close path. The worker has a 15-second deadline
-and 256 KiB output budget. UNC and known redirector paths are rejected.
+- `IoCreateDevice`
+- `IoCreateDeviceSecure` / `WdmlibIoCreateDeviceSecure`
+- the symbolic-link creation APIs
 
-Security evidence is separated into:
+Counted Unicode strings can be immutable globals, or caller locals initialized by
+`RtlInitUnicodeString`. A string that's merely nearby, an unknown initializer, or a
+malformed length doesn't count as a device name or SDDL.
 
-- **Declared SDDL:** constructor default; registry policy can override it.
-- **Observed SDDL:** the opened endpoint's security-query result; not a direct read of
-  kernel DEVICE_OBJECT memory. Audit SACL and mandatory labels are not queried.
-- **Opened / open failed:** actual access probes under a non-elevated token at medium
-  integrity or lower, for zero/read/write/read+write data rights.
-- **DACL allows / denies:** fallback `AccessCheck` using the real linked token when
-  Windows only permits identification. This does not test an open, mandatory integrity,
-  or the driver's create/dispatch policy. Zero-access remains unknown in this mode.
+Each declaration includes the RVA where it's created, and whether the driver-object
+argument traces back to the one passed to `DriverEntry`.
 
-Text output summarizes the token, SDDL and access probes without diagnostic tables.
-The `User-access test token` label identifies the non-elevated access test, not
-the process privileges used for the earlier SDDL lookup.
-`--verbose` adds numeric errors, descriptor provenance and detailed limitations;
-`--json` retains the complete evidence. Access denied does not imply elevation
-will resolve it. No suitable
-token, denied metadata access, unknown device associations and unsupported queries stay
-unknown. An internal-device-control route is not a direct user `DeviceIoControl` route.
-Even an allowed open does not prove that the driver accepts a particular IOCTL.
+## Device Candidates
 
-JSON additions: `devices`, `live_security`, and per-code `request_channels`,
-`device_candidates`, `user_accessibility`. Probe `opened` and `dacl_allowed` are nullable
-and distinguish observations from DACL evaluation. Static name matches do not authenticate
-the currently loaded driver against the analyzed binary.
+The device IDs on an IOCTL row are the devices sharing that recovered `DRIVER_OBJECT`.
+Several devices often share one dispatch routine, so a candidate isn't necessarily
+the device that handles that specific code. It also doesn't tell you the device was
+actually created, which driver is loaded right now, its `DEVICE_OBJECT` address, or what
+else is attached to the stack.
+
+Some things can't be resolved statically: dynamic PnP/KMDF device names, and security
+set through the registry or an INF.
+
+`FILE_DEVICE_SECURE_OPEN` is about how namespace access is checked. It doesn't mean the
+DACL is permissive.
+
+## Live Lookup: `--device-security`
+
+`--device-security PATH` queries one local endpoint, the one you name. It resolves the
+object name (and the DOS alias where there is one), opens it, and reads the
+owner/group/DACL SDDL from the handle.
+
+It never loads a driver and never sends an IOCTL. Opening the device *does* run the
+driver's create/close path though, so this isn't a passive read.
+
+The worker gets a 15-second deadline and a 256 KiB output budget. UNC and known
+redirector paths are rejected.
+
+## Reading The Results
+
+| Evidence | What it is |
+| --- | --- |
+| **Declared SDDL** | The default passed to the constructor. Registry policy can override it. |
+| **Observed SDDL** | What the security query on the opened endpoint returned. It's not a direct read of the kernel `DEVICE_OBJECT`. Audit SACLs and mandatory labels aren't queried. |
+| **Opened / open failed** | Real open attempts with a non-elevated token at medium integrity or lower, for zero, read, write and read+write access. |
+| **DACL allows / denies** | The fallback when Windows only allows identification: an `AccessCheck` with the real linked token. This doesn't test an actual open, mandatory integrity, or the driver's own create/dispatch checks. Zero access stays unknown in this mode. |
+
+Text output summarizes the token, SDDL and access probes without the diagnostic
+tables. The `User-access test token` label refers to the non-elevated token used for
+the access test. It isn't the token used for the SDDL lookup.
+
+`--verbose` adds numeric errors, where each descriptor came from, and the detailed
+limitations. `--json` keeps everything.
+
+A few things to keep in mind:
+
+- Access denied doesn't mean running elevated will fix it.
+- No suitable token, denied metadata access, unknown device associations and
+  unsupported queries are reported as unknown.
+- An internal-device-control route isn't reachable through a plain user
+  `DeviceIoControl`.
+- A successful open doesn't mean the driver will accept any particular IOCTL.
+- A static name match doesn't prove the loaded driver is the binary you analyzed.
+
+## JSON
+
+New fields: `devices`, `live_security`, and per-code `request_channels`,
+`device_candidates` and `user_accessibility`. The probe fields `opened` and
+`dacl_allowed` are nullable, so you can tell a real open result apart from a DACL
+evaluation.

@@ -49,18 +49,19 @@ Inside a command, options drop the prefix the command already implies:
 
 ## Output modes
 
-Normal output presents conclusions and important limitations. `--verbose` adds
-bounded evidence, function-boundary rationale, traversal limits, and representative
-disassembly. `--diagnostic` implies verbose output and adds structured developer
-events. `--diagnostic-trace` increases the developer event level to TRACE.
+| Mode | What you get |
+| --- | --- |
+| default | The conclusions and the limitations that matter |
+| `--verbose` | Plus the evidence behind them, why function boundaries were chosen, traversal limits and sample disassembly |
+| `--diagnostic` | Everything from `--verbose`, plus structured developer events |
+| `--diagnostic-trace` | Developer events down to TRACE level |
 
-Diagnostics go to stderr. Analysis output retains its selected text, JSON, or
-JSONL format on stdout or `--out`.
+Diagnostics always go to stderr. The analysis itself stays in whatever format you
+picked (text, JSON or JSONL) on stdout or `--out`, so piping JSON never gets polluted.
 
-Color is enabled for an interactive terminal and disabled for redirected output
-unless explicitly requested. Addresses, opcode bytes, mnemonics, operands,
-selected instructions, warnings, errors, success markers, and confidence labels
-use distinct semantic styles.
+Color is on in an interactive terminal and off when output is redirected, unless you
+ask for it. Addresses, opcode bytes, mnemonics, operands, selected instructions,
+warnings, errors, success markers and confidence labels each get their own style.
 
 ## Dump analysis
 

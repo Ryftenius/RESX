@@ -1,57 +1,62 @@
 # Analysis surfaces
 
-RESX analyzes hostile Windows PE files without loading or executing them.
+RESX analyzes hostile Windows PE files without ever loading or running them. This is
+what it looks at, and how far each piece goes.
 
-## PE structure
+## PE Structure
 
 The parser validates DOS/NT headers, optional headers, section mappings, data
-directories, imports, exports, relocations, resources, TLS, load configuration,
-debug records, CLR metadata, certificates, and x64 exception/unwind data.
-Unavailable file-backed bytes remain unavailable.
+directories, imports, exports, relocations, resources, TLS, load configuration, debug
+records, CLR metadata, certificates and x64 exception/unwind data.
 
-## Disassembly and functions
+If the file doesn't actually back some bytes, they stay unavailable. They never get
+filled in as zeroes.
 
-Function discovery combines exports, symbols, runtime-function records, startup
-metadata, direct call targets, validated thunks, and bounded executable fallbacks.
-Disassembly uses exact RVA/file mappings and separates import slots from imported
-function bodies.
+## Disassembly And Functions
 
-PDB function types are preserved when available. Otherwise, bounded static ABI
-analysis may infer machine-width arguments, pointer access, and return values;
-unknown signedness, names, layouts, and unused arguments remain unknown. Optional
-lightweight SSA annotations are enabled only with `--ssa`.
+Function discovery pulls from exports, symbols, runtime-function records, startup
+metadata, direct call targets, validated thunks, and a bounded fallback over executable
+sections. Disassembly uses exact RVA/file mappings and keeps import slots separate from
+the bodies of imported functions.
 
-## Control flow
+Function types come from the PDB when there is one. Without a PDB, a bounded static ABI
+pass guesses machine-width arguments, pointer access and return values. Anything it
+can't work out (signedness, names, layouts, unused arguments) is shown as unknown.
 
-RESX builds function CFGs, follows bounded direct control flow, recovers common
-switch forms, records unresolved indirect edges, and reconstructs loader-visible
-startup roots such as the image entry point and TLS callbacks. Traversal budgets
-and incomplete edges are included in output.
+`--ssa` turns on lightweight SSA annotations. They're off by default.
 
-Conflicting instruction streams are retained as separate decode evidence when
-direct control flow enters overlapping bytes. Detailed conflict evidence is
-shown only with `--verbose` or in structured dump output and does not establish
-obfuscation or intent.
+## Control Flow
 
-## Static behavior
+RESX builds function CFGs, follows direct control flow within budget, recovers common
+switch forms, and records indirect edges it couldn't resolve. It also rebuilds the
+startup roots the loader sees, like the entry point and TLS callbacks. Budgets and
+incomplete edges show up in the output.
 
-Behavior and contract reports correlate exact imports, local argument producers,
-constants, strings, and instruction evidence. Categories include IPC, network,
-crypto, executable-memory APIs, anti-debugging primitives, drivers, IOCTL/NDIS,
-hypervisor instructions, and persistence-related APIs.
+When direct control flow lands in the middle of bytes already decoded another way, both
+instruction streams are kept as separate decode evidence. The details are only shown
+with `--verbose` or in structured dump output. Overlapping decodes on their own don't
+mean the code is obfuscated.
 
-These are static candidates. Presence does not establish execution, success,
-intent, a live peer, or security impact.
+## Static Behavior
 
-## Search and comparison
+Behavior and contract reports tie together exact imports, the local code producing each
+argument, constants, strings and instruction evidence. Categories cover IPC, network,
+crypto, executable-memory APIs, anti-debugging, drivers, IOCTL/NDIS, hypervisor
+instructions and persistence APIs.
 
-YARA-compatible rules and `find` locate bounded byte, string, constant, and
-instruction evidence. Diff/index/hunt use normalized functions, CFG shape, API
-sets, constants, fuzzy hashes, and metadata. Similarity scores are ranking aids,
-not identity proofs.
+These are static findings. They tell you what the code *can* do, not that it ran or
+worked.
 
-## Explicit decoding
+## Search And Comparison
 
-`payload` applies operator-selected bounded codecs or AES-CBC parameters and
-records hashes for every layer. It does not infer missing keys or claim the
-decoded result executed.
+YARA-compatible rules and `find` locate bounded byte, string, constant and instruction
+evidence.
+
+`diff`, `index` and `hunt` compare normalized functions, CFG shape, API sets, constants,
+fuzzy hashes and metadata. Similarity scores rank candidates. A high score means
+"look at this one first", not "these are the same binary".
+
+## Explicit Decoding
+
+`payload` applies the codecs or AES-CBC parameters you choose, within limits, and hashes
+every layer. It won't guess a missing key.

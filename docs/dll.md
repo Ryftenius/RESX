@@ -78,7 +78,7 @@ Typed analysis functions return JSON by default. The success envelope contains:
   "status_code": 0,
   "command": "peinfo",
   "args": ["sample.dll", "--json", "--no-color", "--quiet"],
-  "resx_version": "2.2.0",
+  "resx_version": "2.2.1",
   "payload": {}
 }
 ```
@@ -94,7 +94,7 @@ Error envelopes contain:
   "status": "error",
   "status_code": 5,
   "error": "message",
-  "resx_version": "2.2.0"
+  "resx_version": "2.2.1"
 }
 ```
 
@@ -355,7 +355,7 @@ For high-volume integration, prefer typed exports over repeatedly constructing a
 - Release every returned string exactly once with `ResxFreeString`.
 - Do not call `ResxFreeString` on memory not returned by RESX.
 - Treat all analysis as static best-effort evidence.
-- Use `--unsafe-map-image` only when you understand that the command may map the target image into the RESX process.
+- RESX never maps the target image into its own process. `--unsafe-map-image` is retired: it's still accepted so old callers don't break, but it does nothing. Prologue comparison only reads modules that are already loaded.
 
 ## Verification
 

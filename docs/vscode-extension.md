@@ -151,6 +151,8 @@ From inside the viewer, clicking an export, symbol, RVA link, call target, or xr
 dump <target> --cfg text --funcs-depth <n> --strings --xrefs --recomp
 ```
 
+`--funcs-depth` is the earlier spelling of `--calls <n>` (see [CLI earlier spellings](cli.md#earlier-spellings)). The extension keeps sending it so it still works with older bundled analyzers. Current RESX accepts both.
+
 The Dump view shows:
 
 - Disassembly.

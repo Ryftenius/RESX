@@ -1,87 +1,111 @@
 # Architecture
 
-RESX is being organized around shared image facts, with analysis built on top.
-Commands choose the work to run and render the result.
+RESX is built around shared facts about one image, with analysis layered on top.
+Commands pick what to run and render the result. They shouldn't be doing the analysis
+themselves.
 
 | Layer | Responsibility |
 | --- | --- |
 | `formats/pe` | Parse bytes and validate PE mappings and structures. |
 | `analysis/image` | Share imports, exports, unwind records, TLS, startup routines, load configuration and data summaries for one immutable image. |
-| `analysis/session` | Compute and reuse analysis results when requested. Currently owns dynamic API resolution. |
+| `analysis/session` | Compute and reuse analysis results when asked. Currently owns dynamic API resolution. |
 | `analysis/inspection` | Select image and function reports through explicit requests, independent of the CLI or output format. |
 | Analysis modules | Recover calls, arguments, behavior, driver interfaces and other evidence. |
-| `providers` | Load exports and SDK headers from explicit directories or the local Windows environment. |
-| Commands and presentation | Resolve inputs, select analyses and produce CLI or JSON output. |
+| `providers` | Load exports and SDK headers from explicit directories or the local Windows install. |
+| Commands and presentation | Resolve inputs, pick analyses, produce CLI or JSON output. |
 
-`ImageFacts` borrows the bytes and their parsed `PeFile`. Facts are computed on
-first use. `AnalysisSession` owns an `ImageFacts` and caches resolver results for
-that session. Neither uses buffer addresses as persistent cache keys. A changed
-image requires a new session.
+## Image Facts And Sessions
 
-External names are explicit inputs too. `AnalysisSession::new` uses no external
-export dictionary. `with_exports` accepts an `ExportDictionary` built by the caller
-or a lazy `ExportProvider`. `SystemExports` handles local DLL lookup at the command
-boundary. Separate sessions can use different export sets without sharing results.
+`ImageFacts` borrows the bytes and their parsed `PeFile`, and computes each fact the
+first time something asks for it.
 
-`HeaderIndex::from_sources` parses supplied header text without filesystem access.
-`SdkHeaders` handles SDK discovery and optional disk caching. Each instance keeps
-one snapshot; create another to refresh it. Commands load an index once and pass
-it through behavior and call-tree argument recovery.
+`AnalysisSession` owns an `ImageFacts` and caches resolver results for that session.
 
-Provider adapters can reuse up to four source snapshots. Keys include the source
-directory, file sizes and modification times; export keys also include the module
-listing. Windows SDK directory notifications avoid rescanning unchanged headers;
-when notifications are unavailable, requests check metadata directly. Parsing runs
-outside cache locks. Active sessions keep their snapshots through cache eviction.
+Neither one uses a buffer address as a cache key. If the image changes, make a new
+session.
 
-The FFI uses the CLI grammar for command names, aliases and JSON options. Adding
-a command no longer requires a second command list in the DLL adapter.
+## Providers
 
-Dump and calls translate CLI flags into report requests once. The analysis layer
-returns a `FunctionReport` shared by text and JSON output. Signature, calls,
-arguments, dynamic resolution, CFG, typed IR and other reports can be selected
-independently by Rust callers. Argument recovery and dynamic resolution collect
-the calls they need. Discovery and indirect-flow analysis reuse the session's
-data summary instead of rescanning the image.
-Data views borrow the same cached unwind records, so combining reports does not
-retain a second copy of the unwind table.
+Anything that comes from outside the image is passed in explicitly.
 
-`DecodeOptions` and `TraversalOptions` carry decoding settings and budgets without
-CLI configuration. `decode_function` preserves reachable-function recovery and
-only falls back to linear decoding when needed. `inspect_function` consumes those
-instructions and supplied switch targets. Neither selects work by output format.
-The module's Rust example shows a minimal call/signature request.
+- **Exports:** `AnalysisSession::new` starts with no export dictionary. `with_exports`
+  takes an `ExportDictionary` you built or a lazy `ExportProvider`. `SystemExports`
+  does local DLL lookup, and only at the command boundary. Two sessions can use
+  different export sets without sharing results.
+- **Headers:** `HeaderIndex::from_sources` parses header text you hand it, with no
+  filesystem access. `SdkHeaders` finds the SDK and can cache to disk. Each instance
+  holds one snapshot, so make a new one to refresh. Commands load the index once and
+  pass it to behavior and call-tree argument recovery.
 
-Function rendering consumes completed reports, including driver flow contracts
-and resolved syscall details. CFG blocks are built once, then passed to plain or
-colored renderers in `presentation/cfg`. Existing JSON fields, command defaults
-and Rust compatibility entry points remain available.
-JSON conversion produces an owning model, then releases the analysis session
-before serialization so its caches do not overlap the output buffer's lifetime.
+Provider adapters keep up to four source snapshots. The cache key is the source
+directory plus file sizes and modification times, and export keys also include the
+module listing. Windows SDK directory notifications skip rescanning headers that
+haven't changed. Where notifications aren't available, each request checks the
+metadata directly. Parsing happens outside the cache locks, and a session keeps its
+snapshot even if the cache evicts it.
 
-Behavior, dump/call trees, SDK argument recovery, driver, IOCTL and contract
-analysis use these shared facts. IOCTL analysis requests its own report without
-running unrelated driver classification or hypervisor analysis. Existing Rust
-entry points remain available; callers doing repeated analysis should reuse the
-new context APIs.
+## Commands And Reports
 
-The legacy `resolution::cached` entry point now computes a fresh report. Use
-`AnalysisSession::resolution` to reuse it safely.
-Other legacy convenience functions retain host lookup through compatibility
-adapters. Repeated library workflows should keep their providers and sessions
-instead of loading a new SDK index or export dictionary for every operation.
+The FFI uses the CLI grammar for command names, aliases and JSON options, so a new
+command only gets registered once.
 
-When adding an analysis:
+`dump` and `calls` turn CLI flags into report requests once. The analysis layer
+returns a `FunctionReport` that both text and JSON output render from. Rust callers
+can select signature, calls, arguments, dynamic resolution, CFG, typed IR and the
+other reports independently.
 
-- Take image facts and explicit inputs. Keep file lookup and output formatting
-  outside the analysis where possible.
-- Request only the facts needed. Reuse existing parsers and address conversions.
-- Return evidence as data. Apply output limits and colors when rendering it.
-- Keep traversal budgets explicit. Cache results only for inputs that cannot
-  change during their lifetime.
-- Check correctness and measure the affected workflow before optimizing it.
+- Argument recovery and dynamic resolution collect only the calls they need.
+- Discovery and indirect-flow analysis reuse the session's data summary instead of
+  rescanning the image.
+- Data views borrow the cached unwind records, so combining reports doesn't keep a
+  second copy of the unwind table.
 
-The migration is ongoing. Cross-image call-tree traversal, kernel lookup and live
-checks still sit in command adapters. Older analyses retain some CLI and formatting
-dependencies. Discovery and disassembly keep their distinct traversal policies;
-sharing their inputs does not mean treating those policies as interchangeable.
+`DecodeOptions` and `TraversalOptions` carry decode settings and budgets with no CLI
+config attached. `decode_function` keeps reachable-function recovery and only falls
+back to linear decoding when it has to. `inspect_function` takes those instructions
+plus any supplied switch targets. Neither picks work based on output format. The
+module's Rust example shows a minimal call/signature request.
+
+Rendering only consumes finished reports, including driver flow contracts and
+resolved syscall details. CFG blocks are built once and handed to the plain or
+colored renderer in `presentation/cfg`.
+
+JSON conversion builds an owning model, then drops the analysis session before
+serializing, so the session's caches aren't alive at the same time as the output
+buffer.
+
+Behavior, dump/call trees, SDK argument recovery, driver, IOCTL and contract analysis
+all run on these shared facts. IOCTL analysis asks for its own report and doesn't
+drag in driver classification or hypervisor analysis.
+
+## Compatibility
+
+Existing JSON fields, command defaults and Rust entry points still work.
+
+- `resolution::cached` computes a fresh report every time. Use
+  `AnalysisSession::resolution` if you want it reused.
+- Other old convenience functions still do host lookup through compatibility
+  adapters.
+
+If you're doing repeated analysis from a library, keep your providers and sessions
+around. Don't load a new SDK index or export dictionary for every call.
+
+## Adding An Analysis
+
+- Take image facts and explicit inputs. Keep file lookup and output formatting out of
+  the analysis where you can.
+- Ask only for the facts you need. Reuse the existing parsers and address conversions.
+- Return evidence as data. Apply output limits and colors when rendering.
+- Keep traversal budgets explicit. Only cache results for inputs that can't change
+  while the cache lives.
+- Check it's correct, then measure the workflow it affects, then optimize.
+
+## Still To Move
+
+Not everything is on this model yet:
+
+- Cross-image call-tree traversal, kernel lookup and live checks still live in command
+  adapters.
+- Some older analyses still depend on CLI config and formatting.
+- Discovery and disassembly share inputs but keep their own traversal policies. That's
+  on purpose, they aren't interchangeable.
