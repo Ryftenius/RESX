@@ -1,71 +1,94 @@
-# RESX threat model
+# Security
 
-RESX analyzes untrusted binaries. A sample can control every PE header, section,
-directory, string, RVA and unwind record. The threats are crashes, hangs, excessive
-CPU or memory use, misleading analysis, and turning embedded names into file access
-or code execution on the analyst's machine.
+RESX exists to pull apart binaries that don't want to be pulled apart, so every sample
+is treated as hostile. A sample controls every PE header, section, directory, string,
+RVA and unwind record it ships with, and it will lie in all of them.
 
-## Scope and trust boundaries
+What I care about here:
 
-Static analysis reads a sample as data. It does not load that sample as an executable
-module or call its code. Optional live checks are separate: prologue comparison reads
-an already-loaded, pinned module; `--device-security` queries the selected local device
-in a bounded worker. Opening a device can invoke its driver. These modes are not part
-of the static parser boundary.
+- RESX crashing or hanging
+- a sample burning unbounded CPU or memory
+- a sample tricking RESX into a wrong or misleading result
+- a sample turning names embedded in it into file access or code execution on the analyst's machine
 
-| Boundary | Required behavior |
+If you find a way to do any of those, that's a security bug.
+
+## Reporting
+
+Please report vulnerabilities privately through GitHub's **Report a vulnerability**
+button on the Security tab, not as a public issue. Include the RESX version
+(`resx --version`), the command you ran, and a sample or minimal PE that reproduces it.
+
+## What Counts As The Sample
+
+Static analysis reads the sample as data. It never loads it as a module and never
+calls its code.
+
+Two things sit outside that boundary and are opt-in:
+
+- **Prologue comparison** reads a module that's already loaded and pinned.
+- **`--device-security`** queries one local device you name, from a bounded worker.
+  Opening a device runs that driver's create/close path, so this is not a pure static check.
+
+Inside the static boundary, each step has a rule:
+
+| Boundary | Rule |
 | --- | --- |
-| File bytes into PE structures | Check lengths, counts, arithmetic and backing bytes before parsing. A declared offset is not proof that data exists. |
-| PE mappings into analysis | Use checked readers. Reject ambiguous overlaps and keep unavailable bytes distinct from zero-filled memory. |
-| Linked structures into traversal | Detect cycles and bound work, including long acyclic chains and repeated aliases. |
-| Embedded names into file lookup | Require plain module filenames. Validate PDB cache names and encode symbol-server URL segments. Sample names do not select executables. |
-| Shared facts into cached results | Bind facts to an immutable image and results to its analysis session and providers. Changed bytes require a new session. |
-| Reports into consumers | Escape terminal control characters, produce structured JSON, and report exhausted analysis budgets. |
+| File bytes → PE structures | Check lengths, counts, arithmetic and backing bytes before parsing anything. A declared offset doesn't mean the data is actually there. |
+| PE mappings → analysis | Read through checked readers. Reject ambiguous overlaps. Bytes that aren't available stay unavailable, they never become zeroes. |
+| Linked structures → traversal | Detect cycles and cap the work, including long chains without a cycle and repeated aliases. |
+| Embedded names → file lookup | Only plain module filenames. PDB cache names are validated and symbol-server URL segments are encoded. A sample can never pick which executable gets run. |
+| Shared facts → cached results | Facts are tied to one immutable image, results to one analysis session and its providers. Changed bytes mean a new session. |
+| Reports → consumers | Terminal control characters are escaped, JSON is structured, and hitting an analysis budget is reported. |
 
-Explicit input/output paths, search directories, SDK locations and symbol-server
-settings are operator choices. The Windows installation, RESX executable and configured
-tools must be trusted. An attacker who can replace those tools or alter the process's
-environment is outside the hostile-sample boundary.
+What I trust: the Windows install, the RESX executable, and any tools you configure.
+Paths you pass in, search directories, SDK locations and symbol-server settings are your
+choice. If an attacker can replace those tools or mess with the process environment,
+they're already past the hostile-sample boundary and this document doesn't cover it.
 
-## Resource limits
+## Limits
 
-- Image reads require a regular file and stop at 512 MiB, including files that grow
-  while being read. PE section counts are limited to 96.
-- Directory readers cap entries and strings. Unwind chains have cycle detection,
-  a 32-record depth limit and shared validation work budgets.
-- Behavior scanning shares a one-million-instruction budget across sections and
-  retains at most 8,192 findings. Partial results include `analysis_limits` in JSON
-  and a notice in text output.
-- Prologue discovery shares a 16 MiB scan budget and reports when it stops early.
-- Driver ownership uses indexed export and unwind lookups, so repeated aliases do
-  not force a full table scan for every instruction.
+- Image reads need a regular file and stop at **512 MiB**, including files that grow
+  while being read. PE section count is capped at **96**.
+- Directory readers cap entries and strings. Unwind chains get cycle detection, a
+  **32-record** depth limit and shared validation budgets.
+- Behavior scanning shares a **one-million-instruction** budget across all sections and
+  keeps at most **8,192** findings. If it stops early, JSON gets `analysis_limits` and
+  text output gets a notice.
+- Prologue discovery shares a **16 MiB** scan budget and says when it stops early.
+- Driver ownership uses indexed export and unwind lookups, so a sample can't force a full
+  table scan per instruction by repeating aliases.
 
-These are analysis limits, not an OS sandbox or a process-wide memory ceiling.
-Resource exhaustion, unchecked arithmetic and invalid slicing remain security bugs.
+These are analysis limits. They are not an OS sandbox and not a process-wide memory cap.
+Resource exhaustion, unchecked arithmetic and bad slicing are still security bugs.
 
-## Symbols and external tools
+## Symbols And External Tools
 
-DbgHelp is loaded from the Windows system directory, with the same restriction on
-dependency lookup. Its PE/PDB parsing still runs inside RESX. A trusted DLL path does
-not isolate native parser defects. Use `--no-pdb` to disable optional symbol loading
-for PE-only workflows.
+DbgHelp is loaded from the Windows system directory, with dependency lookup restricted
+the same way. Its PE/PDB parsing still runs inside the RESX process though, so a trusted
+DLL path doesn't protect you from bugs in DbgHelp's own parser. If you don't need
+symbols, `--no-pdb` turns them off.
 
-The LLVM PDB fallback resolves an explicit tool path without searching the current
-directory. It has a 30-second timeout, a 32 MiB output limit and bounded type-forwarder
-traversal. The timeout and output cap do not make the tool a sandbox. Symbol fetching
-is also a network and cache-write boundary; its transport and native parsing are
-outside the coverage of the PE malformed-input tests.
+The LLVM PDB fallback only runs from an explicit tool path, never the current directory.
+It gets a 30-second timeout, a 32 MiB output cap and bounded type-forwarder traversal.
+That keeps it in check, it doesn't sandbox it. Symbol fetching also touches the network
+and writes to the cache, and neither the transport nor the native parsing is covered by
+the PE malformed-input tests.
 
-FFI callers must provide valid pointers, lengths and buffer lifetimes, and release
-RESX-owned results through the matching API. Malformed PE handling cannot make an
-invalid native caller pointer safe. Release builds abort on panic; exception handling
-is not a substitute for validation.
+## FFI
 
-## Validation and releases
+If you call RESX through the DLL, you're responsible for passing valid pointers, lengths
+and buffer lifetimes, and for freeing RESX-owned results through the matching API
+(`ResxFreeString`). RESX can survive a malformed PE. It can't survive you handing it a
+bad pointer.
 
-Parser regressions cover invalid ranges, EOF, overlapping mappings, cyclic structures,
-arithmetic overflow and resource amplification, alongside valid-image controls.
-Native DbgHelp/PDB parser internals and live-device behavior require separate testing.
+Release builds abort on panic. Exception handling isn't a replacement for validation.
+
+## Testing And Releases
+
+Parser regression tests cover invalid ranges, EOF, overlapping mappings, cyclic
+structures, arithmetic overflow and resource amplification, alongside valid images as
+controls. DbgHelp/PDB internals and live-device behaviour need their own testing.
 
 ```powershell
 cargo fmt --all -- --check
@@ -74,7 +97,8 @@ cargo test --workspace --all-targets --all-features
 cargo build --release
 ```
 
-Skipped environment-dependent tests are reported separately. Build outputs, PDBs,
-fixtures, local paths, credentials and private research artifacts do not belong in
-public commits or release archives. Diagnostics must not expose credentials or raw
-environment secrets.
+Environment-dependent tests that get skipped are reported separately.
+
+Build outputs, PDBs, fixtures, local paths, credentials and private research material
+don't go into public commits or release archives. Diagnostics never print credentials
+or raw environment secrets.
