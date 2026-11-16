@@ -23,7 +23,7 @@
 //! ```
 
 mod decode;
-pub use decode::decode_function;
+pub use decode::{decode_function, decode_reachable_function};
 
 use std::collections::HashMap;
 
@@ -131,8 +131,6 @@ pub struct FunctionRequest<'a> {
     pub annotate_conflicts: bool,
 }
 
-/// Typed evidence shared by the text/JSON adapters. Existing instruction comments
-/// and report field conventions are retained for compatibility.
 pub struct FunctionReport<'a> {
     pub instructions: Vec<Instruction>,
     pub calls: Vec<ApiCall>,
@@ -163,10 +161,9 @@ pub fn inspect_function<'a>(
     let pe = facts.pe();
     let reports = request.reports;
     let calls = if reports.calls || reports.arguments || reports.dynamic_resolution {
-        let mut calls = disasm::collect_api_calls(
+        let mut calls = disasm::collect_api_calls_in(
             &insns,
-            pe,
-            facts.raw(),
+            facts,
             symbols,
             pe.image_base,
             request.options.decode.hostile,

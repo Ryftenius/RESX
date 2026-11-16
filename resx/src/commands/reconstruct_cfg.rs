@@ -88,7 +88,8 @@ pub fn run(dll_arg: &str, cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result
         .ok();
     } else {
         write!(w, "{}", render_ascii(&report, c, cfg)).ok();
-        if cfg.driver_flow || cfg.funcs_depth > 0 {
+        // Image-wide driver contracts belong to kernel images unless explicitly requested.
+        if cfg.driver_flow || (cfg.funcs_depth > 0 && pe.subsystem == 1) {
             let imports = read_imports(&pe, &raw);
             let driver = crate::analysis::driver::analyze_driver(&dll_name, &pe, &raw, &imports);
             super::driver::render_flow_contracts(w, c, &driver, cfg.max_subcalls);

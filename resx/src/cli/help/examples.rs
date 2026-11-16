@@ -23,8 +23,6 @@ pub fn print_examples(topic: &str) {
     println!("\nShared options: resx help options | Command overview: resx help");
 }
 
-/// Usage, examples and notes for a command or topic, followed by the command's
-/// generated options.
 pub(in crate::cli) fn command_help(topic: &str) -> Option<String> {
     let topic = topic.to_ascii_lowercase();
     let command = topic_command(&topic)?;
@@ -312,7 +310,7 @@ malicious intent."#
         }
         "calls" | "funcs" => {
             r"CALLS | Recursive API call tree for one function
-Usage: resx calls <image> <target> [--depth N] [--only TERMS] [--exclude TERMS] [--args]
+Usage: resx calls <image> <target> [--depth N] [--only TERMS] [--exclude TERMS] [--args] [--telemetry]
 
 Examples:
   resx calls .\agent.exe main
@@ -322,6 +320,20 @@ Examples:
   resx calls .\agent.exe main --only internal
   resx calls .\agent.exe main --only dynamic
   resx calls .\agent.exe rentry --no-pdb --only winapi --json
+  resx calls KernelBase.dll CreateProcessW --depth 1 --telemetry
+
+--telemetry searches the calls below the function, through imports and system
+calls into the kernel, for telemetry it can reach: kernel notify callbacks, ETW
+and ETW Threat-Intelligence providers, security auditing, driver stacks, registry
+and directory change notifications, WMI, WFP and AMSI. Each source lists what it
+emits, who can consume it, whether the calling process can suppress it, and the
+shortest path to it. Kernel internals are named only when ntoskrnl symbols load.
+Reachable is not fired: providers, sessions, callbacks and audit policy decide
+at run time.
+
+System calls are highlighted in color output. Functions with an unwind extent
+are traced whole; when a function has more calls than --max-subcalls, system
+calls and imports are kept before runtime helpers.
 
 Terms for --only and --exclude:
   winapi      Imports outside the C/C++ runtime; runtime helpers are not traversed

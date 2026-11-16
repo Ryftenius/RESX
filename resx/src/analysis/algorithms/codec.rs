@@ -24,6 +24,7 @@ impl Bits<'_> {
         }
         Ok(value)
     }
+
     fn aligned(&mut self) {
         self.bit = (self.bit + 7) & !7;
     }
@@ -79,6 +80,7 @@ impl Huffman {
         }
         Ok(result)
     }
+
     fn decode(&self, bits: &mut Bits<'_>) -> Result<usize, String> {
         let mut code = 0;
         for length in 1..16 {
@@ -247,6 +249,7 @@ pub fn crc32(bytes: &[u8]) -> u32 {
     }
     !crc
 }
+
 fn adler32(bytes: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
     for chunk in bytes.chunks(5552) {
@@ -430,6 +433,7 @@ mod tests {
         assert!(decode("base64", b"Zh==").is_err());
         assert!(decode("base64", b"Zg==AAAA").is_err());
     }
+
     #[test]
     fn malformed_trees_and_truncation_reject() {
         assert!(Huffman::new(&[1, 1, 1], false, false).is_err());

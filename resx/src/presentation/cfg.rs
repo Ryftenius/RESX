@@ -54,7 +54,6 @@ pub fn render_blocks_text(blocks: &[BasicBlock]) -> String {
     out
 }
 
-/// Classify a block by its exit edges so we can pick a header color.
 fn block_kind(block: &BasicBlock) -> &'static str {
     for e in &block.edges {
         if e.kind == "exit" {
@@ -90,7 +89,6 @@ pub fn render_blocks_colored(blocks: &[BasicBlock], c: &Colors) -> String {
     ));
 
     for (idx, block) in blocks.iter().enumerate() {
-        // Pick a header color based on what the block does.
         let kind = if idx == 0 { "entry" } else { block_kind(block) };
         let header_name = format!("block_{:08X}", block.start_rva);
         let tag = match kind {
@@ -112,7 +110,6 @@ pub fn render_blocks_colored(blocks: &[BasicBlock], c: &Colors) -> String {
         ));
         out.push_str(&format!("{}:{}\n", tag, stats));
 
-        // Instructions
         for insn in &block.insns {
             let rva = c.dim(&c.cyan(&format!("0x{:08X}", insn.rva)));
             let bytes = {
@@ -144,7 +141,6 @@ pub fn render_blocks_colored(blocks: &[BasicBlock], c: &Colors) -> String {
             }
         }
 
-        // Edges
         out.push_str(&format!("    {}\n", c.dim("edges:")));
         for edge in &block.edges {
             let badge = match edge.kind {

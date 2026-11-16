@@ -11,6 +11,7 @@ pub(super) fn profile_image(
     let raw = crate::core::input::read_image(path)
         .map_err(|e| format!("read '{}': {}", path.display(), e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
+    let image = ImageFacts::new(&pe, &raw);
     let arch = cfg.effective_arch(pe.arch);
     let exports = read_exports(&pe, &raw);
     let imports = read_imports(&pe, &raw);
@@ -89,8 +90,7 @@ pub(super) fn profile_image(
         progress.tick(&format!("{}: {}", side, function.name));
         match profile_function(
             function,
-            &raw,
-            &pe,
+            &image,
             arch,
             &exports,
             &symbol_index,
@@ -183,8 +183,7 @@ pub(super) fn indexed_function(fp: &FunctionFingerprint) -> IndexedFunction {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn profile_function(
     function: &DiscoveredFunction,
-    raw: &[u8],
-    pe: &PeFile,
+    image: &ImageFacts<'_>,
     arch: u32,
     exports: &[Export],
     symbols: &SymbolIndex,
@@ -192,6 +191,8 @@ pub(super) fn profile_function(
     string_rvas: &BTreeSet<u32>,
     cfg: &mut Config,
 ) -> Result<Option<FunctionFingerprint>, String> {
+    let pe = image.pe();
+    let raw = image.raw();
     let Some(rva) = parse_hex32(&function.rva) else {
         return Ok(None);
     };
@@ -253,7 +254,7 @@ pub(super) fn profile_function(
         }
     }
 
-    let api_calls = collect_api_calls(&insns, pe, raw, symbols, pe.image_base, cfg.hostile);
+    let api_calls = collect_api_calls_in(&insns, image, symbols, pe.image_base, cfg.hostile);
     let api_set = api_calls
         .iter()
         .filter_map(normalized_api_call)

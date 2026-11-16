@@ -60,6 +60,7 @@ fn analyze(code: &[u8]) -> Vec<IoctlCodeCandidate> {
         &mut Coverage::default(),
     )
 }
+
 fn append_compare(code: &mut Vec<u8>, n: u32) {
     code.extend([0x81, 0xf9]);
     code.extend(n.to_le_bytes());

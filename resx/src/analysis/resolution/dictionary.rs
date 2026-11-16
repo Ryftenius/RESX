@@ -52,9 +52,11 @@ impl ExportDictionary {
     pub fn is_api(&self, name: &str) -> bool {
         self.apis.contains_key(name)
     }
+
     pub fn is_module(&self, name: &str) -> bool {
         self.modules.contains(&name.to_ascii_lowercase())
     }
+
     pub fn module_of(&self, api: &str) -> Option<&str> {
         self.apis.get(api).map(AsRef::as_ref)
     }

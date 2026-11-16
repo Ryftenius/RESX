@@ -68,6 +68,7 @@ fn text(call: &calls::CallEvidence, name: &str) -> Option<String> {
         .as_str()
         .map(str::to_owned)
 }
+
 fn value(call: &calls::CallEvidence, name: &str) -> calls::Value {
     call.arguments
         .iter()

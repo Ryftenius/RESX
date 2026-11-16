@@ -1,7 +1,4 @@
-//! Shared facts for one immutable image. No file lookup, configuration or rendering.
-//!
-//! Callers own the bytes and the PE parsed from those bytes. The borrow keeps both
-//! unchanged for this session, so cached results need no process-wide identity key.
+//! Lazy facts borrowed from one immutable image. No file lookup or rendering.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -22,6 +19,7 @@ pub struct ImageFacts<'a> {
     load_config: OnceLock<Option<PeLoadConfigInfo>>,
     data_summary: OnceLock<PeDataContents>,
     startup_routines: OnceLock<Vec<PeStartupRoutine>>,
+    wdf_table: OnceLock<Option<super::wdf::BoundTable>>,
 }
 
 impl<'a> ImageFacts<'a> {
@@ -39,6 +37,7 @@ impl<'a> ImageFacts<'a> {
             load_config: OnceLock::new(),
             data_summary: OnceLock::new(),
             startup_routines: OnceLock::new(),
+            wdf_table: OnceLock::new(),
         }
     }
 
@@ -48,6 +47,12 @@ impl<'a> ImageFacts<'a> {
 
     pub fn raw(&self) -> &[u8] {
         self.raw
+    }
+
+    pub fn wdf_table(&self) -> Option<super::wdf::BoundTable> {
+        *self
+            .wdf_table
+            .get_or_init(|| super::wdf::bound_table(self.pe, self.raw))
     }
 
     pub fn imports(&self) -> &[ImportDll] {

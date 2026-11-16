@@ -110,6 +110,7 @@ pub(super) fn profile_cfg_function(
     let raw = crate::core::input::read_image(path)
         .map_err(|e| format!("read '{}': {}", path.display(), e))?;
     let pe = parse_pe(&raw).map_err(|e| e.0)?;
+    let image = ImageFacts::new(&pe, &raw);
     let arch = cfg.effective_arch(pe.arch);
     let exports = read_exports(&pe, &raw);
     let imports = read_imports(&pe, &raw);
@@ -161,8 +162,7 @@ pub(super) fn profile_cfg_function(
             cfg_block_profile(
                 idx,
                 block,
-                &raw,
-                &pe,
+                &image,
                 &symbol_index,
                 &import_slots,
                 &string_rvas,
@@ -182,14 +182,14 @@ pub(super) fn profile_cfg_function(
 pub(super) fn cfg_block_profile(
     id: usize,
     block: &BasicBlock,
-    raw: &[u8],
-    pe: &PeFile,
+    image: &ImageFacts<'_>,
     symbols: &SymbolIndex,
     import_slots: &BTreeMap<u32, String>,
     string_rvas: &BTreeSet<u32>,
     block_ids: &BTreeMap<u32, usize>,
     cfg: &Config,
 ) -> CfgBlockProfile {
+    let pe = image.pe();
     let mut normalized_ops = Vec::new();
     let mut opcodes = Vec::new();
     let mut const_set = BTreeSet::new();
@@ -201,7 +201,7 @@ pub(super) fn cfg_block_profile(
         normalized_ops.push(normalized.text);
         lines.push(format_instruction_line(insn));
     }
-    let api_set = collect_api_calls(&block.insns, pe, raw, symbols, pe.image_base, cfg.hostile)
+    let api_set = collect_api_calls_in(&block.insns, image, symbols, pe.image_base, cfg.hostile)
         .iter()
         .filter_map(normalized_api_call)
         .collect::<BTreeSet<_>>();

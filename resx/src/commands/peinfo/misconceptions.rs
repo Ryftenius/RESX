@@ -1,11 +1,7 @@
-//! Evidence contracts, including negative controls. Failures expose unsupported
-//! classifications; they must not be converted into ignored or passing tests.
 use super::*;
 use crate::formats::pe::{parse_pe, PeSection, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ};
 
 fn ordinary_dll() -> PeFile {
-    // Minimal ordinary PE32+ headers. This is an explicit unit-test fixture,
-    // not a runtime trace or evidence about a deployed binary.
     let mut raw = vec![0u8; 0x400];
     raw[..2].copy_from_slice(b"MZ");
     raw[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());

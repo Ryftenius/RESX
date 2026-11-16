@@ -1,4 +1,4 @@
-//! Conditional length guards, never a complete or runtime-validated ABI.
+//! IOCTL buffer-length guard recovery.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +204,7 @@ fn reverse(relation: &str) -> &str {
         _ => relation,
     }
 }
+
 fn invert(relation: &str) -> &str {
     match relation {
         "==" => "!=",

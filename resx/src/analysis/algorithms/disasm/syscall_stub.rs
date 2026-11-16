@@ -1,10 +1,4 @@
-//! Syscall service numbers in native stubs.
-//!
-//! An x64 stub loads the service number into eax and traps (`syscall`, or
-//! `int 0x2e` on the alternate path). A WoW64 stub loads it the same way and calls
-//! the dispatcher through edx. A kernel Zw* stub builds an interrupt frame (cli,
-//! pushfq), loads eax and jumps to KiServiceInternal. Numbers from 0x1000 index the
-//! win32k table.
+//! Service-number recovery for native, WoW64 and kernel syscall stubs.
 
 use iced_x86::{
     Instruction as Decoded, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
@@ -12,18 +6,14 @@ use iced_x86::{
 
 use super::Instruction;
 
-/// Instructions searched after the eax load for the trap or dispatcher call.
 const STUB_WINDOW: usize = 6;
-/// Instructions searched before the eax load for a kernel Zw* stub's frame setup.
 const FRAME_WINDOW: usize = 8;
 /// Service numbers are a table bit (0x1000) plus a small index; larger immediates
 /// are ordinary constants.
 const MAX_SERVICE_NUMBER: u32 = 0x2000;
 const WIN32K_TABLE_BASE: u32 = 0x1000;
 
-/// Labels each service-number load in `insns` with its syscall number. Any literal
-/// guess already on the immediate (`STATUS_*`, ...) is replaced: the value is an
-/// index into the service table, not a status. Safe to run more than once.
+/// Replace literal guesses on syscall-number loads with the service index. Idempotent.
 pub fn annotate_syscall_numbers(insns: &mut [Instruction]) {
     let mut factory = InstructionInfoFactory::new();
     for index in 0..insns.len() {
@@ -52,7 +42,6 @@ fn describe(number: u32) -> String {
     }
 }
 
-/// `mov eax, imm32` with an immediate in service-number range.
 fn service_number_load(instr: &Decoded) -> Option<u32> {
     if instr.mnemonic() != Mnemonic::Mov
         || instr.op_count() != 2

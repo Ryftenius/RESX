@@ -102,7 +102,6 @@ pub fn inspect(insns: &[Instruction], arch: u32) -> DecodeConflicts {
     result
 }
 
-/// Attach bounded evidence to the same instruction rows used by text and JSON.
 pub fn annotate(insns: &mut [Instruction], report: &DecodeConflicts) {
     let mut notes = BTreeMap::<u32, Vec<String>>::new();
     for finding in &report.findings {

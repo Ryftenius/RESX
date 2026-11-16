@@ -1,5 +1,4 @@
 //! Path-bounded DRIVER_OBJECT assignment recovery under the Windows x64 ABI.
-//! These are conditional static stores, not a recovered live dispatch table.
 use super::ioctl::Root;
 #[cfg(test)]
 use super::PeFile;

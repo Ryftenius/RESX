@@ -1,6 +1,5 @@
 use super::*;
 
-/// C/C++ runtime import providers, matched against the normalized image base.
 const CRT_DLL_PREFIXES: &[&str] = &[
     "ucrtbase",
     "msvcr",
@@ -120,9 +119,8 @@ impl FilterTerm {
     }
 }
 
-/// Call-tree filter (`calls --only/--exclude`, `dump --calls-only/--calls-exclude`). Included terms are OR'd; a call matching any excluded
-/// term is dropped along with its subtree. Non-matching internal calls are kept only
-/// as the path to a matching descendant.
+/// Included terms are ORed; exclusions prune subtrees. Internal calls survive
+/// only when they lead to a matching descendant.
 #[derive(Debug, Clone)]
 pub(in crate::commands::dump) struct CallFilter {
     spec: String,

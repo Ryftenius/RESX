@@ -35,6 +35,7 @@ fn decode_at(bytes: &[u8], arch: u32, ip: u64, block_start: u32) -> Vec<Instruct
     }
     rows
 }
+
 fn sig(bytes: &[u8]) -> FunctionSignature {
     infer(&decode(bytes, 64), 0x1000, 64, "test", "")
 }
@@ -47,12 +48,14 @@ fn scalar_parameters_and_return_have_machine_widths() {
     assert_eq!(s.parameters[0].inferred_type, "int32_t");
     assert!(!s.argument_count_complete);
 }
+
 #[test]
 fn aliases_preserve_pointer_access() {
     let s = sig(&[0x48, 0x89, 0xc8, 0x8b, 0x00, 0x89, 0x02, 0xc3]);
     assert_eq!(s.parameters[0].inferred_type, "const void *");
     assert_eq!(s.parameters[1].inferred_type, "void *");
 }
+
 #[test]
 fn stack_spill_and_reload_preserve_argument_origin() {
     let s = sig(&[
@@ -111,6 +114,7 @@ fn overlapping_streams_keep_both_real_paths_and_eight_arguments() {
     assert!(rows.iter().any(|row| row.rva == 0x1065));
     assert!(rows.iter().any(|row| row.rva == 0x1067));
 }
+
 #[test]
 fn fifth_argument_is_entry_stack_relative() {
     let s = sig(&[0x8b, 0x44, 0x24, 0x28, 0xc3]);
@@ -119,6 +123,7 @@ fn fifth_argument_is_entry_stack_relative() {
     assert_eq!(s.parameters[4].inferred_type, "int32_t");
     assert_eq!(s.parameters[0].inferred_type, "unknown");
 }
+
 #[test]
 fn float_parameter_and_return() {
     let s = sig(&[0xf3, 0x0f, 0x58, 0xc1, 0xc3]); // addss xmm0,xmm1
@@ -126,6 +131,7 @@ fn float_parameter_and_return() {
     assert_eq!(s.parameters[0].inferred_type, "float");
     assert_eq!(s.parameters[1].inferred_type, "float");
 }
+
 #[test]
 fn unknown_is_not_void_and_zeroing_is_not_an_argument_read() {
     assert_eq!(sig(&[0xc3]).return_type, "unknown");
@@ -134,6 +140,7 @@ fn unknown_is_not_void_and_zeroing_is_not_an_argument_read() {
     assert_eq!(s.return_type, "int32_t");
     assert!(!s.prototype.contains("(void)"));
 }
+
 #[test]
 fn conflicting_return_paths_and_missing_flow_fail_closed() {
     let s = sig(&[0x85, 0xc9, 0x74, 0x06, 0xb8, 1, 0, 0, 0, 0xc3, 0xc3]);
@@ -142,6 +149,7 @@ fn conflicting_return_paths_and_missing_flow_fail_closed() {
     assert!(s.unresolved_flow);
     assert_eq!(s.return_type, "unknown");
 }
+
 #[test]
 fn calls_clobber_return_and_argument_aliases() {
     let s = sig(&[0xb8, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x8b, 0x01, 0xc3]);
@@ -151,12 +159,14 @@ fn calls_clobber_return_and_argument_aliases() {
         "unknown"
     );
 }
+
 #[test]
 fn unreachable_data_does_not_produce_arguments() {
     assert!(sig(&[0x31, 0xc0, 0xc3, 0x8b, 0x01, 0xc3])
         .parameters
         .is_empty());
 }
+
 #[test]
 fn pdb_prototype_is_preserved_and_x86_is_not_assumed_stdcall() {
     let rows = decode(&[0x8b, 0x44, 0x24, 4, 0xc3], 32);
@@ -166,6 +176,7 @@ fn pdb_prototype_is_preserved_and_x86_is_not_assumed_stdcall() {
     assert_eq!(s.calling_convention, "x86 convention unresolved");
     assert_eq!(s.parameters[0].inferred_type, "int32_t");
 }
+
 #[test]
 fn overlap_is_reported_and_ordinary_branch_is_not() {
     use crate::analysis::reconstruction::decode_conflicts::inspect;
@@ -178,6 +189,7 @@ fn overlap_is_reported_and_ordinary_branch_is_not() {
         .findings
         .is_empty());
 }
+
 #[test]
 fn instruction_budget_is_explicit() {
     let mut bytes = vec![0x90; MAX_INSTRUCTIONS + 1];
@@ -198,6 +210,7 @@ fn lea_arithmetic_width_and_address_return_are_distinct() {
         "void *"
     );
 }
+
 #[test]
 fn extended_index_keeps_original_argument_width() {
     let s = sig(&[0x48, 0x63, 0xc2, 0x8b, 0x04, 0x81, 0xc3]);
@@ -209,6 +222,7 @@ fn extended_index_keeps_original_argument_width() {
 fn conditional_write_does_not_prove_a_return_definition() {
     assert_eq!(sig(&[0x0f, 0x44, 0xc2, 0xc3]).return_type, "unknown"); // cmove eax,edx
 }
+
 #[test]
 fn partial_spill_cannot_prove_a_full_pointer_alias() {
     let s = sig(&[

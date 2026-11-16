@@ -1,12 +1,5 @@
-//! Forward symbolic interpretation of one function, in address order.
-//!
-//! Registers and stack slots carry what a value *is* rather than what it holds: the
-//! PEB, a loader-list link, a module base and the PE structures reached from it, a
-//! module handle or API pointer returned by a resolver, an address in the image, or
-//! bytes derived from image data or encoded immediates. A single linear pass is
-//! enough for the resolver shapes compilers emit, because the values a loop works on
-//! are set up before the loop body in address order; values at merge points simply
-//! come from the fall-through path.
+//! Forward symbolic interpretation of loader/API resolution patterns.
+//! Registers and stack slots carry pointer provenance and encoded data.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -113,7 +106,6 @@ pub(super) enum Dir {
     Any,
 }
 
-/// How a module or API name reached the resolver.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Name {
     Text(String, How),
@@ -180,8 +172,7 @@ impl Taint {
 pub(super) enum Val {
     Unknown,
     Const(u64),
-    /// A constant combined with a value that is not known: an encoded byte whose key
-    /// is opaque.
+    /// Encoded data combined with an unknown key.
     Enc(u64, u8),
     /// Derived from image data at these addresses.
     Data(Taint),
@@ -219,14 +210,12 @@ pub(super) enum Summary {
     },
     /// Always returns the pointer from this one resolution.
     Fixed(ResId),
-    /// Returns a module base.
     Module {
         finder: u32,
         key_param: Option<u8>,
         loader: bool,
         params: u8,
     },
-    /// Always returns this module.
     ModuleValue(Module),
 }
 
@@ -280,7 +269,6 @@ pub(super) struct Facts {
     pub compares: Vec<u64>,
     pub callees: Vec<u32>,
     pub params: u8,
-    /// An indirect call through a value that was not resolved.
     pub indirect_unknown: bool,
     /// Argument slots at each call site, when the context asks for them.
     pub call_args: Vec<(u32, Vec<ArgValue>)>,
@@ -303,7 +291,6 @@ pub(super) struct Context<'a> {
     pub writable: Vec<(u64, u64)>,
     /// Argument bytes each x86 function pops on return (`ret N`).
     pub ret_pops: HashMap<u32, i64>,
-    /// Record argument values at every call (see [`Facts::call_args`]).
     pub capture: bool,
 }
 
@@ -392,9 +379,7 @@ fn index(reg: Register) -> Option<usize> {
     }
 }
 
-/// Whether a function can take part in resolution on its own: it calls a loader API,
-/// reads through FS/GS, or reads `e_lfanew` (`[base+0x3C]`). Others matter only as
-/// callers of resolvers or readers of resolved globals, which the fixpoint revisits.
+/// Select loader/PEB/header readers; the fixpoint also revisits their callers and global readers.
 pub(super) fn is_candidate(ctx: &Context<'_>, insns: &[Instruction]) -> bool {
     let loader_slot = |va: u64| {
         ctx.imports
@@ -439,8 +424,7 @@ pub(super) fn is_candidate(ctx: &Context<'_>, insns: &[Instruction]) -> bool {
     })
 }
 
-/// What the fixpoint needs from a function that is not interpreted: its direct
-/// callees, the writable globals it reads, and hash-like arithmetic for hint lookup.
+/// Direct callees, global reads and hash hints needed without full interpretation.
 pub(super) fn profile(ctx: &Context<'_>, function: &Function, insns: &[Instruction]) -> Facts {
     let mut facts = Facts::default();
     for insn in insns {
@@ -536,7 +520,6 @@ fn return_epilogue(insns: &[Instruction], target: u64) -> bool {
     false
 }
 
-/// Registers at a forward branch, for the block it reaches.
 struct Snapshot {
     regs: Vec<Val>,
     ids: Vec<u32>,
@@ -545,9 +528,7 @@ struct Snapshot {
 
 pub(super) fn run(ctx: &Context<'_>, function: &Function, insns: &[Instruction]) -> Facts {
     let mut machine = Machine::new(ctx, function);
-    // Argument annotations must not inherit one predecessor's constants at a
-    // join (including loop backedges). The resolver's pattern heuristics below
-    // remain unchanged; capture uses conservative basic-block-local values.
+    // Argument capture discards conflicting predecessor values, including loop backedges.
     let capture_targets: BTreeSet<u64> = if ctx.capture {
         insns
             .iter()
@@ -562,9 +543,7 @@ pub(super) fn run(ctx: &Context<'_>, function: &Function, insns: &[Instruction])
     } else {
         BTreeSet::new()
     };
-    // A block after a return or jump is reached only by branching to it, so it starts
-    // from the state at the first branch there, not from an epilogue that popped the
-    // registers it relies on.
+    // After a terminal transfer, restore the branch snapshot rather than the epilogue state.
     let mut branches: HashMap<u64, Snapshot> = HashMap::new();
     let mut after_terminator = false;
     for (i, insn) in insns.iter().enumerate() {
@@ -1023,7 +1002,6 @@ impl<'c, 'a> Machine<'c, 'a> {
             _ => {}
         }
 
-        // PE structures, reached from any base whose identity is tracked.
         let pointer_like = matches!(
             base,
             Val::Module(_) | Val::Param(_) | Val::Unknown | Val::Global(_) | Val::Api(_)
@@ -1312,7 +1290,6 @@ impl<'c, 'a> Machine<'c, 'a> {
         }
     }
 
-    /// The value `lea` computes.
     fn address(&mut self, insn: &Instruction) -> Val {
         let base = insn.memory_base();
         let index_reg = insn.memory_index();
@@ -1435,7 +1412,6 @@ impl<'c, 'a> Machine<'c, 'a> {
             && reg.full_register() == Register::RSP
             && Self::is_imm(insn.op1_kind())
         {
-            // Caller cleanup releases arguments pushed for earlier calls.
             self.pushed = (self.pushed - Self::signed_imm(insn, 1)).max(0);
         }
         let (a, a_id) = (self.reg(reg), self.id(reg));
@@ -1747,7 +1723,6 @@ impl<'c, 'a> Machine<'c, 'a> {
             let args = (0..CAPTURED_ARGS).map(|i| self.captured(i)).collect();
             self.facts.call_args.push((site, args));
         }
-        // Bytes of arguments the callee pops (x86 stdcall), when known.
         let mut pops = None;
         let result = match self.target(insn) {
             Target::Import(slot) => {
@@ -2050,8 +2025,6 @@ impl<'c, 'a> Machine<'c, 'a> {
         }
     }
 
-    /// The name in the stack buffer at `d`: immediates stored there, encoded
-    /// immediates, or image data that flowed into it.
     fn stack_name(&mut self, d: i64, wide: bool, want: Want) -> Name {
         let limit = self
             .buffers
@@ -2231,7 +2204,6 @@ impl<'c, 'a> Machine<'c, 'a> {
             .collect()
     }
 
-    /// A resolver key: a hash constant, a name, or a parameter forwarded from here.
     fn key_name(&mut self, value: &Val, want: Want) -> Name {
         match value {
             Val::Const(c) if !self.ctx.in_image(*c) && *c > 0xFFFF => Name::Hash(*c),

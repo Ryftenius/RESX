@@ -3,6 +3,7 @@ use super::*;
 use crate::analysis::disasm::{
     disassemble_at_unbounded_with_options, disassemble_at_with_options, is_ret,
 };
+use crate::analysis::options::{DecodeOptions, MAX_FUNCTION_INSNS};
 use crate::formats::pe::{read_runtime_function, Export, PeFile};
 
 pub fn decode_function(
@@ -78,15 +79,11 @@ fn recover_reachable_function_insns(
                 .max(start_rva.saturating_add(1))
         });
 
+    let extent_known = read_runtime_function(pe, raw, start_rva).is_some();
     let mut queue = std::collections::VecDeque::from([start_rva]);
     let mut seen_blocks = std::collections::BTreeSet::new();
     let mut insn_by_rva = std::collections::BTreeMap::new();
-    let max_blocks = options.max_total.max(64);
-    let instruction_limit = if cfg.max_insns == 0 {
-        4096
-    } else {
-        cfg.max_insns.clamp(1, 4096)
-    };
+    let (instruction_limit, max_blocks) = function_budgets(cfg, options.max_total, extent_known);
 
     while let Some(block_start) = queue.pop_front() {
         if seen_blocks.len() >= max_blocks || insn_by_rva.len() >= instruction_limit {
@@ -161,6 +158,49 @@ fn recover_reachable_function_insns(
     }
 
     (insn_by_rva.len() > 1).then(|| insn_by_rva.into_values().collect())
+}
+
+/// Instruction and basic-block limits for one function. A function with a known
+/// unwind extent is decoded whole unless the caller set an explicit budget; `0`
+/// means unlimited. Every case stays within [`MAX_FUNCTION_INSNS`].
+fn function_budgets(cfg: &DecodeOptions, max_total: usize, extent_known: bool) -> (usize, usize) {
+    let whole = (cfg.whole_function && extent_known) || cfg.max_insns == 0;
+    let instructions = if whole {
+        MAX_FUNCTION_INSNS
+    } else {
+        cfg.max_insns.clamp(1, MAX_FUNCTION_INSNS)
+    };
+    // Every block holds at least one instruction, so the instruction limit also
+    // bounds the block count when the block budget does not apply.
+    let blocks = if whole || max_total == 0 {
+        instructions
+    } else {
+        max_total.max(64)
+    };
+    (instructions, blocks)
+}
+
+/// Reachable instructions of the function at `start_rva`, bounded by its unwind
+/// extent when one exists. `None` when fewer than two instructions decode.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_reachable_function(
+    raw: &[u8],
+    pe: &PeFile,
+    start_rva: u32,
+    arch: u32,
+    image_base: u64,
+    exports: &[Export],
+    symbols: Option<&SymbolIndex>,
+    options: &TraversalOptions,
+) -> Option<Vec<Instruction>> {
+    if !matches!(arch, 32 | 64) {
+        return None;
+    }
+    let mut insns = recover_reachable_function_insns(
+        raw, pe, start_rva, arch, image_base, exports, symbols, options,
+    )?;
+    crate::analysis::disasm::annotate_syscall_numbers(&mut insns);
+    Some(insns)
 }
 
 fn rva_in_function_window(rva: u32, start_rva: u32, function_end: u32) -> bool {

@@ -23,8 +23,11 @@ use iced_x86::{OpKind, Register};
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::cfgview::{build_basic_blocks, BasicBlock};
-use crate::analysis::disasm::{collect_api_calls, disassemble_at, find_string_refs, Instruction};
+use crate::analysis::disasm::{
+    collect_api_calls_in, disassemble_at, find_string_refs, Instruction,
+};
 use crate::analysis::discovery::{discover_functions, DiscoveredFunction};
+use crate::analysis::image::ImageFacts;
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::config::Config;
 use crate::core::output::ProgressBar;

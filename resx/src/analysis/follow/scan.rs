@@ -99,22 +99,22 @@ pub struct Caller {
 /// A named export that is purely a single-JMP stub (thunk) wrapping another target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WrapperEntry {
-    /// Export name of the wrapper function in this image.
     pub name: String,
-    /// RVA of the wrapper function in this image.
     pub rva: u32,
-    /// What the wrapper ultimately resolves to.
     pub resolves_to: WrapperTarget,
 }
 
-/// The target a wrapper export resolves to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum WrapperTarget {
-    /// Resolves to another function inside the same image.
-    Direct { target_rva: u32 },
+    Direct {
+        target_rva: u32,
+    },
     /// Resolves to an IAT import (dll_base is lowercase, no extension).
-    Import { dll_base: String, func: String },
+    Import {
+        dll_base: String,
+        func: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +132,6 @@ pub struct ReverseCallIndex {
     pub dll_path_str: String,
     pub direct: std::collections::HashMap<u32, Vec<Caller>>,
     pub imports: std::collections::HashMap<String, Vec<Caller>>,
-    /// Exports in this image that are single-JMP wrappers around another target.
     #[serde(default)]
     pub wrappers: Vec<WrapperEntry>,
 }
@@ -300,9 +299,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         let sec = &data.raw[start..end];
         let sec_va_base = data.pe.image_base + s.virtual_address as u64;
 
-        // Fast scan for common call/jmp encodings, validated against decoded
-        // x64 runtime-function boundaries to avoid matching bytes inside
-        // immediates, padding, or data mixed into executable sections.
+        // Validate candidate opcodes against function boundaries to reject embedded data.
         for i in 0..sec.len().saturating_sub(5) {
             let site_rva = s.virtual_address + i as u32;
             let b0 = sec[i];
@@ -399,7 +396,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
                 );
             }
         }
-    } // end for s in &data.pe.sections
+    }
 
     let direct = direct
         .into_iter()
@@ -419,9 +416,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         })
         .collect();
 
-    // Wrapper detection: scan every named export for a single-JMP stub.
-    // Always-on — not gated on `hostile` — because detecting callers via wrappers
-    // is a fundamental capability independent of aggressive tracing.
+    // Include JMP wrappers even when hostile tracing is disabled.
     let mut wrappers: Vec<WrapperEntry> = Vec::new();
     for export in &data.exports {
         if export.name.is_empty() || export.rva == 0 {
@@ -560,7 +555,6 @@ fn index_wdf_table_calls(
             let Some(func) = crate::analysis::wdf::function_from_offset(offset, 8) else {
                 continue;
             };
-            // The table may sit in a different register than the slot.
             let table_reg = table_load.memory_base().full_register();
             let found_table_root = insns[scan_start..table_idx]
                 .iter()

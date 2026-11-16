@@ -1,5 +1,4 @@
-//! Bounded request-provenance analysis rooted at registered x64 IRP handlers.
-//! A comparison is static evidence, not proof that a request succeeds at runtime.
+//! Request-provenance analysis rooted at registered x64 IRP handlers.
 use super::{access_name, device_type_name, method_name, IoctlCodeCandidate, PeFile};
 use iced_x86::{
     Decoder, DecoderOptions, FlowControl, Formatter, Instruction, InstructionInfoFactory,
@@ -176,6 +175,7 @@ impl State {
             memory_valid: true,
         }
     }
+
     fn reg(&self, reg: Register) -> Option<Value> {
         let value = *self.regs.get(&reg.full_register())?;
         match (reg.size(), value) {
@@ -185,6 +185,7 @@ impl State {
             _ => None,
         }
     }
+
     fn permits(&self, code: u32) -> bool {
         code >= self.low
             && code <= self.high

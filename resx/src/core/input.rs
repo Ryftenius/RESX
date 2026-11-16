@@ -49,8 +49,6 @@ pub fn read_image(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         ));
     }
     let mut bytes = Vec::new();
-    // The validated length fits the PE limit on every supported target. Reserve
-    // once rather than repeatedly reallocating while Take reads a large image.
     bytes
         .try_reserve_exact(metadata.len() as usize)
         .map_err(io::Error::other)?;

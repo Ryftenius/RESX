@@ -31,6 +31,7 @@ pub(super) struct FunctionView<'a> {
     pub edr_result: Option<EdrCheckResult>,
     pub call_tree: Option<super::callmap::ApiCallTree>,
     pub api_call_tree: String,
+    pub telemetry: Option<super::callmap::telemetry::TelemetryReport>,
     pub current_syscall: Option<super::callmap::SyscallCallDetails>,
     pub call_syscalls: Vec<Option<super::callmap::SyscallCallDetails>>,
     pub cfg_blocks: Vec<crate::analysis::cfgview::BasicBlock>,
@@ -62,6 +63,7 @@ pub(super) fn render_text(
         xrefs,
         edr_result,
         call_tree,
+        telemetry,
         cfg_blocks,
         ..
     } = view;
@@ -260,6 +262,9 @@ pub(super) fn render_text(
             super::super::driver::render_flow_contracts(w, c, driver_report, cfg.max_subcalls);
         }
     }
+    if let Some(report) = &telemetry {
+        super::callmap::telemetry::print_report(w, report, c, cfg.verbose);
+    }
     if want_intelli {
         print_intelli_findings(w, &intelli_findings, c);
     }
@@ -350,6 +355,7 @@ pub(super) fn into_json(view: FunctionView<'_>, cfg: &Config) -> FuncResult {
         edr_result,
         call_tree,
         api_call_tree,
+        telemetry,
         current_syscall,
         call_syscalls,
         cfg_blocks,
@@ -478,6 +484,7 @@ pub(super) fn into_json(view: FunctionView<'_>, cfg: &Config) -> FuncResult {
             })
             .collect(),
         api_call_tree,
+        telemetry,
         current_syscall: current_syscall.map(|details| self::json::SyscallJson {
             service_number: details.service_number.map(|n| format!("0x{:X}", n)),
             kernel_module: details.kernel_module,

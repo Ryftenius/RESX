@@ -64,8 +64,7 @@ pub fn dispatch(
     }
 }
 
-/// `resx <image> <target>` dumps; `resx <name>` with nothing to dump locates it; a
-/// bare table flag shows that table, as in releases before subcommands.
+/// Resolve implicit image/target, name-lookup and table-flag command forms.
 fn dispatch_implicit(cfg: &Config, w: &mut dyn Write, c: &Colors) -> Result<(), String> {
     let image = cfg.dll.as_str();
     let target = cfg.function.as_str();

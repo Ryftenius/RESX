@@ -59,6 +59,7 @@ fn sanitize_arg(arg: &str) -> String {
         arg.to_owned()
     }
 }
+
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in bytes {
@@ -69,6 +70,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     !crc
 }
+
 fn write_stored_zip(path: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), String> {
     let mut output = std::fs::OpenOptions::new()
         .write(true)

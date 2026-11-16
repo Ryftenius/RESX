@@ -395,6 +395,7 @@ fn semantic_kind(query: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
 fn normalize(value: &str) -> String {
     value
         .split_whitespace()
@@ -402,6 +403,7 @@ fn normalize(value: &str) -> String {
         .join(" ")
         .to_ascii_lowercase()
 }
+
 fn push_instruction(
     item: &(iced_x86::Instruction, String),
     section: &crate::formats::pe::PeSection,

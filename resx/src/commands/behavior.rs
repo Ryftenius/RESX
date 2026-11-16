@@ -106,7 +106,6 @@ fn render_findings(
     findings: &[crate::analysis::behavior::BehaviorFinding],
     verbose: bool,
 ) {
-    // Preserve first-seen order and keep distinct severities/details separate.
     let mut groups: Vec<Vec<&crate::analysis::behavior::BehaviorFinding>> = Vec::new();
     let mut positions = std::collections::HashMap::new();
     for finding in findings {

@@ -231,6 +231,7 @@ fn parse_string_line(line: &str) -> Option<YaraStringMatch> {
         data: data.trim().chars().take(512).collect(),
     })
 }
+
 fn parse_metadata_line(line: &str) -> Option<(String, String)> {
     let line = line.trim();
     if line.starts_with("0x") || line.starts_with('$') {

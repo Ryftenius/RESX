@@ -8,7 +8,6 @@ use super::cache::{SnapshotCache, SourceKey};
 use super::watch::DirectoryWatch;
 use crate::analysis::headers::HeaderIndex;
 
-// Keep the existing on-disk cache format compatible.
 const FORMAT: u32 = 2;
 const SCANNED: &[&str] = &["um", "shared", "ucrt", "km"];
 
@@ -54,9 +53,7 @@ pub fn configured(dir: Option<&str>) -> Option<Arc<HeaderIndex>> {
     }
 }
 
-/// The directory holding `um/windows.h` for `dir`: an SDK version directory, its
-/// `Include` parent, the kit root, or (for convenience) any directory from which the
-/// newest installed Windows 10/11 SDK is found.
+/// Resolve an SDK include/version/kit directory, falling back to the newest installed SDK.
 pub fn resolve_root(dir: &Path) -> Option<PathBuf> {
     let has_headers = |path: &Path| path.join("um").join("windows.h").is_file();
     if has_headers(dir) {
@@ -75,8 +72,7 @@ pub fn resolve_root(dir: &Path) -> Option<PathBuf> {
     newest(dir).or_else(|| newest(&dir.join("Include")))
 }
 
-/// An installed Windows SDK, for pointing out where Windows.h lives when the
-/// configured directory (an MSVC toolset, say) does not have it.
+/// Find the installed SDK include directory containing Windows.h.
 pub fn installed_sdk() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::var_os("WindowsSdkDir") {
@@ -90,8 +86,7 @@ pub fn installed_sdk() -> Option<PathBuf> {
     candidates.iter().find_map(|dir| resolve_root(dir))
 }
 
-/// Loads the index for `dir` from the per-user cache, building it first if the
-/// headers changed since it was written.
+/// Load an SDK index, rebuilding its disk cache when source metadata changes.
 fn configured_in(
     dir: &Path,
     cache_root: Option<&Path>,
@@ -310,6 +305,7 @@ mod tests {
             std::fs::create_dir(&path).unwrap();
             Self(path)
         }
+
         fn header(&self, sdk: &str, text: &str) -> PathBuf {
             let root = self.0.join(sdk);
             std::fs::create_dir_all(root.join("um")).unwrap();

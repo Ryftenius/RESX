@@ -1,7 +1,6 @@
 use crate::analysis::disasm::ApiCall;
 use crate::core::color::Colors;
 
-/// and b_white (named internals) so each role stays visually distinct.
 fn dll_palette(c: &Colors, idx: usize, s: &str) -> String {
     match idx % 5 {
         0 => c.cyan(s),
@@ -12,7 +11,6 @@ fn dll_palette(c: &Colors, idx: usize, s: &str) -> String {
     }
 }
 
-/// True for Nt*/Zw* Windows native-API names (syscall stubs, lowest UM layer).
 pub(super) fn is_nt_api(label: &str) -> bool {
     (label.starts_with("Nt") || label.starts_with("Zw"))
         && label
@@ -21,7 +19,6 @@ pub(super) fn is_nt_api(label: &str) -> bool {
             .is_some_and(|b| b.is_ascii_uppercase())
 }
 
-/// Color the mnemonic: CALL -> b_yellow, JMP -> yellow  (matches disasm listing).
 pub(super) fn color_kind(kind: &str, c: &Colors) -> String {
     if kind == "call" {
         c.b_yellow("CALL")
@@ -133,12 +130,6 @@ fn subsystem_style(label: &str) -> Option<KernelSubsystemStyle> {
     })
 }
 
-/// Colour a call target:
-///   Nt*/Zw* (any origin) -> b_red    - syscall stub, highest visual priority; tag becomes [syscall]
-///   IAT import           -> dim(dll.dll!) + palette-color(FuncName), one shade per DLL
-///   Named internal       -> subsystem color when recognized, else b_white
-///   sub_XXXXXXXX         -> yellow    - anonymous, address-only
-///   Indirect (call rax)  -> dim       - unresolvable
 pub(super) fn color_target(
     call: &ApiCall,
     c: &Colors,

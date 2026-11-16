@@ -16,6 +16,7 @@ impl Budget {
             strings: 16 * 1024 * 1024,
         }
     }
+
     fn entry(&mut self) -> Check {
         self.entries = self
             .entries
@@ -23,6 +24,7 @@ impl Budget {
             .ok_or("directory traversal budget exceeded")?;
         Ok(())
     }
+
     fn string(&mut self, size: usize) -> Check {
         self.strings = self
             .strings
@@ -631,7 +633,6 @@ fn clr(pe: &PeFile, raw: &[u8], budget: &mut Budget) -> Check {
     {
         return Err("CLR streams overlap headers or other streams");
     }
-    // Remaining CLR header directories have independent RVA/size pairs.
     for pair in header[24..72].as_chunks::<8>().0 {
         let (rva, size) = (read_u32(pair, 0), read_u32(pair, 4));
         if (rva != 0 || size != 0) && pe.rva_slice(raw, rva, size as usize).is_none() {

@@ -185,9 +185,6 @@ impl GlobalCallGraph {
             dedup_callers(callers);
         }
 
-        // Wrapper expansion: for each export in any scanned image that is a JMP-thunk
-        // wrapper around another target, inject the wrapper's own callers as indirect
-        // callers of the final target, annotated with `via_wrapper`.
         for index in &loaded {
             for wrapper in &index.wrappers {
                 let wrapper_dt = DirectTarget {
@@ -291,7 +288,6 @@ fn dedup_callers(callers: &mut Vec<Caller>) {
         .collect();
 }
 
-// Flat storage node used during BFS construction.
 struct FlatEntry {
     func: FuncRef,
     sites: Vec<CallSite>,

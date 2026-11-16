@@ -10,10 +10,8 @@ impl WdfFunction {
     }
 }
 
-/// KMDF `WDFFUNCENUM` order: the index of each function in the
-/// `WdfFunctions_01xxx` table that KMDF drivers call through. Extracted from the
-/// `WdfVersion` table in Wdf01000.sys (KMDF 1.33, 458 entries). KMDF only
-/// appends to this table, so earlier 1.x drivers use a prefix of it.
+/// KMDF WDFFUNCENUM order from Wdf01000.sys 1.33 (458 entries).
+/// The append-only table lets older KMDF 1.x clients use a prefix.
 const WDF_FUNCTIONS: &[&str] = &[
     "WdfChildListCreate",
     "WdfChildListGetDevice",
@@ -501,8 +499,6 @@ mod tests {
 
     #[test]
     fn request_functions_use_wdffuncenum_slots() {
-        // Slots checked against Wdf01000.sys WdfVersion; the earlier table had
-        // every WdfRequest* entry 36 slots low, on the WdfPdo*/WdfRegistry* block.
         for (name, index) in [
             ("WdfIoQueueCreate", 152),
             ("WdfIoTargetCreate", 167),
@@ -557,10 +553,9 @@ impl BoundTable {
         self.minor < 15
     }
 
-    /// The function whose in-image slot is at `va`.
     pub fn slot(&self, va: u64) -> Option<WdfFunction> {
         let offset = va.checked_sub(self.table)?;
-        if !self.in_image() || offset >= self.count * 8 {
+        if !self.in_image() || offset >= self.count.checked_mul(8)? {
             return None;
         }
         function_from_offset(offset, 8)
@@ -593,50 +588,29 @@ pub fn bound_table(pe: &crate::formats::pe::PeFile, raw: &[u8]) -> Option<BoundT
         let at = bytes
             .windows(name.len())
             .position(|window| window == name)?;
-        Some(pe.image_base + u64::from(*rva) + at as u64)
+        pe.image_base
+            .checked_add(u64::from(*rva))?
+            .checked_add(at as u64)
     })?;
     data.iter().find_map(|(_, bytes)| {
-        (8..bytes.len().saturating_sub(40))
-            .step_by(8)
-            .find_map(|at| {
-                let field =
-                    |offset: usize, len: usize| &bytes[at - 8 + offset..at - 8 + offset + len];
-                let u32_at = |offset| u32::from_le_bytes(field(offset, 4).try_into().unwrap());
-                let u64_at = |offset| u64::from_le_bytes(field(offset, 8).try_into().unwrap());
-                (u64_at(8) == component && (0x28..=0x40).contains(&u32_at(0)) && u32_at(16) == 1)
-                    .then(|| BoundTable {
-                        table: u64_at(32),
-                        count: u64::from(u32_at(28)),
-                        minor: u32_at(20),
-                    })
-            })
+        bytes.windows(40).step_by(8).find_map(|record| {
+            let field = |offset: usize, len: usize| &record[offset..offset + len];
+            let u32_at = |offset| u32::from_le_bytes(field(offset, 4).try_into().unwrap());
+            let u64_at = |offset| u64::from_le_bytes(field(offset, 8).try_into().unwrap());
+            (u64_at(8) == component && (0x28..=0x40).contains(&u32_at(0)) && u32_at(16) == 1).then(
+                || BoundTable {
+                    table: u64_at(32),
+                    count: u64::from(u32_at(28)),
+                    minor: u32_at(20),
+                },
+            )
+        })
     })
 }
 
-/// `bound_table` for the image last asked about on this thread; slot
-/// resolution runs per instruction.
+/// Compatibility entry point. Reuse `ImageFacts::wdf_table` for cached lookups.
 pub fn bound_table_cached(pe: &crate::formats::pe::PeFile, raw: &[u8]) -> Option<BoundTable> {
-    type Key = (usize, usize, u64, u32, u32);
-    thread_local! {
-        static LAST: std::cell::Cell<Option<(Key, Option<BoundTable>)>> =
-            const { std::cell::Cell::new(None) };
-    }
-    // A freed buffer can be reused for another image, so identity is included.
-    let key = (
-        raw.as_ptr() as usize,
-        raw.len(),
-        pe.image_base,
-        pe.timestamp,
-        pe.entry_point,
-    );
-    LAST.with(|last| match last.get() {
-        Some((cached, table)) if cached == key => table,
-        _ => {
-            let table = bound_table(pe, raw);
-            last.set(Some((key, table)));
-            table
-        }
-    })
+    bound_table(pe, raw)
 }
 
 pub fn is_wdf_table_symbol(name: &str) -> bool {
@@ -652,4 +626,80 @@ fn normalize_name(name: &str) -> String {
         _ => trimmed,
     };
     core.to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use crate::analysis::image::tests::image;
+
+    fn binding() -> (crate::formats::pe::PeFile, Vec<u8>) {
+        let mut pe = image();
+        pe.sections[0].characteristics = crate::formats::pe::IMAGE_SCN_MEM_READ;
+        let mut raw = vec![0; 0x400];
+        let name: Vec<u8> = "KmdfLibrary\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        raw[0x240..0x240 + name.len()].copy_from_slice(&name);
+        raw[0x280..0x284].copy_from_slice(&0x28u32.to_le_bytes());
+        raw[0x288..0x290].copy_from_slice(&(pe.image_base + 0x1040).to_le_bytes());
+        raw[0x290..0x294].copy_from_slice(&1u32.to_le_bytes());
+        raw[0x294..0x298].copy_from_slice(&9u32.to_le_bytes());
+        raw[0x29c..0x2a0].copy_from_slice(&4u32.to_le_bytes());
+        raw[0x2a0..0x2a8].copy_from_slice(&(pe.image_base + 0x1100).to_le_bytes());
+        (pe, raw)
+    }
+
+    #[test]
+    fn legacy_lookup_does_not_reuse_changed_buffer_contents() {
+        let (pe, mut raw) = binding();
+        assert_eq!(bound_table_cached(&pe, &raw).unwrap().count, 4);
+        raw[0x29c..0x2a0].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(bound_table_cached(&pe, &raw).unwrap().count, 2);
+        raw[0x280..0x284].fill(0);
+        assert!(bound_table_cached(&pe, &raw).is_none());
+    }
+
+    #[test]
+    fn overflowing_component_address_is_rejected() {
+        let (mut pe, raw) = binding();
+        pe.image_base = u64::MAX - 0x1000;
+        assert!(bound_table(&pe, &raw).is_none());
+        let table = BoundTable {
+            table: 0,
+            count: u64::MAX,
+            minor: 9,
+        };
+        assert!(table.slot(0).is_none());
+    }
+
+    #[test]
+    fn final_complete_binding_record_is_read() {
+        let (pe, mut raw) = binding();
+        raw.copy_within(0x280..0x2a8, 0x3d8);
+        raw[0x280..0x2a8].fill(0);
+        assert_eq!(bound_table(&pe, &raw).unwrap().count, 4);
+    }
+
+    #[test]
+    fn new_image_facts_recompute_positive_and_negative_bindings() {
+        use crate::analysis::image::ImageFacts;
+        let (pe, mut raw) = binding();
+        {
+            let image = ImageFacts::new(&pe, &raw);
+            assert_eq!(image.wdf_table().unwrap().count, 4);
+            assert!(image
+                .wdf_table()
+                .unwrap()
+                .slot(pe.image_base + 0x1100)
+                .is_some());
+        }
+        raw[0x29c..0x2a0].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(ImageFacts::new(&pe, &raw).wdf_table().unwrap().count, 2);
+        raw[0x280..0x284].fill(0);
+        assert!(ImageFacts::new(&pe, &raw).wdf_table().is_none());
+        raw[0x280..0x284].copy_from_slice(&0x28u32.to_le_bytes());
+        assert_eq!(ImageFacts::new(&pe, &raw).wdf_table().unwrap().count, 2);
+    }
 }

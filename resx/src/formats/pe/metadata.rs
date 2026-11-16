@@ -1086,6 +1086,7 @@ mod unwind_stack_contracts {
         );
         assert!(super::epilog_prefix(&[1, 0x16, 0, 0x06, 2, 0x02], 0xaf).is_some());
     }
+
     #[test]
     fn version_two_rejects_bad_epilog_extent_flags_duplicates_and_padding() {
         for bytes in [
@@ -1101,6 +1102,7 @@ mod unwind_stack_contracts {
             assert!(super::epilog_prefix(bytes, 0x100).is_none(), "{bytes:?}");
         }
     }
+
     #[test]
     fn pushed_register_offset_precedes_the_unwind_pop() {
         let (_, total, saved) = super::parse_unwind_operations(&[4, 0x32, 1, 0x30], 0, 2);

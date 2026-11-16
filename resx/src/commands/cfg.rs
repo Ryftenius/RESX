@@ -122,7 +122,8 @@ pub fn run(
     if !graph.ends_with('\n') {
         writeln!(w).ok();
     }
-    if cfg.driver_flow || cfg.funcs_depth > 0 {
+    // Image-wide driver contracts belong to kernel images unless explicitly requested.
+    if cfg.driver_flow || (cfg.funcs_depth > 0 && pe.subsystem == 1) {
         let imports = read_imports(&pe, &raw);
         let report = crate::analysis::driver::analyze_driver(&dll_name, &pe, &raw, &imports);
         super::driver::render_flow_contracts(w, c, &report, cfg.max_subcalls);

@@ -4,6 +4,9 @@ use crate::analysis::inspection::{
     decode_function, inspect_function, inspect_image, FunctionRequest,
 };
 
+/// `IMAGE_SUBSYSTEM_NATIVE`: kernel drivers and native images.
+const IMAGE_SUBSYSTEM_NATIVE: u16 = 1;
+
 pub fn run(
     dll_arg: &str,
     func_arg: &str,
@@ -247,6 +250,7 @@ fn run_with_chain(
                 edrchk: None,
                 api_calls: Vec::new(),
                 api_call_tree: String::new(),
+                telemetry: None,
                 current_syscall: None,
             };
             drop(session);
@@ -436,6 +440,7 @@ fn run_with_chain(
                     edrchk: None,
                     api_calls: Vec::new(),
                     api_call_tree: String::new(),
+                    telemetry: None,
                     current_syscall: None,
                 };
                 let json = serde_json::to_string_pretty(&versioned_object("dump", &result))
@@ -590,6 +595,11 @@ fn run_with_chain(
     let header_index = crate::providers::headers::configured(cfg.argument_headers());
     request.function.arguments = header_index.is_some();
     request.function.dynamic_resolution = request.function.calls || request.function.arguments;
+    // Driver dispatch and IOCTL contracts describe the whole image, so a call map shows
+    // them only for kernel images; user-mode images need an explicit `--driver-flow`.
+    if !cfg.json && cfg.funcs_depth > 0 && pe.subsystem == IMAGE_SUBSYSTEM_NATIVE {
+        request.function.flow_contracts = true;
+    }
     let function_request = FunctionRequest {
         rva: target_rva,
         name: &resolved_name,
@@ -637,7 +647,6 @@ fn run_with_chain(
         .as_ref()
         .map(|dispatch| to_cfg_edges(&insns, &dispatch.targets))
         .unwrap_or_default();
-    // API calls synthesised from the switch-dispatch targets (merged later).
     let switch_api_calls: Vec<ApiCall> = recovered_switch
         .as_ref()
         .map(|dispatch| switch_dispatch_to_api_calls(&insns, dispatch))
@@ -725,6 +734,24 @@ fn run_with_chain(
         .as_ref()
         .map(|tree| render_api_call_tree(tree, cfg))
         .unwrap_or_default();
+    let telemetry = if cfg.telemetry {
+        let report = super::callmap::telemetry::search(
+            api_calls,
+            insns,
+            &resolved_name,
+            &dll_name,
+            &session,
+            &symbol_index,
+            arch,
+            image_base,
+            cfg,
+            target_rva,
+        );
+        progress.tick("searching telemetry sources");
+        Some(report)
+    } else {
+        None
+    };
     let current_syscall = synthetic_syscall_api_call(insns, &resolved_name, &dll_name)
         .and_then(|call| resolve_syscall_call_details(&call, insns, cfg));
     let call_syscalls: Vec<_> = api_calls
@@ -793,6 +820,7 @@ fn run_with_chain(
         edr_result,
         call_tree,
         api_call_tree,
+        telemetry,
         current_syscall,
         call_syscalls,
         cfg_blocks,

@@ -64,7 +64,6 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
         return;
     }
 
-    // Preserve normal Unicode characters while escaping control characters.
     let clean = |s: &str| {
         let mut text = String::with_capacity(s.len());
 
@@ -79,17 +78,12 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
         text
     };
 
-    // Unicode-safe character count.
-    //
-    // This counts Unicode scalar values rather than UTF-8 bytes, preventing
-    // multibyte characters from breaking width calculations.
     let char_width = |s: &str| s.chars().count();
 
     let mut effective_headers: Vec<&str> = headers.to_vec();
     let mut source_rows: Vec<Vec<String>> = rows.to_vec();
     let output_width = OUTPUT_WIDTH.load(Ordering::Relaxed);
 
-    // Preserve the existing Field/Value two-column packing behavior.
     if headers == ["Field", "Value"]
         && output_width >= 108
         && rows.len() > 1
@@ -124,8 +118,6 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
         })
         .collect();
 
-    // Calculate natural column widths using Unicode character counts
-    // instead of UTF-8 byte lengths.
     let natural: Vec<usize> = headers
         .iter()
         .enumerate()
@@ -141,7 +133,6 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
 
     let widths = allocate_widths(&natural, headers, output_width);
 
-    // Build Unicode box-drawing borders.
     let make_border = |left: char, middle: char, right: char, horizontal: char| -> String {
         let sections = widths
             .iter()
@@ -155,10 +146,8 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
     let middle_border = make_border('├', '┼', '┤', '─');
     let bottom_border = make_border('└', '┴', '┘', '─');
 
-    // Top border.
     writeln!(w, "{top_border}").ok();
 
-    // Header row.
     let heading_cells: Vec<String> = headers
         .iter()
         .zip(&widths)
@@ -174,7 +163,6 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
 
     writeln!(w, "{}", c.bold(&heading)).ok();
 
-    // Separator between header and data.
     writeln!(w, "{middle_border}").ok();
 
     for row in data {
@@ -199,7 +187,6 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
 
                     let padded = format!("{}{}", text, " ".repeat(padding));
 
-                    // Preserve entropy highlighting.
                     if line == 0 && headers[index].eq_ignore_ascii_case("entropy") {
                         match text.parse::<f64>() {
                             Ok(value) if value >= 7.2 => c.b_red(&padded),
@@ -216,7 +203,6 @@ pub fn print(w: &mut dyn Write, headers: &[&str], rows: &[Vec<String>], c: &Colo
         }
     }
 
-    // Bottom border.
     writeln!(w, "{bottom_border}").ok();
 }
 

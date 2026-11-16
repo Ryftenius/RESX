@@ -1,5 +1,4 @@
-//! Explicit local AES-CBC decryption using the OS crypto provider.
-//! Keys are supplied by the operator; no process or credential scanning occurs.
+//! AES-CBC decryption through the OS crypto provider with caller-supplied keys.
 #[cfg(windows)]
 pub fn aes_cbc(input: &[u8], key: &[u8], iv: &[u8], padding: bool) -> Result<Vec<u8>, String> {
     use std::ffi::c_void;
@@ -56,6 +55,7 @@ pub fn aes_cbc(input: &[u8], key: &[u8], iv: &[u8], padding: bool) -> Result<Vec
             }
         }
     }
+
     fn check(status: i32) -> Result<(), String> {
         if status < 0 {
             Err(format!(
@@ -66,6 +66,7 @@ pub fn aes_cbc(input: &[u8], key: &[u8], iv: &[u8], padding: bool) -> Result<Vec
             Ok(())
         }
     }
+
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain([0]).collect()
     }

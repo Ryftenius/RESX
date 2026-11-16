@@ -324,9 +324,7 @@ pub(crate) fn apply_insn_color(insn: &Instruction, s: &str, c: &Colors) -> Strin
     c.b_white(s)
 }
 
-/// Format an instruction recovered from textual/runtime evidence with the
-/// same semantic columns used by normal disassembly. Column widths are
-/// computed before ANSI styling so colour never breaks alignment.
+/// Format textual instructions, measuring columns before ANSI styling.
 pub fn format_text_insn(
     c: &Colors,
     marker: &str,

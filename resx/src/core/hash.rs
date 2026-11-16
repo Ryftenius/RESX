@@ -1,4 +1,4 @@
-//! Small reviewed native hashing boundary. Callers receive an owned digest string.
+//! Native hashing boundary returning an owned digest string.
 
 #[cfg(windows)]
 pub fn sha256(bytes: &[u8]) -> Result<String, String> {

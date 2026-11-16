@@ -1,14 +1,5 @@
-//! Dynamic API resolution: APIs an image finds at run time instead of importing,
-//! which ones, and how.
-//!
-//! Every function is interpreted symbolically (see [`machine`]) to find resolver
-//! calls and what flows into them: GetProcAddress with a literal, stack-built or
-//! decoded name; walks of the PEB loader lists; hand-parsed export and import tables;
-//! and the hash constants such walkers compare against. Functions that resolve on
-//! behalf of their callers are summarized, and the image is re-interpreted until those
-//! summaries and the global API tables they fill stop changing. The result labels the
-//! indirect calls made through resolved pointers and grades the techniques used, from
-//! a plain GetProcAddress lookup to hashed lookups through the loader lists.
+//! Recover dynamic APIs through loader calls, manual table walks and decoded names.
+//! Revisit affected callers and global-table readers until summaries stabilize.
 
 pub(crate) mod dictionary;
 mod hashes;
@@ -53,7 +44,6 @@ pub struct ResolutionReport {
 }
 
 impl ResolutionReport {
-    /// Instructions of the discovered function whose body contains `rva`.
     pub fn function_containing(
         &self,
         pe: &PeFile,
@@ -71,12 +61,10 @@ impl ResolutionReport {
         Some(image::decode(pe, raw, &function))
     }
 
-    /// The API called by the indirect call or jump at `rva`.
     pub fn call_target(&self, rva: u32) -> Option<&ResolvedApi> {
         self.targets.get(&rva).map(|&i| &self.resolved[i])
     }
 
-    /// The API the resolver call at `rva` produces.
     pub fn resolver_call(&self, rva: u32) -> Option<&ResolvedApi> {
         self.resolvers.get(&rva).map(|&i| &self.resolved[i])
     }
@@ -101,7 +89,6 @@ pub struct Technique {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedApi {
-    /// The resolver call: GetProcAddress, a walker, or the inlined walk's call.
     #[serde(serialize_with = "hex")]
     pub site: u32,
     #[serde(serialize_with = "hex")]
@@ -337,7 +324,6 @@ fn context<'a>(
     }
 }
 
-/// Argument values at each call, using explicit image and export inputs.
 pub fn call_arguments_in(
     analysis: &ImageFacts<'_>,
     exports: &dyn ExportProvider,
@@ -417,7 +403,6 @@ fn guard_check_slot(pe: &PeFile, raw: &[u8]) -> u64 {
         })
 }
 
-/// What callers can rely on this function to return.
 fn summarize(rva: u32, facts: &Facts) -> Option<Summary> {
     let params = facts.params;
     // A walk whose result this function calls itself is not offered to callers.
@@ -558,7 +543,6 @@ fn invert_hashes(
             {
                 module_groups.entry(*finder).or_default().insert(*value);
             }
-            // An inlined walk compares its constants in place.
             if let Via::ExportWalk(walker) = res.via {
                 if rvas.get(&walker) == Some(&index) {
                     api_groups
@@ -758,7 +742,6 @@ fn report(functions: &[image::Function], facts: &[Facts], ctx: &Context<'_>) -> 
         resolved.call_sites.sort_unstable();
         resolved.call_sites.dedup();
     }
-    // Report in address order; resolver sites are unique, so they re-key the indexes.
     let sites: Vec<u32> = out.resolved.iter().map(|resolved| resolved.site).collect();
     out.resolved.sort_by_key(|resolved| resolved.site);
     let positions: HashMap<u32, usize> = out

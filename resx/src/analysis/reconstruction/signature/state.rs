@@ -8,8 +8,7 @@ pub(super) struct Value {
     pub(super) width: usize,
     pub(super) float: bool,
     pub(super) pointer: bool,
-    /// Address relative to the entry stack pointer when this value is a
-    /// provable stack alias (for example `lea r10, [rsp+68h]`).
+    /// Proven byte offset from the entry stack pointer.
     pub(super) stack_addr: Option<i64>,
 }
 
@@ -27,12 +26,14 @@ pub(super) fn read(access: OpAccess) -> bool {
         OpAccess::Read | OpAccess::CondRead | OpAccess::ReadWrite | OpAccess::ReadCondWrite
     )
 }
+
 pub(super) fn write(access: OpAccess) -> bool {
     matches!(
         access,
         OpAccess::Write | OpAccess::CondWrite | OpAccess::ReadWrite | OpAccess::ReadCondWrite
     )
 }
+
 pub(super) fn reg_value(state: &State, reg: Register) -> Value {
     state
         .regs
@@ -40,6 +41,7 @@ pub(super) fn reg_value(state: &State, reg: Register) -> Value {
         .copied()
         .unwrap_or_default()
 }
+
 pub(super) fn stack_address(state: &State, ins: &iced_x86::Instruction) -> Option<i64> {
     if ins.memory_index() != Register::None {
         return None;
@@ -52,6 +54,7 @@ pub(super) fn stack_address(state: &State, ins: &iced_x86::Instruction) -> Optio
     }?;
     base.checked_add(ins.memory_displacement64() as i64)
 }
+
 pub(super) fn record(
     params: &mut [Parameter],
     origins: u16,
@@ -75,6 +78,7 @@ pub(super) fn record(
         }
     }
 }
+
 pub(super) fn merge(old: &mut State, new: &State) -> bool {
     let before = old.clone();
     // Missing values at a join are unknown, never assumed to retain their type.

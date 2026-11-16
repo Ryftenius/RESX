@@ -388,8 +388,7 @@ fn decode_executable(
     out
 }
 
-// Build once per decode. Hostile tables can alias thousands of export names
-// to the same RVA; rescanning them for every instruction is quadratic work.
+// Index aliases once to avoid rescanning hostile export tables per instruction.
 struct OwnerIndex<'a> {
     names: BTreeMap<u32, &'a Export>,
     direct: BTreeMap<u32, &'a Export>,

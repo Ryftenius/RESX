@@ -1,10 +1,5 @@
-//! A tolerant declaration scanner for Windows SDK headers.
-//!
-//! This is not a C preprocessor: conditional blocks are not evaluated, so every
-//! branch is read and the first declaration of a name wins. That is enough for the
-//! SDK, whose function prototypes, typedefs and constants are written out plainly,
-//! and it never executes or expands anything. SAL annotations are removed from
-//! types but their meaning (direction, optionality, buffer size) is kept.
+//! Windows SDK declaration scanner. Conditional branches are all read; first
+//! declarations win. SAL metadata is retained without preprocessing or execution.
 
 use serde::{Deserialize, Serialize};
 
@@ -84,7 +79,6 @@ enum Tok {
     Str,
 }
 
-/// Calling conventions and storage decorations that are not part of a type.
 const DECORATIONS: &[&str] = &[
     "extern",
     "static",
@@ -226,7 +220,6 @@ fn tokenize(text: &str) -> Vec<Tok> {
                 i += 1;
             }
             let ident: String = chars[start..i].iter().collect();
-            // L"..." and u8"..." literals.
             if i < chars.len() && (chars[i] == '"' || chars[i] == '\'') && ident.len() <= 2 {
                 continue;
             }
@@ -296,9 +289,7 @@ fn define(rest: &str, out: &mut Parsed) {
     }
 }
 
-/// Top-level statements: `;`-terminated runs, with brace blocks kept inside the
-/// statement they belong to. `extern "C" {` blocks are transparent, and function
-/// bodies end the statement they follow.
+/// Split top-level declarations, retaining nested braces and treating extern blocks as transparent.
 fn statements(tokens: &[Tok]) -> Vec<&[Tok]> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -327,7 +318,6 @@ fn statements(tokens: &[Tok]) -> Vec<&[Tok]> {
                     i = end;
                 }
             }
-            // Closing a transparent block.
             Tok::Punct('}') => start = i + 1,
             _ => {}
         }
@@ -381,7 +371,6 @@ fn is_sal(ident: &str) -> bool {
 }
 
 fn is_api_decoration(ident: &str) -> bool {
-    // WINBASEAPI, NTSYSCALLAPI, WINADVAPI, WINUSERAPI and the like.
     ident.len() > 3
         && ident.ends_with("API")
         && ident
@@ -516,7 +505,6 @@ fn declaration(statement: &[Tok], header: &str, out: &mut Parsed) {
             }
         }
         Some(Tok::Ident(kw)) if kw == "enum" => {
-            // `enum NAME { ... };` declares an enum type usable as `enum NAME`.
             if let (Some(Tok::Ident(name)), Some(open)) = (
                 statement.get(1),
                 statement.iter().position(|tok| *tok == Tok::Punct('{')),
@@ -570,7 +558,6 @@ fn prototype(statement: &[Tok], header: &str) -> Option<Prototype> {
         return None;
     }
     let close = matching(&tokens, open);
-    // Nothing but trailing qualifiers may follow the parameter list.
     if tokens[close + 1..].iter().any(|tok| {
         !matches!(tok, Tok::Ident(kw) if matches!(kw.as_str(), "const" | "throw" | "noexcept"))
             && !matches!(tok, Tok::Punct('(' | ')'))
@@ -595,8 +582,7 @@ fn prototype(statement: &[Tok], header: &str) -> Option<Prototype> {
     })
 }
 
-/// The parameter list of the declaration, from the original tokens so that SAL on
-/// each parameter is still there.
+/// Extract parameter tokens before stripping SAL annotations.
 fn statement_params(statement: &[Tok]) -> Option<Vec<Tok>> {
     // The parameter list is the last top-level parenthesized group.
     let mut depth = 0;
@@ -879,7 +865,6 @@ impl Expr<'_, '_> {
         self.tokens.get(self.at + offset)
     }
 
-    /// The binary operator at the cursor and its precedence, consuming nothing.
     fn operator(&self) -> Option<(&'static str, u8)> {
         let Some(Tok::Punct(ch)) = self.peek(0) else {
             return None;

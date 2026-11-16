@@ -45,8 +45,6 @@ pub fn scan(raw: &[u8], minimum: usize, ascii: bool, wide: bool) -> Scan {
                 } else {
                     u16::from_le_bytes([bytes[at], bytes[at + 1]])
                 };
-                // Conservative UTF-16 text candidates; invalid surrogate sequences
-                // are rejected by from_utf16 below, never replaced silently.
                 let printable = if stride == 1 {
                     (0x20..=0x7e).contains(&unit) || unit == 9
                 } else {
@@ -67,7 +65,6 @@ pub fn scan(raw: &[u8], minimum: usize, ascii: bool, wide: bool) -> Scan {
             }
             if characters >= minimum {
                 if let Ok(value) = String::from_utf16(&units) {
-                    // UTF-8 expansion is charged to the aggregate byte budget.
                     if result.strings.len() == MAX_STRINGS || total + value.len() > MAX_TEXT {
                         result.truncated = true;
                         return result;
@@ -103,6 +100,7 @@ mod tests {
         assert!(result.truncated);
         assert_eq!(result.strings.len(), MAX_STRINGS);
     }
+
     #[test]
     fn wide_text_at_odd_offset_preserves_bytes() {
         let mut data = vec![0];
@@ -115,6 +113,7 @@ mod tests {
             .iter()
             .any(|s| s.offset == 1 && s.value == "pipe-\u{03bb}" && !s.truncated));
     }
+
     #[test]
     fn invalid_surrogates_do_not_become_replacement_text() {
         let data: Vec<u8> = [0x61u16, 0x62, 0x63, 0x64, 0xd800, 0]

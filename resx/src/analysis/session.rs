@@ -1,7 +1,4 @@
-//! Demand-driven analysis over one immutable image.
-//!
-//! Image facts never depend on analyses. This coordinator owns reusable analysis
-//! results and drops them with the image session, without global cache keys.
+//! Session-owned analysis results over one immutable image.
 
 use std::sync::OnceLock;
 

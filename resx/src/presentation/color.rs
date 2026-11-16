@@ -19,69 +19,94 @@ impl Colors {
     pub fn bold(&self, s: &str) -> String {
         self.apply("\x1b[1m", s)
     }
+
     pub fn dim(&self, s: &str) -> String {
         self.apply("\x1b[2m", s)
     }
+
     pub fn green(&self, s: &str) -> String {
         self.apply("\x1b[32m", s)
     }
+
     pub fn yellow(&self, s: &str) -> String {
         self.apply("\x1b[33m", s)
     }
+
     pub fn magenta(&self, s: &str) -> String {
         self.apply("\x1b[35m", s)
     }
+
     pub fn cyan(&self, s: &str) -> String {
         self.apply("\x1b[36m", s)
     }
+
     pub fn b_red(&self, s: &str) -> String {
         self.apply("\x1b[91m", s)
     }
+
     pub fn b_yellow(&self, s: &str) -> String {
         self.apply("\x1b[93m", s)
     }
+
     pub fn b_blue(&self, s: &str) -> String {
         self.apply("\x1b[94m", s)
     }
+
     pub fn b_mag(&self, s: &str) -> String {
         self.apply("\x1b[95m", s)
     }
+
     pub fn b_cyan(&self, s: &str) -> String {
         self.apply("\x1b[96m", s)
     }
+
     pub fn b_white(&self, s: &str) -> String {
         self.apply("\x1b[97m", s)
     }
 
-    /// Shared terminal semantics. Renderers should use these instead of
-    /// inventing command-specific colour meanings.
+    /// Shared terminal color semantics.
     pub fn heading(&self, s: &str) -> String {
         self.bold(&self.b_cyan(s))
     }
+
     pub fn label(&self, s: &str) -> String {
         self.b_cyan(s)
     }
+
     pub fn address(&self, s: &str) -> String {
         self.cyan(s)
     }
+
     pub fn bytes(&self, s: &str) -> String {
         self.dim(s)
     }
+
     pub fn selected_marker(&self, s: &str) -> String {
         self.bold(&self.b_red(s))
     }
+
+    /// A user-to-kernel transition: bold white text on a red band. Pass plain text;
+    /// nested styles would end the band at their reset.
+    pub fn transition(&self, s: &str) -> String {
+        self.apply("\x1b[1;97;41m", s)
+    }
+
     pub fn value(&self, s: &str) -> String {
         self.b_white(s)
     }
+
     pub fn success(&self, s: &str) -> String {
         self.ok(s)
     }
+
     pub fn warning(&self, s: &str) -> String {
         self.b_yellow(s)
     }
+
     pub fn failure(&self, s: &str) -> String {
         self.b_red(s)
     }
+
     pub fn severity_tag(&self, severity: &str) -> String {
         let label = format!("[{}]", severity.to_ascii_uppercase());
         match severity.to_ascii_lowercase().as_str() {
@@ -93,9 +118,7 @@ impl Colors {
         }
     }
 
-    /// Colour a textual assembly instruction using the same mnemonic classes
-    /// as the normal disassembly renderer. This is used for runtime evidence
-    /// whose exact bytes are retained in JSON rather than an Instruction.
+    /// Apply the disassembly palette to textual instructions without decoded bytes.
     pub fn assembly(&self, text: &str) -> String {
         let mnemonic = text
             .split_ascii_whitespace()
@@ -122,12 +145,15 @@ impl Colors {
     pub fn info(&self, s: &str) -> String {
         s.to_owned()
     }
+
     pub fn ok(&self, s: &str) -> String {
         self.apply("\x1b[92m", s)
     }
+
     pub fn warn(&self, s: &str) -> String {
         format!("{} {}", self.apply("\x1b[93m", "Warning:"), s)
     }
+
     pub fn err_msg(&self, s: &str) -> String {
         format!("{} {}", self.apply("\x1b[91m", "Error:"), s)
     }

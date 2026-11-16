@@ -110,6 +110,7 @@ mod tests {
             child: None,
         }
     }
+
     fn function(names: &[&str]) -> FlowFunction {
         FlowFunction {
             name: "sub_1000".into(),

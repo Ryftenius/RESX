@@ -1,11 +1,4 @@
-//! Official API signatures from the Windows SDK headers, as an opt-in enrichment.
-//!
-//! `resx config --headers <dir>` points RESX at an SDK include directory. The C API
-//! headers there (`um`, `shared`, `ucrt`, `km`) are scanned once into an index of
-//! prototypes, typedefs, enums and integer constants, cached per user, and used to
-//! name and type the arguments of API calls: `VirtualAlloc(lpAddress=NULL,
-//! dwSize=0x1000, flAllocationType=MEM_COMMIT|MEM_RESERVE, flProtect=PAGE_READWRITE)`.
-//! Nothing is read from the headers unless they are configured.
+//! Windows SDK prototypes, types and constants for opt-in API argument recovery.
 
 mod families;
 mod parse;
@@ -17,7 +10,6 @@ use serde::{Deserialize, Serialize};
 pub use parse::{Direction, Param, Prototype};
 use parse::{TypeDef, TypeKind};
 
-// Host-aware compatibility aliases. New analyses receive an index as data.
 pub use crate::providers::headers::{configured, installed_sdk, load, resolve_root};
 pub use crate::providers::legacy::header_enrich as enrich_calls;
 
@@ -29,13 +21,11 @@ pub struct HeaderIndex {
     /// Enum type → its enumerators, in declaration order.
     enums: HashMap<String, Vec<(String, i64)>>,
     constants: HashMap<String, u64>,
-    /// `#define CreateFile CreateFileW` and the like.
     aliases: HashMap<String, String>,
     #[serde(skip)]
     families: families::Candidates,
 }
 
-/// A recovered argument value at a call site.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ArgValue {
@@ -56,17 +46,13 @@ pub enum ArgValue {
     },
     /// A buffer in the caller's frame, by offset from its entry stack pointer.
     Stack(i64),
-    /// A pointer resolved at run time, by API name.
     Api(String),
     Module(String),
     Import(String),
-    /// A value loaded from a writable global.
     Global(u64),
-    /// The caller's own parameter.
     Param(u8),
 }
 
-/// Header-backed interpretation of statically recovered call arguments.
 #[derive(Clone, Debug, Serialize)]
 pub struct CallSignature {
     pub declaration: String,
@@ -75,7 +61,6 @@ pub struct CallSignature {
     pub arguments: Vec<ArgValue>,
 }
 
-/// Recover arguments using the caller's shared immutable image facts.
 pub fn enrich_calls_in(
     index: &HeaderIndex,
     analysis: &crate::analysis::image::ImageFacts<'_>,
@@ -122,7 +107,6 @@ pub fn enrich_calls_in(
         .collect()
 }
 
-/// How a parameter type is passed and shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Class {
     Void,
@@ -273,9 +257,7 @@ impl HeaderIndex {
             .map(|(name, _)| name.as_str())
     }
 
-    /// The call written out with the prototype's parameter names and each argument
-    /// rendered for its type, e.g. `VirtualAlloc(lpAddress=NULL, ...)`. `args` are
-    /// argument slots as the caller passed them; `ptr` is the image's pointer width.
+    /// Render argument slots using SDK parameter names and types; `ptr` is the image's pointer width.
     pub fn render_call(&self, prototype: &Prototype, args: &[ArgValue], ptr: u8) -> String {
         let mut parts = Vec::new();
         let mut slot = 0;
@@ -410,7 +392,6 @@ impl HeaderIndex {
         }
     }
 
-    /// The prototype as a C declaration with its SAL directions, for `resx api`.
     pub fn declaration(&self, prototype: &Prototype) -> String {
         let mut out = format!("{} {}(", prototype.returns, prototype.name);
         if prototype.params.is_empty() && !prototype.variadic {
@@ -453,12 +434,10 @@ impl HeaderIndex {
         out
     }
 
-    /// The constant families a parameter's values are decoded with.
     pub fn families(&self, api: &str, param: &str) -> Vec<&'static str> {
         families::describe(api, param)
     }
 
-    /// The enumerators of an enum-typed parameter, for `resx api`.
     pub fn enum_of(&self, ty: &str) -> Option<(&str, usize)> {
         match self.classify(ty) {
             Class::Enum(name) => self
@@ -525,8 +504,7 @@ fn from_parsed(root: String, parsed: parse::Parsed) -> HeaderIndex {
         index.typedefs.entry(name).or_insert(typedef);
     }
 
-    // Constants: first definition wins, evaluated lazily so they may refer to each
-    // other in any order.
+    // First definition wins; lazy evaluation permits forward references.
     let mut raw: HashMap<String, String> = HashMap::new();
     for (name, value) in parsed.defines {
         raw.entry(name).or_insert(value);
@@ -592,7 +570,6 @@ fn resolve(
         return None;
     }
     let text = raw.get(name)?;
-    // Guard against self-reference while this name is being evaluated.
     values.insert(name.to_owned(), None);
     let value = parse::evaluate(text, &mut |other| resolve(other, raw, values, depth + 1));
     values.insert(name.to_owned(), value);

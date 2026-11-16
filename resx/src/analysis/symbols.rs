@@ -122,7 +122,6 @@ impl SymbolIndex {
         let prev_sym = prev.1;
         let prev_disp = address.saturating_sub(prev_sym.va);
 
-        // Strong match if the symbol has a real size and we're inside it.
         if prev_sym.size > 0 && prev_disp < prev_sym.size {
             return Some(SymbolMatch {
                 symbol: prev_sym.clone(),
@@ -130,9 +129,7 @@ impl SymbolIndex {
             });
         }
 
-        // Unknown-size symbols are dangerous. Be much stricter.
-        // Allow only a tiny near-window, and only if there isn't a competing next symbol
-        // that is equally or more plausible.
+        // Unknown-size symbols need a near match with no equally plausible next symbol.
         let near_window = match prev_sym.kind.as_str() {
             "function" => 0x20,
             "data" => 0x10,

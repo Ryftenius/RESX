@@ -160,8 +160,6 @@ fn next_rva(insn: &Instruction) -> Option<u32> {
     insn.rva.checked_add(insn.bytes.len() as u32)
 }
 
-// Compatibility entry points. Report consumers can render already-built blocks
-// through presentation::cfg without repeating CFG construction.
 pub fn render_cfg_text(insns: &[Instruction], image_base: u64) -> String {
     render_cfg_text_with_edges(insns, image_base, &[])
 }

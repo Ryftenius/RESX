@@ -8,7 +8,7 @@ fn report(category: &str) -> Value {
     let result = Command::new(env!("CARGO_BIN_EXE_resx"))
         .arg(category)
         .arg(path)
-        .args(["--json", "--no-pdb", "--quiet"])
+        .args(["--json", "--no-pdb", "--quiet", "--args"])
         .output()
         .unwrap();
     assert!(

@@ -130,7 +130,6 @@ fn follow_jmp_thunk_inner(
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
             let target_rva = direct_branch_target_rva(pe, &instr)?;
 
-            // Follow chained JMP stubs inside the image.
             if pe.rva_to_offset(target_rva).is_some() {
                 if let Some(next) = follow_jmp_thunk_inner(raw, pe, target_rva, depth + 1, hops) {
                     ThunkResolution::Chain {

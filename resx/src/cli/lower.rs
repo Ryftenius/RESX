@@ -1,16 +1,9 @@
-//! Lowers a parsed command into the flat [`Options`] that [`Config`] is built from.
-//!
-//! The internal mode fields (`peinfo`, `resx_diff`, `show_eat`, ...) are set exactly as
-//! the pre-subcommand parser set them, so every `Config` a command receives is the
-//! same as before; only the grammar in front of it changed.
-//!
-//! [`Config`]: crate::core::config::Config
+//! Lower parsed commands into [`Options`] for [`crate::core::config::Config`].
 
 use super::args::*;
 use crate::core::config::Options;
 
 impl Cli {
-    /// Splits the parse into the command to dispatch and the options it runs with.
     pub fn lower(self) -> (Command, Options) {
         let mut options = Options::default();
         self.global.apply(&mut options);
@@ -241,7 +234,10 @@ impl TargetArgs {
 
 impl AnalysisArgs {
     fn apply(self, o: &mut Options) {
-        o.max_insns = self.max_insns;
+        // An explicit budget is honored exactly; otherwise functions with a known
+        // extent are decoded whole and linear decodes keep the 500-instruction cap.
+        o.max_insns = self.max_insns.unwrap_or(500);
+        o.whole_function = self.max_insns.is_none();
         o.max_total = self.max_total;
         o.hostile = self.hostile;
     }
@@ -284,6 +280,14 @@ impl CallTreeArgs {
         o.funcs_filter = filter_spec(self.calls_only, self.calls_exclude, self.funcs_filter);
         o.max_subcalls = self.max_subcalls;
         o.highlight = self.highlight;
+        self.telemetry.apply(o);
+    }
+}
+
+impl TelemetryArgs {
+    fn apply(self, o: &mut Options) {
+        o.telemetry = self.telemetry;
+        o.telemetry_depth = self.telemetry_depth as usize;
     }
 }
 
@@ -380,6 +384,7 @@ impl CallsArgs {
         o.show_rva = self.show_rva;
         o.show_offsets = self.show_offsets;
         o.no_disassembly = true;
+        self.telemetry.apply(o);
         self.analysis.apply(o);
         self.lookup.apply(o);
         self.symbols.apply(o);

@@ -123,7 +123,27 @@ pub(super) fn is_probable_win32k_syscall_name(name: &str) -> bool {
     PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
-pub(super) fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceImage> {
+thread_local! {
+    /// Images loaded for cross-image tracing, by lowercase name. A call map can cross
+    /// into the same kernel image hundreds of times; each load parses the image and
+    /// its PDB, so one process keeps one copy. Failed loads are remembered too.
+    static TRACE_IMAGES: std::cell::RefCell<
+        std::collections::HashMap<String, Option<std::rc::Rc<LoadedTraceImage>>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Shared, cached [`load_trace_image_uncached`].
+pub(super) fn load_trace_image(name: &str, cfg: &Config) -> Option<std::rc::Rc<LoadedTraceImage>> {
+    let key = name.to_ascii_lowercase();
+    if let Some(cached) = TRACE_IMAGES.with(|cache| cache.borrow().get(&key).cloned()) {
+        return cached;
+    }
+    let loaded = load_trace_image_uncached(name, cfg).map(std::rc::Rc::new);
+    TRACE_IMAGES.with(|cache| cache.borrow_mut().insert(key, loaded.clone()));
+    loaded
+}
+
+fn load_trace_image_uncached(name: &str, cfg: &Config) -> Option<LoadedTraceImage> {
     if !crate::core::input::is_safe_basename(name) {
         return None;
     }
@@ -147,6 +167,20 @@ pub(super) fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceIm
         .unwrap_or_default()
     };
     let symbol_index = SymbolIndex::from_exports_and_pdb(&exports, &pdb_symbols, pe.image_base);
+    let mut by_name = std::collections::HashMap::new();
+    for export in exports
+        .iter()
+        .filter(|e| e.forward_to.is_empty() && e.rva != 0)
+    {
+        by_name
+            .entry(export.name.to_ascii_lowercase())
+            .or_insert((export.rva, export.name.clone()));
+    }
+    for symbol in pdb_symbols.iter().filter(|s| s.rva != 0) {
+        by_name
+            .entry(symbol.name.to_ascii_lowercase())
+            .or_insert((symbol.rva, symbol.name.clone()));
+    }
 
     Some(LoadedTraceImage {
         dll_name,
@@ -157,6 +191,8 @@ pub(super) fn load_trace_image(name: &str, cfg: &Config) -> Option<LoadedTraceIm
         pe,
         exports,
         symbol_index,
+        by_name,
+        pdb_loaded: !pdb_symbols.is_empty(),
     })
 }
 
@@ -166,6 +202,9 @@ pub(super) fn resolve_kernel_symbol(
     cfg: &Config,
 ) -> Option<(u32, String)> {
     for candidate in kernel_name_candidates(name) {
+        if let Some((rva, symbol)) = image.by_name.get(&candidate.to_ascii_lowercase()) {
+            return Some((*rva, symbol.clone()));
+        }
         if let Some(export) = image
             .exports
             .iter()

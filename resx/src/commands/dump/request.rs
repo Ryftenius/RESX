@@ -23,9 +23,10 @@ impl DumpRequest {
                 intelli: cfg.intelli && only_metadata,
             },
             function: FunctionReports {
-                calls: cfg.funcs_depth > 0,
+                // Telemetry reachability starts from the traced function's calls.
+                calls: cfg.funcs_depth > 0 || cfg.telemetry,
                 dynamic_resolution: false,
-                arguments: false, // enabled only after the caller obtains the SDK index
+                arguments: false,
                 strings: cfg.show_strings,
                 data: cfg.json || cfg.show_strings,
                 signature: true,
@@ -35,7 +36,9 @@ impl DumpRequest {
                 indirect_flow: cfg.json,
                 intelli: cfg.intelli,
                 recomp: cfg.recomp || !cfg.c_out.is_empty(),
-                flow_contracts: !cfg.json && cfg.funcs_depth > 0,
+                // Image-wide driver contracts: explicit `--driver-flow`, or a call map of a
+                // kernel image (decided in `execute` once the PE subsystem is known).
+                flow_contracts: !cfg.json && cfg.driver_flow,
             },
             options: cfg.into(),
             call_tree: cfg.funcs_depth > 0,

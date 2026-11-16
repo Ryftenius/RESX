@@ -148,8 +148,6 @@ fn unwind_requires_a_complete_supported_record() {
     let mut raw = vec![0u8; 0x400];
     raw[0x300] = 1;
     assert!(super::metadata::validate_unwind_chain(&pe, &raw, 0x1000, 0x1010, 0x1100).is_some());
-    // Unsupported version and missing extra slots are rejected locally. These
-    // are unit-level contracts, not files intended to reproduce another tool's crash.
     raw[0x300] = 7;
     assert!(super::metadata::validate_unwind_chain(&pe, &raw, 0x1000, 0x1010, 0x1100).is_none());
     raw[0x300] = 1;

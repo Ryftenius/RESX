@@ -180,7 +180,16 @@ fn named_export_disassembly_has_instructions_without_pdbs() {
 #[ignore = "requires local RESX fixture sources; they are not distributed in the repository"]
 fn ioctl_calls_recover_arguments_without_treating_every_constant_as_a_call() {
     let path = fixture().parent().unwrap().join("api_arguments.dll");
-    let report = analyze_path("ioctl", path, &[]);
+    let compact = analyze_path("ioctl", path.clone(), &[]);
+    let compact_calls = compact["ioctl"]["call_sites"].as_array().unwrap();
+    assert!(!compact_calls.is_empty());
+    assert!(compact_calls
+        .iter()
+        .all(|call| call.get("arguments").is_none()
+            && call.get("reconstructed_call").is_none()
+            && call.get("buffer_fields").is_none()));
+    let report = analyze_path("ioctl", path, &["--args"]);
+    assert_eq!(compact["ioctl"]["codes"], report["ioctl"]["codes"]);
     let calls = report["ioctl"]["call_sites"].as_array().unwrap();
     let call = calls
         .iter()

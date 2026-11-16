@@ -1,8 +1,4 @@
-//! Bounded semantic classifications shared by reconstruction consumers.
-//!
-//! These facts describe static call/instruction evidence. They do not claim that a
-//! call succeeded, that two handles identify the same runtime object, or that an
-//! inferred acquire/release pair executed on one concrete path.
+//! Static call and instruction classifications shared by reconstruction consumers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -258,9 +254,7 @@ pub fn analyze_calls(calls: &[CallEvidence]) -> SemanticSummary {
             });
         }
         if let Some(kind) = scaffolding_kind(&call.name) {
-            // Allocators frequently appear in otherwise useful user blocks. Keep
-            // the call as a collapse candidate, but do not classify its entire
-            // basic block as runtime scaffolding.
+            // An allocator call alone does not make its entire block runtime scaffolding.
             if kind != "allocation" {
                 scaffolding_blocks.insert(call.block_start);
             }

@@ -1,10 +1,5 @@
-//! Function bodies for whole-image resolution analysis.
-//!
-//! x64 bodies come from `.pdata`, with chained unwind fragments folded back into the
-//! function that owns them (MSVC shrink-wrapping splits one function across several
-//! entries). Leaf functions have no unwind data, and x86 images have none at all, so
-//! direct call targets, tail-call targets and code pointers seed further bodies that
-//! are decoded by a linear sweep bounded by their forward branches.
+//! Discover bodies from chained x64 unwind ranges and executable call/pointer
+//! targets. Leaf and x86 functions use a sweep bounded by forward branches.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -13,10 +8,7 @@ use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, OpKind, Regist
 use crate::analysis::image::ImageFacts;
 use crate::formats::pe::PeFile;
 
-/// Upper bound on the bodies one image contributes, so a hostile image cannot make
-/// discovery unbounded.
 const MAX_FUNCTIONS: usize = 200_000;
-/// Instructions decoded for one body without unwind bounds.
 const MAX_SWEEP_INSNS: usize = 16_384;
 
 pub(super) struct Function {
@@ -67,7 +59,6 @@ pub(super) fn discover(analysis: &ImageFacts<'_>) -> Vec<Function> {
     let raw = analysis.raw();
     let mut known: BTreeMap<u32, Function> = BTreeMap::new();
 
-    // Each .pdata entry either begins a function or continues one through its chain.
     let runtime = analysis.runtime_functions();
     let parents: HashMap<u32, u32> = runtime
         .iter()
@@ -115,7 +106,6 @@ pub(super) fn discover(analysis: &ImageFacts<'_>) -> Vec<Function> {
     let mut scanned: Vec<u32> = known.keys().copied().collect();
 
     while known.len() < MAX_FUNCTIONS {
-        // Bodies decoded so far yield more seeds; seeds yield more bodies.
         if let Some(rva) = scanned.pop() {
             if let Some(function) = known.get(&rva) {
                 for insn in decode(pe, raw, function) {

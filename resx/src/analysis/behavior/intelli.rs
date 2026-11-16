@@ -412,6 +412,7 @@ mod tests {
             .iter()
             .any(|f| f.category == "ipc" && f.value == "ConnectNamedPipe"));
     }
+
     #[test]
     fn port_ranges_and_domain_grammar_are_checked() {
         assert!(is_host_port_token("127.0.0.1:1"));
@@ -421,6 +422,7 @@ mod tests {
         assert!(is_domain_token("fixture.invalid"));
         assert!(!is_domain_token("-invalid.example"));
     }
+
     #[test]
     fn repeated_literals_preserve_distinct_source_offsets() {
         let findings = analyze_image(

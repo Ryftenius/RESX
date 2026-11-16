@@ -1,12 +1,11 @@
 use super::*;
-/// One CALL or JMP in a function, with its resolved target label.
 #[derive(Debug, Clone)]
 pub struct ApiCall {
     pub rva: u32,
     pub kind: String,    // "call" or "jmp"
     pub target_rva: u32, // 0 when indirect/unresolvable
-    pub label: String,   // resolved name or "sub_XXXXXXXX"
-    pub dll: String,     // non-empty for IAT imports
+    pub label: String,
+    pub dll: String, // non-empty for IAT imports
     pub is_import: bool,
     pub is_indirect: bool,
     /// How the indirect target was seen/resolved, e.g. "rax ← IAT [rip+0x1234]".
@@ -28,18 +27,15 @@ fn register_short_name(reg: Register) -> String {
     format!("{:?}", reg.full_register()).to_lowercase()
 }
 
-/// Describes how an indirect register's value originated.
 pub(super) struct RegSource {
     pub(super) label: String,
     pub(super) dll: String,
     pub(super) is_import: bool,
-    /// Human-readable description of how the register was loaded.
     pub(super) method: String,
     pub(super) target_rva: u32,
     pub(super) iat_slot_rva: u32,
 }
 
-/// Expression type for backward register slicing.
 #[derive(Debug, Clone)]
 enum RegExpr {
     Unknown,
@@ -168,12 +164,13 @@ fn resolve_reg_expr(
     until_idx: usize,
     reg: Register,
     image_base: u64,
-    pe: &PeFile,
-    raw: &[u8],
+    image: &crate::analysis::image::ImageFacts<'_>,
     symbols: Option<&SymbolIndex>,
     depth: usize,
 ) -> RegExpr {
     use iced_x86::Mnemonic;
+    let pe = image.pe();
+    let raw = image.raw();
 
     if depth > 8 {
         return RegExpr::Unknown;
@@ -181,9 +178,6 @@ fn resolve_reg_expr(
 
     let full_reg = reg.full_register();
 
-    // Scan at most 64 instructions backwards from until_idx.
-    // Use enumerate to get the absolute index directly — avoids the O(N)
-    // linear position() search that made this catastrophically slow on large images.
     let scan_start = until_idx.saturating_sub(64);
     for (rel, insn) in insns[scan_start..until_idx].iter().enumerate().rev() {
         if insn.iced.op_count() == 0 || insn.iced.op0_kind() != OpKind::Register {
@@ -201,16 +195,7 @@ fn resolve_reg_expr(
             Mnemonic::Mov => match insn.iced.op1_kind() {
                 OpKind::Register => {
                     let src = insn.iced.op1_register().full_register();
-                    resolve_reg_expr(
-                        insns,
-                        insn_pos,
-                        src,
-                        image_base,
-                        pe,
-                        raw,
-                        symbols,
-                        depth + 1,
-                    )
+                    resolve_reg_expr(insns, insn_pos, src, image_base, image, symbols, depth + 1)
                 }
                 OpKind::Immediate8 => RegExpr::Imm(insn.iced.immediate8() as u64),
                 OpKind::Immediate16 => RegExpr::Imm(insn.iced.immediate16() as u64),
@@ -226,8 +211,7 @@ fn resolve_reg_expr(
                             insn_pos,
                             full_reg,
                             image_base,
-                            pe,
-                            raw,
+                            image,
                             symbols,
                             depth + 1,
                         );
@@ -274,8 +258,8 @@ fn resolve_reg_expr(
                                 func,
                                 slot_rva,
                             }
-                        } else if let Some(func) = crate::analysis::wdf::bound_table_cached(pe, raw)
-                            .and_then(|table| table.slot(slot_va))
+                        } else if let Some(func) =
+                            image.wdf_table().and_then(|table| table.slot(slot_va))
                         {
                             RegExpr::WdfFunction {
                                 func: func.name.to_owned(),
@@ -310,8 +294,7 @@ fn resolve_reg_expr(
                     insn_pos,
                     full_reg,
                     image_base,
-                    pe,
-                    raw,
+                    image,
                     symbols,
                     depth + 1,
                 );
@@ -336,8 +319,7 @@ fn resolve_reg_expr(
                     insn_pos,
                     full_reg,
                     image_base,
-                    pe,
-                    raw,
+                    image,
                     symbols,
                     depth + 1,
                 );
@@ -387,12 +369,11 @@ pub(super) fn track_indirect_register(
     call_idx: usize,
     target_reg: Register,
     image_base: u64,
-    pe: &PeFile,
-    raw: &[u8],
+    image: &crate::analysis::image::ImageFacts<'_>,
     symbols: Option<&SymbolIndex>,
 ) -> Option<RegSource> {
     Some(expr_to_regsource(
-        resolve_reg_expr(insns, call_idx, target_reg, image_base, pe, raw, symbols, 0),
+        resolve_reg_expr(insns, call_idx, target_reg, image_base, image, symbols, 0),
         target_reg,
     ))
 }
@@ -495,7 +476,6 @@ pub(super) fn track_wdf_table_register(
     None
 }
 
-/// Flag suspicious indirect control-flow for annotation in the disasm listing.
 pub(super) fn suspicious_flow_note(instr: &iced_x86::Instruction) -> Option<String> {
     use iced_x86::Mnemonic;
     let m = instr.mnemonic();
@@ -518,14 +498,8 @@ pub(super) fn suspicious_flow_note(instr: &iced_x86::Instruction) -> Option<Stri
     None
 }
 
-/// Walk `insns` and resolve every CALL/JMP to its target name.
-/// Handles direct calls (using the symbol index), indirect IAT calls
-/// (`resolve_iat_slot`), and register-indirect calls (backward register tracking).
-///
-/// Register-indirect *JMPs* that cannot be resolved here are **skipped** — their
-/// targets are resolved by the switch-dispatch path in the caller and merged in
-/// afterwards.  Register-indirect *CALLs* that cannot be resolved are always
-/// emitted so the caller has full visibility of every call site.
+/// Resolve call and jump targets. Unresolved register jumps are left for switch
+/// recovery; unresolved calls remain in the report.
 pub fn collect_api_calls(
     insns: &[Instruction],
     pe: &PeFile,
@@ -534,6 +508,24 @@ pub fn collect_api_calls(
     image_base: u64,
     hostile: bool,
 ) -> Vec<ApiCall> {
+    collect_api_calls_in(
+        insns,
+        &crate::analysis::image::ImageFacts::new(pe, raw),
+        symbol_index,
+        image_base,
+        hostile,
+    )
+}
+
+pub fn collect_api_calls_in(
+    insns: &[Instruction],
+    image: &crate::analysis::image::ImageFacts<'_>,
+    symbol_index: &SymbolIndex,
+    image_base: u64,
+    hostile: bool,
+) -> Vec<ApiCall> {
+    let pe = image.pe();
+    let raw = image.raw();
     let mut results = Vec::new();
     let dispatch_slot = guard_dispatch_slot(pe, raw);
     let body = insns
@@ -557,7 +549,6 @@ pub fn collect_api_calls(
             {
                 continue;
             }
-            // Direct near call / unconditional jmp with an immediate target.
             let target_rva = insn.call_target.wrapping_sub(image_base) as u32;
             // Imports declared without dllimport (bcrypt.h, for one) are reached through
             // linker `jmp [__imp_X]` stubs; report the import, not an internal sub_.
@@ -598,7 +589,6 @@ pub fn collect_api_calls(
                 resolves: None,
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Memory {
-            // Indirect call/jmp — most commonly `call [rip+rel32]` through the IAT.
             if is_guard_dispatch_call(insn, Some(symbol_index), dispatch_slot) {
                 if let Some(src) =
                     track_wdf_table_register(insns, idx, Register::RAX, Some(symbol_index), pe)
@@ -608,8 +598,7 @@ pub fn collect_api_calls(
                                 idx,
                                 Register::RAX,
                                 image_base,
-                                pe,
-                                raw,
+                                image,
                                 Some(symbol_index),
                             )
                         })
@@ -671,9 +660,7 @@ pub fn collect_api_calls(
                     });
                     continue;
                 }
-                if let Some(func) = crate::analysis::wdf::bound_table_cached(pe, raw)
-                    .and_then(|table| table.slot(slot_va))
-                {
+                if let Some(func) = image.wdf_table().and_then(|table| table.slot(slot_va)) {
                     results.push(ApiCall {
                         rva: insn.rva,
                         kind,
@@ -691,7 +678,6 @@ pub fn collect_api_calls(
                 }
             }
 
-            // IAT resolution failed — use whatever the comment already has.
             let label = if !insn.comment.is_empty() {
                 insn.comment.clone()
             } else {
@@ -718,22 +704,12 @@ pub fn collect_api_calls(
                 resolves: None,
             });
         } else if insn.iced.op_count() > 0 && insn.iced.op0_kind() == OpKind::Register {
-            // Register-indirect call/jmp: `call rax`, `jmp r9`, etc.
-            // Attempt to resolve by scanning backwards for the register's source.
             let reg = insn.iced.op0_register();
             let reg_name = register_short_name(reg);
 
             let src =
                 track_wdf_table_register(insns, idx, reg, Some(symbol_index), pe).or_else(|| {
-                    track_indirect_register(
-                        insns,
-                        idx,
-                        reg,
-                        image_base,
-                        pe,
-                        raw,
-                        Some(symbol_index),
-                    )
+                    track_indirect_register(insns, idx, reg, image_base, image, Some(symbol_index))
                 });
             let is_unresolved = src
                 .as_ref()
@@ -741,9 +717,7 @@ pub fn collect_api_calls(
                 .unwrap_or(true);
 
             if let Some(src) = src {
-                // Emit resolved or partially-resolved result.
-                // For unresolved JMPs, only emit when hostile (they are handled by
-                // switch-dispatch otherwise).
+                // Switch recovery handles unresolved jumps unless hostile tracing is enabled.
                 if insn.is_call || hostile || !is_unresolved {
                     results.push(ApiCall {
                         rva: insn.rva,
@@ -760,7 +734,6 @@ pub fn collect_api_calls(
                     });
                 }
             } else if insn.is_call || hostile {
-                // Fallback: completely unresolvable register.
                 results.push(ApiCall {
                     rva: insn.rva,
                     kind,
@@ -775,7 +748,6 @@ pub fn collect_api_calls(
                     resolves: None,
                 });
             }
-            // Non-hostile unresolved JMP via register: left for the switch-dispatch path.
         }
     }
 
@@ -924,9 +896,7 @@ fn describe_gs_access(disp: u64) -> Option<String> {
 
 pub(super) fn describe_immediate_literals(instr: &iced_x86::Instruction) -> Vec<String> {
     let mut out = Vec::new();
-    // Untyped instruction immediates are not status values merely because their
-    // numbers coincide. Only suggest distinctive status constants in moves or
-    // comparisons; small integers and bit tests are particularly ambiguous.
+    // Untyped immediates need distinctive status values; exclude bit tests and small integers.
     if !matches!(instr.mnemonic(), Mnemonic::Mov | Mnemonic::Cmp) {
         return out;
     }
@@ -962,6 +932,7 @@ mod literal_annotation_tests {
         let instr = iced_x86::Decoder::new(64, bytes, iced_x86::DecoderOptions::NONE).decode();
         describe_immediate_literals(&instr)
     }
+
     #[test]
     fn untyped_zero_flags_and_addresses_are_not_status_codes() {
         assert!(annotations(&[0x80, 0x7b, 0x10, 0]).is_empty()); // cmp byte [rbx+10h],0

@@ -1,4 +1,4 @@
-//! Bounded static x64 call-site facts. No target execution or kernel-object lookup.
+//! Bounded static x64 call-site facts.
 use super::{DecodedInsn, PeFile};
 use crate::analysis::image::ImageFacts;
 use crate::formats::pe::{read_u32, IMAGE_SCN_MEM_WRITE};
@@ -80,6 +80,7 @@ impl Value {
             _ => Self::Unknown,
         }
     }
+
     pub fn constant(&self) -> Option<u64> {
         if let Self::Constant { value, .. } = self {
             Some(*value)

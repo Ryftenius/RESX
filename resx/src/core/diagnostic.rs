@@ -1,7 +1,4 @@
-//! Bounded process-local developer diagnostics.
-//!
-//! Diagnostic output is intentionally separate from analyst output and is
-//! enabled only by the global `--diagnostic` switch.
+//! Process-local diagnostics enabled by `--diagnostic`, separate from analyst output.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

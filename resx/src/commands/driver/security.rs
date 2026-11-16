@@ -182,6 +182,7 @@ mod windows {
         execute: u32,
         all: u32,
     }
+
     fn dacl_probes(report: &mut LiveSecurity, token: Handle) {
         let Some(sddl) = report.sddl.as_deref() else {
             return;
@@ -265,13 +266,16 @@ mod windows {
             }
         }
     }
+
     fn last_error() -> u32 {
         // SAFETY: GetLastError reads only this thread's error state.
         unsafe { GetLastError() }
     }
+
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(Some(0)).collect()
     }
+
     fn open(path: &[u16], access: u32) -> Result<Owned, u32> {
         // OPEN_EXISTING, sharing read/write/delete, asynchronous handle: no
         // implicit synchronous-I/O access requirement and no data operation.
@@ -284,6 +288,7 @@ mod windows {
             Ok(Owned(handle))
         }
     }
+
     fn scalar(token: Handle, class: u32) -> Option<u32> {
         let mut value = 0u32;
         let mut returned = 0;
@@ -300,6 +305,7 @@ mod windows {
             && returned == 4)
             .then_some(value)
     }
+
     fn integrity(token: Handle) -> Option<u32> {
         let mut buffer = [0u64; 64];
         let mut returned = 0;
@@ -330,6 +336,7 @@ mod windows {
             bytes.get(end - 4..end)?.try_into().ok()?,
         ))
     }
+
     fn object_name(handle: Handle) -> Option<String> {
         let mut data = vec![0u64; 8192];
         let mut returned = 0;
@@ -360,6 +367,7 @@ mod windows {
         )
         .ok()
     }
+
     fn descriptor(handle: Handle) -> Result<String, String> {
         let mut data = vec![0u64; 8192];
         let mut returned = 0;
@@ -414,6 +422,7 @@ mod windows {
         }
         result
     }
+
     pub(super) fn query(report: &mut LiveSecurity) {
         if cfg!(target_pointer_width = "32") {
             report.error = Some("Live device security currently requires Windows x64".into());
@@ -583,6 +592,7 @@ mod windows {
                 .iter()
                 .all(|p| p.opened.is_none() && p.win32_error.is_none()));
         }
+
         #[test]
         fn relative_descriptor_validator_rejects_out_of_buffer_offsets() {
             let mut data = [0u32; 5];

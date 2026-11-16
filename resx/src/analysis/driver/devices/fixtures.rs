@@ -49,6 +49,7 @@ fn put(raw: &mut [u8], rva: usize, bytes: &[u8]) {
     let offset = rva - 0x1000 + 0x200;
     raw[offset..offset + bytes.len()].copy_from_slice(bytes);
 }
+
 fn unicode(raw: &mut [u8], header: usize, body: usize, value: &str) {
     let bytes: Vec<_> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
     put(raw, header, &(bytes.len() as u16).to_le_bytes());
@@ -60,14 +61,17 @@ fn unicode(raw: &mut [u8], header: usize, body: usize, value: &str) {
     );
     put(raw, body, &bytes);
 }
+
 fn call(code: &mut Vec<u8>, slot: u32) {
     let next = 0x1000 + code.len() as u32 + 6;
     code.extend([0xff, 0x15]);
     code.extend(slot.wrapping_sub(next).to_le_bytes());
 }
+
 fn fixture(provider: &str, unknown_init: bool, corrupt_sddl: bool) -> super::super::DriverReport {
     fixture_with_output(provider, unknown_init, corrupt_sddl, false)
 }
+
 fn fixture_with_output(
     provider: &str,
     unknown_init: bool,
@@ -152,6 +156,7 @@ fn fixture_with_output(
     put(&mut raw, 0x1000, &code);
     super::super::analyze_driver("fixture.sys", &pe, &raw, &read_imports(&pe, &raw))
 }
+
 #[test]
 fn constructors_recover_counted_names_links_sddl_and_driver_binding() {
     let report = fixture("ntoskrnl.exe", false, false);
@@ -167,6 +172,7 @@ fn constructors_recover_counted_names_links_sddl_and_driver_binding() {
     assert_eq!(endpoint.secure_open, Some(true));
     assert!(endpoint.driver_entry_object);
 }
+
 #[test]
 fn unrelated_strings_wrong_provider_and_unknown_initializer_do_not_establish_endpoints() {
     assert!(fixture("untrusted.dll", false, false)

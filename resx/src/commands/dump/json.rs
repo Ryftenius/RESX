@@ -101,6 +101,9 @@ pub(crate) struct FuncResult {
     pub(crate) api_calls: Vec<ApiCallJson>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) api_call_tree: String,
+    /// Telemetry sources reachable from the function (--telemetry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) telemetry: Option<super::callmap::telemetry::TelemetryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) current_syscall: Option<SyscallJson>,
 }

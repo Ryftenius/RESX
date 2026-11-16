@@ -44,6 +44,13 @@ pub fn find_dll_path(name: &str, cfg: &Config) -> Result<PathBuf, String> {
         }
     }
 
+    // API set contracts are not files; the local schema names the hosting DLL.
+    if let Some(host) = crate::core::apiset::host_for(name) {
+        if !crate::core::apiset::is_contract(&host) {
+            return find_dll_path(&host, cfg);
+        }
+    }
+
     Err(format!(
         "'{}' not found in any search path\n  searched: priority dirs, system paths, CWD, PATH\n  use --priority-dir <dir> or --path <dir> to add custom search locations, or provide a full path",
         name

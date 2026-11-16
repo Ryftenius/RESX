@@ -358,7 +358,6 @@ fn scan_executable_instructions<'a>(
         if !section.is_executable() || section.raw_size == 0 {
             continue;
         }
-        // Use the same ambiguity and file-backing rules as every other decoder.
         let Some(bytes) = pe.rva_bytes(raw, section.virtual_address) else {
             continue;
         };

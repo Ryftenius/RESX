@@ -155,6 +155,7 @@ mod tests {
             }
         })
     }
+
     #[test]
     fn header_and_union_discriminant_gate_oid_interpretation() {
         let mut bytes = [0u8; 248];
@@ -192,6 +193,7 @@ mod tests {
         bytes[2] = 240;
         assert!(request(&bytes).is_some());
     }
+
     #[test]
     fn missing_fields_stay_unknown_and_incomplete_headers_are_rejected() {
         let bytes = [0x96, 2, 248, 0, 0, 0, 0, 0];

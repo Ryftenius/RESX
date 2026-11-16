@@ -1,7 +1,5 @@
-//! Inversion of API and module name hashes. Hash functions are not identified from
-//! code; instead a catalog of common constructions, widened with the rotate counts,
-//! multipliers and seeds found in the resolver itself, is evaluated over known names
-//! until one construction explains the constants the resolver is called with.
+//! Invert known export/module names using candidate hashes, prioritizing
+//! constructions suggested by the resolver instructions.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -22,7 +20,6 @@ impl Hints {
         self.crc |= other.crc;
     }
 
-    /// Whether the code does hash-like arithmetic at all.
     pub fn any(&self) -> bool {
         !self.rotates.is_empty() || !self.multipliers.is_empty() || self.crc
     }
@@ -129,7 +126,6 @@ impl Algo {
     }
 }
 
-/// How a name is turned into bytes before hashing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Form {
     case: Case,
@@ -211,7 +207,6 @@ struct Candidate {
     names: HashMap<u64, String>,
 }
 
-/// Algorithms suggested by the resolver's own instructions, then the common ones.
 fn catalog(hints: &Hints) -> (Vec<Algo>, Vec<Algo>) {
     let mut hinted = Vec::new();
     for &n in &hints.rotates {
@@ -301,8 +296,6 @@ pub(super) fn invert(values: &[u64], hints: &Hints, names: &[&str]) -> Option<In
                 }
             }
         }
-        // A construction the resolver's own code suggests settles it; the common
-        // catalog is only a fallback.
         if best.is_some() {
             break;
         }

@@ -8,6 +8,7 @@ fn text<'a>(call: &'a Value, name: &str) -> Option<&'a str> {
         .find(|s| s["argument"] == name)?["value"]
         .as_str()
 }
+
 fn scalar(call: &Value, name: &str) -> Option<u64> {
     call["arguments"]
         .as_array()?
@@ -15,6 +16,7 @@ fn scalar(call: &Value, name: &str) -> Option<u64> {
         .find(|s| s["name"] == name)?["value"]["value"]
         .as_u64()
 }
+
 fn producer<'a>(
     call: &Value,
     argument: &str,
@@ -30,6 +32,7 @@ fn producer<'a>(
     }
     Some(result)
 }
+
 pub fn summarize(report: &Value) -> Value {
     let Some(calls) = report["calls"].as_array() else {
         return Value::Null;

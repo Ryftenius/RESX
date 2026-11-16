@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use iced_x86::{Mnemonic, OpKind, Register};
 use serde::Serialize;
 
-use crate::analysis::disasm::{collect_api_calls, disassemble_at, is_ret, ApiCall, Instruction};
+use crate::analysis::disasm::{collect_api_calls_in, disassemble_at, is_ret, ApiCall, Instruction};
 use crate::analysis::discovery::{discover_functions, FunctionDiscoveryReport};
 use crate::analysis::symbols::SymbolIndex;
 use crate::core::color::Colors;
@@ -149,7 +149,6 @@ struct CallbackSpec {
     arg_index: usize,
 }
 
-/// A callback entry point recovered from a bounded API-call argument trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecoveredApiCallback {
     pub target_rva: u32,
@@ -160,15 +159,12 @@ pub struct RecoveredApiCallback {
     pub argument_index: usize,
 }
 
-/// Returns the documented one-based callback argument for APIs understood by
-/// reconstruction. This is intentionally limited to callback-taking APIs with
-/// explicit backend recovery rules.
+/// Return the one-based callback argument index for supported APIs.
 pub fn callback_argument_index(api_name: &str) -> Option<usize> {
     callback_spec(api_name).map(|spec| spec.arg_index)
 }
 
-/// Recovers an in-image callback target using the same bounded register/stack
-/// analysis as the reconstruction renderer.
+/// Recover an in-image callback through bounded register/stack analysis.
 pub fn recover_api_callback(
     instructions: &[Instruction],
     call_rva: u32,
@@ -195,6 +191,7 @@ struct PdbFunction {
 }
 
 struct TraceContext<'a> {
+    image: crate::analysis::image::ImageFacts<'a>,
     raw: &'a [u8],
     pe: &'a PeFile,
     exports: &'a [Export],
@@ -226,6 +223,7 @@ pub fn reconstruct_image(
 ) -> ReconstructReport {
     let pdb_functions = build_pdb_function_index(pdb_symbols);
     let mut ctx = TraceContext {
+        image: crate::analysis::image::ImageFacts::new(pe, raw),
         raw,
         pe,
         exports,
@@ -425,10 +423,9 @@ impl<'a> TraceContext<'a> {
             .map(|insn| hex32(insn.rva))
             .collect();
 
-        let mut calls = collect_api_calls(
+        let mut calls = collect_api_calls_in(
             &insns,
-            self.pe,
-            self.raw,
+            &self.image,
             self.symbol_index,
             self.image_base,
             true,

@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::io::Write;
 
 use crate::analysis::disasm::{
-    apply_dynamic_resolution, collect_api_calls, disassemble_at, ApiCall, Instruction,
+    apply_dynamic_resolution, collect_api_calls_in, disassemble_at, ApiCall, Instruction,
 };
 use crate::analysis::{image::ImageFacts, session::AnalysisSession, symbols::SymbolIndex};
 use crate::core::color::Colors;
@@ -25,13 +25,13 @@ const NT_KERNEL_IMAGES: &[&str] = &[
 const WIN32K_KERNEL_IMAGES: &[&str] = &["win32kbase.sys", "win32kfull.sys", "win32k.sys"];
 const NO_KERNEL_IMAGES: &[&str] = &[];
 
-/// Recursive API call map rooted at one function. It is built once, with
-/// call-tree filter pruning applied, and rendered colored or as plain text.
 pub(super) struct ApiCallTree {
     roots: Vec<CallNode>,
     unbuilt: usize,
     total: usize,
     filter: Option<CallFilter>,
+    /// Functions left unexpanded because `--max-total` was reached.
+    budget_skipped: usize,
 }
 
 impl ApiCallTree {
@@ -109,16 +109,108 @@ pub(super) fn build_api_call_tree(
         cfg,
         sub_cfg,
         filter: filter.as_ref(),
-        visited: std::collections::HashSet::from([root_rva]),
+        visited: std::collections::HashSet::from([(root_image.key(), root_rva)]),
         expanded: std::collections::HashMap::new(),
+        expansions: 0,
+        expansion_limit: expansion_limit(cfg.max_total),
+        budget_skipped: 0,
     };
     let (roots, unbuilt) = builder.build_level(&display_calls, insns, &root_image, 0);
+    let budget_skipped = builder.budget_skipped;
     ApiCallTree {
         roots,
         unbuilt,
         total: display_calls.len(),
         filter,
+        budget_skipped,
     }
+}
+
+/// The calls a function renders when it has more than `cap`, in address order: system
+/// calls first, then other imports, internal calls, and runtime helpers last. A large
+/// function's first call sites are often helpers; its transitions should not be cut.
+fn select_within_cap(calls: &[ApiCall], cap: usize) -> Vec<ApiCall> {
+    if calls.len() <= cap {
+        return calls.to_vec();
+    }
+    let rank = |call: &ApiCall| -> u8 {
+        let name = call.label.rsplit('!').next().unwrap_or(&call.label);
+        if call.is_import && is_nt_api(name) {
+            0
+        } else if is_runtime_helper(name) {
+            3
+        } else if call.is_import || call.dynamic.is_some() {
+            1
+        } else {
+            2
+        }
+    };
+    let mut order: Vec<usize> = (0..calls.len()).collect();
+    order.sort_by_key(|&i| (rank(&calls[i]), calls[i].rva));
+    order.truncate(cap);
+    order.sort_unstable();
+    order.into_iter().map(|i| calls[i].clone()).collect()
+}
+
+fn is_runtime_helper(name: &str) -> bool {
+    const HELPERS: &[&str] = &[
+        "memset",
+        "memcpy",
+        "memmove",
+        "memcmp",
+        "__chkstk",
+        "_security_check_cookie",
+        "_report_gsfailure",
+        "guard_dispatch_icall",
+        "_guard_dispatch_icall_nop",
+    ];
+    HELPERS.iter().any(|h| name.eq_ignore_ascii_case(h))
+        || name.starts_with("Feature_")
+        || name.starts_with("wil_")
+}
+
+/// Functions a call map may expand. `--max-total unlimited` (0) keeps a safety bound.
+fn expansion_limit(max_total: usize) -> usize {
+    if max_total == 0 {
+        65_536
+    } else {
+        max_total
+    }
+}
+
+/// Decode a traced function: the whole reachable body when its extent is known,
+/// otherwise the bounded linear listing from `cfg`.
+fn decode_traced_function(
+    image: &TraceImageView<'_>,
+    file_off: usize,
+    rva: u32,
+    cfg: &Config,
+) -> Option<Vec<Instruction>> {
+    let options: crate::analysis::options::TraversalOptions = cfg.into();
+    if let Some(insns) = crate::analysis::inspection::decode_reachable_function(
+        image.analysis.raw(),
+        image.analysis.pe(),
+        rva,
+        image.arch,
+        image.image_base,
+        image.exports,
+        Some(image.symbol_index),
+        &options,
+    ) {
+        return Some(insns);
+    }
+    disassemble_at(
+        image.analysis.raw(),
+        image.analysis.pe(),
+        file_off,
+        rva,
+        image.arch,
+        image.image_base,
+        image.exports,
+        Some(image.symbol_index),
+        cfg,
+    )
+    .ok()
 }
 
 pub(super) fn print_api_calls(
@@ -165,11 +257,23 @@ pub(super) fn print_api_calls(
 
     let mut dll_map = std::collections::HashMap::new();
     print_call_nodes(w, &tree.roots, tree.unbuilt, c, cfg, &mut dll_map, "  ");
+    if tree.budget_skipped > 0 {
+        writeln!(w, "  {}", c.warning(&budget_note(tree.budget_skipped))).ok();
+    }
+}
+
+fn budget_note(skipped: usize) -> String {
+    format!(
+        "{skipped} call(s) not expanded: the --max-total budget of traced functions was reached; raise --max-total"
+    )
 }
 
 pub(super) fn render_api_call_tree(tree: &ApiCallTree, cfg: &Config) -> String {
     let mut out = String::new();
     write_call_nodes_text(&mut out, &tree.roots, tree.unbuilt, cfg, "  ");
+    if tree.budget_skipped > 0 {
+        let _ = writeln!(out, "  {}", budget_note(tree.budget_skipped));
+    }
     out
 }
 
@@ -258,7 +362,7 @@ pub(super) fn resolve_syscall_call_details(
         None
     };
     Some(SyscallCallDetails {
-        kernel_module: target.image.dll_name,
+        kernel_module: target.image.dll_name.clone(),
         kernel_symbol: target.symbol_name,
         kernel_rva: target.rva,
         service_number,
@@ -274,6 +378,13 @@ struct TraceImageView<'a> {
     /// Dynamic API resolution for the image being dumped; kernel images reached
     /// through a syscall are not analyzed for it.
     dynamic: Option<&'a crate::analysis::resolution::ResolutionReport>,
+}
+
+impl TraceImageView<'_> {
+    /// Identity of the traced image, so equal RVAs in different images stay distinct.
+    fn key(&self) -> usize {
+        self.analysis.raw().as_ptr() as usize
+    }
 }
 
 fn call_location(call: &ApiCall, image: &TraceImageView<'_>, cfg: &Config) -> String {
@@ -319,6 +430,10 @@ struct LoadedTraceImage {
     pe: crate::formats::pe::PeFile,
     exports: Vec<Export>,
     symbol_index: crate::analysis::symbols::SymbolIndex,
+    /// Lowercase export and PDB names to (RVA, display name).
+    by_name: std::collections::HashMap<String, (u32, String)>,
+    /// Whether PDB symbols were loaded, so internal routines have names.
+    pdb_loaded: bool,
     arch: u32,
     image_base: u64,
 }
@@ -342,9 +457,13 @@ struct TreeBuilder<'a> {
     cfg: &'a Config,
     sub_cfg: Config,
     filter: Option<&'a CallFilter>,
-    visited: std::collections::HashSet<u32>,
+    /// Expanded functions by (image, RVA).
+    visited: std::collections::HashSet<(usize, u32)>,
     /// Callees already expanded, and whether that expansion kept any calls.
-    expanded: std::collections::HashMap<u32, bool>,
+    expanded: std::collections::HashMap<(usize, u32), bool>,
+    expansions: usize,
+    expansion_limit: usize,
+    budget_skipped: usize,
 }
 
 impl TreeBuilder<'_> {
@@ -357,11 +476,12 @@ impl TreeBuilder<'_> {
     ) -> (Vec<CallNode>, usize) {
         // Unfiltered trees stop tracing at the render cap. Filtered trees evaluate every
         // call so the cap applies to what survives the filter, not to what precedes it.
-        let budget = if self.filter.is_some() {
-            calls.len()
+        let selected = if self.filter.is_some() {
+            calls.to_vec()
         } else {
-            calls.len().min(self.cfg.max_subcalls)
+            select_within_cap(calls, self.cfg.max_subcalls)
         };
+        let budget = selected.len();
         let mut nodes = Vec::new();
         let signatures = self
             .headers
@@ -371,11 +491,11 @@ impl TreeBuilder<'_> {
                     image.analysis,
                     self.exports,
                     insns,
-                    &calls[..budget],
+                    &selected,
                 )
             })
             .unwrap_or_default();
-        for call in calls.iter().take(budget) {
+        for call in &selected {
             if let Some(mut node) = self.build_node(call, insns, image, depth) {
                 node.signature = signatures.get(&call.rva).cloned();
                 nodes.push(node);
@@ -396,36 +516,43 @@ impl TreeBuilder<'_> {
         }
         let syscall_target = resolve_syscall_trace_target(call, insns, self.cfg);
         let descend = depth + 1 < self.cfg.funcs_depth;
+        let callee_key = (image.key(), call.target_rva);
         let can_recurse = !call.is_import
             && !call.is_indirect
             && call.target_rva != 0
             && descend
-            && !self.visited.contains(&call.target_rva);
+            && !self.visited.contains(&callee_key);
 
         let mut children = Vec::new();
         let mut unbuilt = 0;
         let mut expanded_here = false;
         if can_recurse {
             if let Some(file_off) = image.analysis.pe().rva_to_offset(call.target_rva) {
-                self.visited.insert(call.target_rva);
-                expanded_here = true;
-                if let Some((sub_insns, sub_calls)) =
-                    self.trace_callee(image, file_off, call.target_rva)
-                {
-                    (children, unbuilt) =
-                        self.build_level(&sub_calls, &sub_insns, image, depth + 1);
+                if self.take_expansion() {
+                    self.visited.insert(callee_key);
+                    expanded_here = true;
+                    if let Some((sub_insns, sub_calls)) =
+                        self.trace_callee(image, file_off, call.target_rva)
+                    {
+                        (children, unbuilt) =
+                            self.build_level(&sub_calls, &sub_insns, image, depth + 1);
+                    }
+                    self.expanded.insert(callee_key, !children.is_empty());
                 }
-                self.expanded.insert(call.target_rva, !children.is_empty());
             }
         } else if let Some(target) = syscall_target.as_ref().filter(|_| descend) {
             if let Some(file_off) = target.image.pe.rva_to_offset(target.rva) {
                 let facts = ImageFacts::new(&target.image.pe, &target.image.raw);
                 let kernel_view = target.image.as_view(&facts);
-                if let Some((sub_insns, sub_calls)) =
-                    self.trace_callee(&kernel_view, file_off, target.rva)
-                {
-                    (children, unbuilt) =
-                        self.build_level(&sub_calls, &sub_insns, &kernel_view, depth + 1);
+                let kernel_key = (kernel_view.key(), target.rva);
+                if !self.visited.contains(&kernel_key) && self.take_expansion() {
+                    self.visited.insert(kernel_key);
+                    if let Some((sub_insns, sub_calls)) =
+                        self.trace_callee(&kernel_view, file_off, target.rva)
+                    {
+                        (children, unbuilt) =
+                            self.build_level(&sub_calls, &sub_insns, &kernel_view, depth + 1);
+                    }
                 }
             }
         }
@@ -435,11 +562,7 @@ impl TreeBuilder<'_> {
             && !call.is_import
             && !call.is_indirect
             && call.target_rva != 0
-            && self
-                .expanded
-                .get(&call.target_rva)
-                .copied()
-                .unwrap_or(false);
+            && self.expanded.get(&callee_key).copied().unwrap_or(false);
         let keep = self.filter.is_none_or(|filter| filter.matches(call))
             || !children.is_empty()
             || expanded_above;
@@ -452,7 +575,7 @@ impl TreeBuilder<'_> {
             call: call.clone(),
             location: call_location(call, image, self.cfg),
             kernel: syscall_target.map(|target| KernelCallTarget {
-                image: target.image.dll_name,
+                image: target.image.dll_name.clone(),
                 symbol: target.symbol_name,
                 classes: target.classes,
             }),
@@ -462,28 +585,26 @@ impl TreeBuilder<'_> {
         })
     }
 
+    /// Reserve one function expansion within `--max-total`.
+    fn take_expansion(&mut self) -> bool {
+        if self.expansions >= self.expansion_limit {
+            self.budget_skipped += 1;
+            return false;
+        }
+        self.expansions += 1;
+        true
+    }
+
     fn trace_callee(
         &self,
         image: &TraceImageView<'_>,
         file_off: usize,
         rva: u32,
     ) -> Option<(Vec<Instruction>, Vec<ApiCall>)> {
-        let insns = disassemble_at(
-            image.analysis.raw(),
-            image.analysis.pe(),
-            file_off,
-            rva,
-            image.arch,
-            image.image_base,
-            image.exports,
-            Some(image.symbol_index),
-            &self.sub_cfg,
-        )
-        .ok()?;
-        let mut calls = collect_api_calls(
+        let insns = decode_traced_function(image, file_off, rva, &self.sub_cfg)?;
+        let mut calls = collect_api_calls_in(
             &insns,
-            image.analysis.pe(),
-            image.analysis.raw(),
+            image.analysis,
             image.symbol_index,
             image.image_base,
             self.cfg.hostile,
@@ -673,19 +794,45 @@ fn print_call_nodes(
         } else {
             String::new()
         };
+        let telemetry_tag = if cfg.telemetry {
+            telemetry::classify(&call.label)
+                .map(|sink| format!(" [telemetry · {}]", sink.kind.label()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
-        writeln!(
-            w,
-            "{}{} {}  {}  {}{}{}",
-            line_prefix,
-            branch,
-            c.dim(&node.location),
-            color_kind(&call.kind, c),
-            colored_target,
-            compact_call_tag(call, c, cfg),
-            repeat,
-        )
-        .ok();
+        if node.kernel.is_some() && c.on {
+            // A user-to-kernel transition stands out as one red band.
+            let plain = format!(
+                "{}  {}  {}{}{}{}",
+                node.location,
+                call.kind.to_ascii_uppercase(),
+                plain_call_target(call),
+                strip_ansi(&compact_call_tag(call, c, cfg)),
+                if node.expanded_above {
+                    EXPANDED_ABOVE_TAG
+                } else {
+                    ""
+                },
+                telemetry_tag,
+            );
+            writeln!(w, "{}{} {}", line_prefix, branch, c.transition(&plain)).ok();
+        } else {
+            writeln!(
+                w,
+                "{}{} {}  {}  {}{}{}{}",
+                line_prefix,
+                branch,
+                c.dim(&node.location),
+                color_kind(&call.kind, c),
+                colored_target,
+                compact_call_tag(call, c, cfg),
+                repeat,
+                c.b_yellow(&telemetry_tag),
+            )
+            .ok();
+        }
 
         let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
         let argument_rows = node
@@ -729,15 +876,28 @@ fn print_call_nodes(
         }
 
         if let Some(kernel) = &node.kernel {
-            writeln!(
-                w,
-                "{}{} {}!{}",
-                detail_prefix,
-                c.dim("kernel:"),
-                c.cyan(short_dll_name(&kernel.image)),
-                c.b_red(&kernel.symbol),
-            )
-            .ok();
+            if c.on {
+                writeln!(
+                    w,
+                    "{}{}",
+                    detail_prefix,
+                    c.transition(&format!(
+                        "kernel: {}!{}",
+                        short_dll_name(&kernel.image),
+                        kernel.symbol
+                    )),
+                )
+                .ok();
+            } else {
+                writeln!(
+                    w,
+                    "{}kernel: {}!{}",
+                    detail_prefix,
+                    short_dll_name(&kernel.image),
+                    kernel.symbol
+                )
+                .ok();
+            }
             if !kernel.classes.is_empty() {
                 let classes = kernel
                     .classes
@@ -798,9 +958,16 @@ fn write_call_nodes_text(
         let call = &node.call;
         let is_last = i + 1 == visible_len && omitted == 0;
         let branch = if is_last { "└──" } else { "├──" };
+        let telemetry_tag = if cfg.telemetry {
+            telemetry::classify(&call.label)
+                .map(|sink| format!(" [telemetry · {}]", sink.kind.label()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
-            "{}{} {}  {}  {} {}{}",
+            "{}{} {}  {}  {} {}{}{}",
             line_prefix,
             branch,
             node.location,
@@ -811,7 +978,8 @@ fn write_call_nodes_text(
                 EXPANDED_ABOVE_TAG
             } else {
                 ""
-            }
+            },
+            telemetry_tag
         );
 
         let detail_prefix = format!("{}{}   ", line_prefix, if is_last { " " } else { "│" });
@@ -871,14 +1039,33 @@ fn write_call_nodes_text(
 }
 
 struct SyscallTraceTarget {
-    image: LoadedTraceImage,
+    image: std::rc::Rc<LoadedTraceImage>,
     rva: u32,
     symbol_name: String,
     classes: Vec<u32>,
 }
 
+/// Remove ANSI style sequences from already-colored text.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 mod filter;
 mod syscall;
+pub(super) mod telemetry;
 use filter::CallFilter;
 pub(super) use syscall::*;
 

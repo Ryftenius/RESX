@@ -1,17 +1,11 @@
-//! Which constants a parameter's values are drawn from.
-//!
-//! The headers declare `DWORD flProtect` but do not say that its values are the
-//! `PAGE_*` constants, so that link is this table: parameter names, optionally
-//! narrowed to APIs, mapped to constant name prefixes or explicit names. The
-//! constants themselves, and their values, come from the parsed headers.
+//! Map API parameters to constant families absent from SDK type declarations.
+//! Constant names and values come from the parsed headers.
 
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// Bits that combine: `MEM_COMMIT|MEM_RESERVE`.
     Flags,
-    /// One value of a set.
     Enum,
     /// Values compared on their low 32 bits (sign-extended handle constants).
     Enum32,
@@ -621,7 +615,6 @@ const RULES: &[Rule] = &[
     },
 ];
 
-/// Names that describe a field or a limit rather than a value.
 const EXCLUDED: &[&str] = &[
     "_MASK",
     "VALID",
@@ -645,7 +638,6 @@ fn rule(api: &str, param: &str) -> Option<usize> {
     })
 }
 
-/// The constants each rule draws from, resolved against one header index.
 #[derive(Default)]
 pub(super) struct Candidates {
     per_rule: Vec<Vec<(u64, String)>>,
@@ -665,7 +657,6 @@ impl Candidates {
                     })
                     .map(|(name, value)| (*value, name.clone()))
                     .collect();
-                // Deterministic choice among equal values: the shorter, then first name.
                 values.sort_by(|a, b| {
                     a.0.cmp(&b.0)
                         .then(a.1.len().cmp(&b.1.len()))
@@ -747,7 +738,6 @@ fn ioctl(devices: &[(u64, String)], code: u64) -> String {
     format!("CTL_CODE({device}, 0x{function:X}, {method}, {access})")
 }
 
-/// The constant families a parameter takes, for display.
 pub(super) fn describe(api: &str, param: &str) -> Vec<&'static str> {
     let Some(index) = rule(api, param) else {
         return Vec::new();

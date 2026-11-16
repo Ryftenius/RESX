@@ -2,8 +2,7 @@ use crate::core::priority::{
     built_in_priority_names, built_in_priority_prefixes, load_priority_file,
 };
 
-/// Every option the command line can set, flattened. `crate::cli::args` parses each
-/// command's own arguments and lowers them into this shape; `Config` derives from it.
+/// Flattened CLI options used to construct `Config`.
 #[derive(Debug, Clone)]
 pub struct Options {
     pub dll: Option<String>,
@@ -53,6 +52,9 @@ pub struct Options {
     pub reconstruct_thread_filter: String,
     pub reconstruct_api_filter: String,
     pub max_insns: usize,
+    pub whole_function: bool,
+    pub telemetry: bool,
+    pub telemetry_depth: usize,
     pub max_bytes: usize,
     pub bytes: Option<Option<usize>>,
     pub no_bytes: bool,
@@ -165,7 +167,6 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// The values every option takes when it is not given on the command line.
     fn default() -> Self {
         Self {
             dll: None,
@@ -215,6 +216,9 @@ impl Default for Options {
             reconstruct_thread_filter: String::new(),
             reconstruct_api_filter: String::new(),
             max_insns: 500,
+            whole_function: true,
+            telemetry: false,
+            telemetry_depth: 10,
             max_bytes: 8192,
             bytes: None,
             no_bytes: false,
@@ -378,6 +382,9 @@ pub struct Config {
     pub reconstruct_api_filter: String,
 
     pub max_insns: usize,
+    pub whole_function: bool,
+    pub telemetry: bool,
+    pub telemetry_depth: usize,
     pub max_bytes: usize,
     pub show_bytes: bool,
     pub no_disassembly: bool,
@@ -530,6 +537,9 @@ impl Config {
             reconstruct_thread_filter: options.reconstruct_thread_filter.clone(),
             reconstruct_api_filter: options.reconstruct_api_filter.clone(),
             max_insns: options.max_insns,
+            whole_function: options.whole_function,
+            telemetry: options.telemetry,
+            telemetry_depth: options.telemetry_depth,
             max_bytes: options
                 .bytes
                 .flatten()
@@ -675,7 +685,6 @@ impl Config {
     }
 }
 
-// CLI compatibility adapters for the format-independent analysis inputs.
 impl From<&Config> for crate::analysis::options::DecodeOptions {
     fn from(cfg: &Config) -> Self {
         Self {
@@ -684,6 +693,7 @@ impl From<&Config> for crate::analysis::options::DecodeOptions {
             intel_syntax: cfg.intel_syntax,
             detailed_comments: cfg.verbose,
             hostile: cfg.hostile,
+            whole_function: cfg.whole_function,
         }
     }
 }

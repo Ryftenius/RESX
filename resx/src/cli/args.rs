@@ -144,7 +144,6 @@ pub struct GlobalArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
-    // Inspect
     /// PE identity, directories, toolchain and hardening metadata
     Peinfo(PeinfoArgs),
     /// Section layout, permissions, entropy and mapping
@@ -160,7 +159,6 @@ pub enum Command {
     /// PDB-backed type browsing
     Types(TypesArgs),
 
-    // Code and flow
     /// Targeted disassembly with optional call map, CFG and C-like reconstruction
     Dump(DumpArgs),
     /// Recursive API call tree for one function, filterable by import source
@@ -182,7 +180,6 @@ pub enum Command {
     /// Official prototype of a Windows API from the configured SDK headers
     Api(ApiArgs),
 
-    // Evidence
     /// API arguments and producer relationships
     Contracts(EvidenceArgs),
     /// Named pipe, ALPC, RPC, COM and mapping evidence
@@ -200,7 +197,6 @@ pub enum Command {
     /// Section/window entropy visualization
     Entropy(EntropyArgs),
 
-    // Search and comparison
     /// YARA-compatible scan
     Yara(YaraArgs),
     /// Bytes, text, constants and instruction patterns
@@ -218,13 +214,11 @@ pub enum Command {
     /// Deeper symbol search, including PDB-only names
     LocateSym(LocateArgs),
 
-    // Explicit transformations
     /// Bounded operator-directed codec/AES-CBC decoding
     Payload(PayloadArgs),
     /// Checked patch plan or new patched image
     Patch(PatchArgs),
 
-    // Configuration
     /// Open the priority search configuration
     Priority,
     /// Saved command preferences
@@ -281,10 +275,6 @@ impl Command {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Shared option groups
-// ---------------------------------------------------------------------------
 
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Image lookup")]
@@ -365,15 +355,15 @@ pub struct TargetArgs {
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Analysis")]
 pub struct AnalysisArgs {
-    /// Instruction budget per function
+    /// Instruction budget per function [default: the whole function when its unwind
+    /// extent is known, otherwise 500]
     #[arg(
         long = "max-insns",
         value_name = "N|unlimited",
         aliases = ["limit", "insns", "analysis-budget", "xref-budget"],
-        default_value = "500",
         value_parser = parse_budget
     )]
-    pub max_insns: usize,
+    pub max_insns: Option<usize>,
 
     /// Total traversal budget for recursive views
     #[arg(
@@ -505,6 +495,9 @@ pub struct CallTreeArgs {
     #[arg(long, value_name = "NAME")]
     pub highlight: Option<String>,
 
+    #[command(flatten)]
+    pub telemetry: TelemetryArgs,
+
     #[arg(long = "funcs", hide = true)]
     pub funcs: bool,
 
@@ -524,6 +517,26 @@ pub struct CallTreeArgs {
         hide = true
     )]
     pub funcs_filter: Option<String>,
+}
+
+/// Telemetry reachability for call maps.
+#[derive(Args, Debug, Clone)]
+#[command(next_help_heading = "Telemetry")]
+pub struct TelemetryArgs {
+    /// Report telemetry the call can reach: ETW and ETW-TI providers, kernel notify
+    /// callbacks, auditing, AMSI, WFP, WMI and change notifications (extends --edrchk)
+    #[arg(long)]
+    pub telemetry: bool,
+
+    /// Call depth searched for telemetry sources, across user and kernel images
+    #[arg(
+        long = "telemetry-depth",
+        value_name = "N",
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u32).range(1..=32),
+        requires = "telemetry"
+    )]
+    pub telemetry_depth: u32,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -698,10 +711,6 @@ pub struct MatchArgs {
     pub max_cfg_blocks: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Command arguments
-// ---------------------------------------------------------------------------
-
 #[derive(Args, Debug, Clone)]
 pub struct DeviceArgs {
     #[command(flatten)]
@@ -828,6 +837,9 @@ pub struct CallsArgs {
     /// Show call-site file offsets
     #[arg(long = "offset", alias = "show-offsets", help_heading = "Call tree")]
     pub show_offsets: bool,
+
+    #[command(flatten)]
+    pub telemetry: TelemetryArgs,
 
     #[command(flatten)]
     pub analysis: AnalysisArgs,
@@ -1542,6 +1554,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn calls_lowers_its_filter_into_one_spec() {
         let (_, options) = parse(&[

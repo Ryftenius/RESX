@@ -7,8 +7,6 @@ const SECTIONS: &[&str] = &[
     "inspect", "code", "evidence", "recovery", "compare", "options",
 ];
 
-/// Help topics that are not commands themselves; each resolves to the command that
-/// documents it.
 const TOPIC_ALIASES: &[(&str, &str)] = &[
     ("recomp", "dump"),
     ("c", "dump"),
@@ -19,7 +17,6 @@ const TOPIC_ALIASES: &[(&str, &str)] = &[
     ("pdb", "syms"),
 ];
 
-/// The command grammar, flattened for the pre-parse steps that run on raw argv.
 struct Grammar {
     /// Command names and aliases, lowercase, to the canonical command name.
     commands: HashMap<String, String>,
@@ -238,9 +235,7 @@ pub fn version_string() -> String {
     format!("{} v{}", APP_NAME, env!("CARGO_PKG_VERSION"))
 }
 
-/// Set by build.rs from the version, commit and target. A build-script output cached
-/// by an older build.rs lacks it, so the ID falls back to the version alone instead
-/// of failing the build.
+/// Build-script version, commit and target; older cached builds fall back to the version.
 const BUILD_ID: &str = match option_env!("RESX_BUILD_ID") {
     Some(id) => id,
     None => concat!("resx-", env!("CARGO_PKG_VERSION"), "+unknown"),
@@ -320,7 +315,6 @@ DETAILS
     );
 }
 
-/// Resolves a help topic to the command whose generated options it shows.
 fn topic_command(topic: &str) -> Option<&'static str> {
     TOPIC_ALIASES
         .iter()
@@ -329,9 +323,7 @@ fn topic_command(topic: &str) -> Option<&'static str> {
         .or_else(|| canonical_command(topic).filter(|name| *name != "implicit"))
 }
 
-/// Renders one command's options grouped by heading, optionally after its generated
-/// usage line. Global output options are summarized once instead of repeated under
-/// every command.
+/// Render generated command options by heading, optionally including usage.
 fn command_options(name: String, with_usage: bool) -> Option<String> {
     on_parser_stack(move || {
         let mut root = Cli::command();
@@ -578,7 +570,6 @@ mod tests {
                 "--json",
             ])
         );
-        // `limit` is the strings cap under `strings`, not the dump instruction budget.
         assert_eq!(
             normalize_cli_syntax(&args(&["resx", "/strings", "a.dll", "/limit:5"])),
             args(&["resx", "strings", "a.dll", "--limit", "5"])
@@ -603,7 +594,6 @@ mod tests {
             prepare_args(&args(&["resx", "DUMP", "a.dll", "x"])),
             args(&["resx", "dump", "a.dll", "x"])
         );
-        // A typo stays a typo so clap can suggest the command.
         assert_eq!(
             prepare_args(&args(&["resx", "dumpp", "a.dll"])),
             args(&["resx", "dumpp", "a.dll"])

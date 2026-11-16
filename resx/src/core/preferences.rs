@@ -249,6 +249,7 @@ mod registry {
     pub fn read_string(_name: &str) -> Option<String> {
         None
     }
+
     pub fn write_string(_name: &str, _value: &str) -> Result<(), String> {
         Err("RESX registry preferences are available on Windows only".to_owned())
     }

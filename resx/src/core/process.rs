@@ -19,6 +19,7 @@ pub fn capture(command: &mut Command, timeout: Duration, limit: usize) -> Result
         ) -> i32;
         fn WaitForSingleObject(handle: *mut core::ffi::c_void, milliseconds: u32) -> u32;
     }
+
     fn drain(
         pipe: &mut (impl Read + AsRawHandle),
         bytes: &mut Vec<u8>,
@@ -100,7 +101,6 @@ pub fn capture(command: &mut Command, timeout: Duration, limit: usize) -> Result
         }
     })();
     if result.is_err() {
-        // This Child handle identifies only the process launched above.
         let _ = child.kill();
         child
             .wait()
@@ -120,6 +120,7 @@ mod tests {
     fn child() -> Command {
         Command::new(std::env::current_exe().unwrap())
     }
+
     #[test]
     fn process_fixture() {
         match std::env::var("RESX_PROCESS_TEST_MODE").as_deref() {
@@ -132,6 +133,7 @@ mod tests {
             _ => (),
         }
     }
+
     #[test]
     fn deadline_and_output_overflow_kill_owned_child() {
         for mode in ["flood", "sleep"] {

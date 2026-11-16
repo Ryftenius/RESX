@@ -1,13 +1,10 @@
-//! Module and API names handed to resolvers: literals in the image, strings built on
-//! the stack, and strings decoded at run time. Decoding is a bounded brute force over
-//! simple ciphers, and a candidate counts only when it names a real export or module,
-//! so arbitrary bytes do not decode into findings.
+//! Recover literal, stack-built and decoded API names. Cipher candidates require
+//! a matching export or module in the supplied dictionary.
 
 use crate::formats::pe::PeFile;
 
 use super::{ExportDictionary, ExportProvider};
 
-/// Longest name considered, in characters.
 const MAX_NAME: usize = 128;
 /// Shortest decoded name accepted; shorter dictionary hits are too likely by chance.
 const MIN_DECODED: usize = 4;
@@ -16,15 +13,12 @@ const MIN_DECODED: usize = 4;
 pub(in crate::analysis) enum Want {
     Api,
     Module,
-    /// Any printable text, for showing string arguments.
     Text,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::analysis) enum How {
-    /// A literal in the image.
     Literal,
-    /// Built on the stack from immediates.
     StackString,
     /// Decoded at run time; the scheme that reproduces it, e.g. `xor 0x5A`.
     Decoded(String),

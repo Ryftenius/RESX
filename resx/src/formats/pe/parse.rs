@@ -343,11 +343,8 @@ pub fn parse_pe(raw: &[u8]) -> Result<PeFile, PeError> {
                     && pe.rva_slice(raw, address, size as usize).is_some()
             };
         if !valid {
-            // A loader-mapped range with missing disk bytes is unavailable,
-            // not an out-of-image pointer. Never traverse its zero-fill as
-            // though it were observed metadata. An exception table may be
-            // populated by startup code; loader-consumed directories still
-            // require validation before RESX permits a launch.
+            // Missing file bytes are not observed metadata, even inside a mapped range.
+            // Startup may populate exception tables; loader-consumed directories still need validation.
             let unavailable = index != 4
                 && address != 0
                 && size != 0
@@ -461,6 +458,7 @@ mod section_name_tests {
             .0
             .contains("Entry point VA"));
     }
+
     #[test]
     fn section_names_preserve_spaces_and_stop_at_nul_only() {
         assert_eq!(super::parse_section_name(b"        "), "        ");
