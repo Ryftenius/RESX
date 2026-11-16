@@ -2,6 +2,43 @@
 
 All notable public changes to RESX are recorded here.
 
+## Unreleased
+
+## 2.3.0 - 2026-11-16
+
+### Feature additions
+
+- Added `--telemetry` to `calls`, `dump`, `xrefs`, `cfg` and `intelli`. It searches breadth-first below the traced function, through imports and system calls into the kernel, for the telemetry the call can reach: kernel process, thread, image, handle and registry callbacks; ETW and ETW Threat-Intelligence providers; security auditing; driver stacks; registry and directory change notifications; WMI, WFP and AMSI. Each source names its consumers, whether the calling process could suppress it, and the shortest path to it. APIs that read or register for telemetry are reported as consumers. `--telemetry-depth` sets the search depth; JSON adds a `telemetry` object.
+- Highlighted user-to-kernel transitions in color call trees.
+- Prioritized direct and conditional telemetry paths in the default report, with each source's event, consumers and call path. Incidental paths remain available with `--verbose` and JSON. Showed live search progress on an interactive stderr.
+
+### Accuracy and correctness fixes
+
+- Decoded functions with a known unwind extent whole by default. The 500-instruction default previously cut large functions such as `KernelBase!CreateProcessInternalW` to a scattered tenth of their code, hiding call sites including `NtCreateUserProcess`. An explicit `--max-insns` is still honored exactly.
+- Fixed `--max-insns unlimited` capping at 4,096 instructions and `--max-total unlimited` capping function decoding at 64 basic blocks.
+- Traced callees in call trees through the same whole-function decoder instead of a 300-instruction linear sweep, and bounded the functions one tree expands by `--max-total`, with a note when it is reached.
+- Kept system calls and imports ahead of runtime helpers when a function has more calls than `--max-subcalls`.
+- Swept every executable byte for cross-references, in bounded chunks, instead of stopping after 65,536 instructions. `xrefs KernelBase.dll NtCreateUserProcess` previously reported an exhausted budget.
+- Stopped appending image-wide driver dispatch and IOCTL tables to call maps of user-mode images; they now appear for kernel images or with `--driver-flow`.
+- Kept call-tree expansion state per image, so a kernel routine is not skipped because a user-mode function has the same RVA.
+- Cached kernel images and their symbols across a call tree instead of reloading them for every system call.
+
+### Validation additions
+
+- Added a PDB-free ROR13 API-hashing fixture (`resx/tests/data/hash_resolver.c`) and a test that requires every hashed API to be named and linked to its indirect calls.
+
+### VS Code extension 2.3.0
+
+- Brought the extension up to RESX 2.2: per-command option groups mirror the CLI grammar, so each command receives only the options it accepts. Fixed every command failing when more than one symbol search path was configured; paths now join into one `--sym-path`.
+- Added viewer tabs for behavior triage (including dynamic API resolution), strings, API contract evidence (contracts, IPC, network, crypto), drivers and IOCTLs, entropy, and search (find, YARA, compare, SDK prototype lookup). PE validation (`pechk`) findings appear in Triage.
+- Added a Callers sub-tab and context-menu action to dumps, the inferred or PDB prototype in the dump header, overlapping-decode and dynamic-API counts, and recovered SDK calls and resolver details in the call map.
+- Added an Options panel with hostile mode, argument recovery (`--args`), SSA annotations, call depth up to 8 and call-map filters.
+- Added commands for diff, corpus index and hunt, payload decoding, checked patching (dry-run plan and confirmation, separate output copy), API prototype lookup, SDK header configuration and analyzer version. Diff, scan, hunt, index, payload, patch and API results render in a report panel.
+- Added settings for symbol server, image lookup paths, argument recovery, SDK headers, hostile mode, call depth, instruction budget, scan limit and process timeout. Long-running reports can be cancelled.
+- Validated every webview request on the extension side and placed operands after `--`.
+- Fixed dumps of syscall stubs failing to render, the viewer losing track of the opened image's path, and analyzer errors printed as text being reported as JSON parse failures.
+- Added tests that run every argument list the extension builds against the analyzer.
+
 ## 2.2.1 - 2026-11-15
 
 - Recovered XOR-encoded API names and their indirect call sites through MSVC-generated PEB and export-table walkers, including a checked-in PDB-free C sample.
@@ -11,12 +48,15 @@ All notable public changes to RESX are recorded here.
 ### Security patches
 
 - Fixed crashes from overflowing export, entry-point and rebased addresses.
+- Fixed overflowing WDF component addresses and missed binding records at the end of a section.
 - Fixed function discovery slicing past EOF when a section declares unavailable file data. Discovery now shares checked section mappings and bounds prologue scanning.
 - Bounded behavior scanning to one million instructions and 8,192 findings, with partial-analysis details in text and JSON. Ambiguous section mappings no longer bypass the shared reader.
 - Indexed driver export and unwind ownership lookups to prevent repeated table scans on heavily aliased inputs.
 - Restricted DbgHelp loading to the Windows system directory, checked embedded module and PDB filenames, and bounded the LLVM PDB fallback's runtime and output.
 ### Architecture and performance
 
+- Moved WDF binding reuse into immutable image facts, fixing stale results when a buffer changes or is reused.
+- Removed redundant source commentary while keeping CLI help, API contracts and unsafe-code rationale.
 - Added shared, lazy image facts for calls, behavior, API arguments, driver, IOCTL and contract analysis.
 - Scoped dynamic API resolution reuse to an immutable analysis session. Fixed stale results when an image buffer was changed or reused.
 - Indexed behavior import lookups instead of parsing the import table at each call. Rejected import addresses that overflow the RVA range.

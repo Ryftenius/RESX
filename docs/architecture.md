@@ -7,7 +7,7 @@ themselves.
 | Layer | Responsibility |
 | --- | --- |
 | `formats/pe` | Parse bytes and validate PE mappings and structures. |
-| `analysis/image` | Share imports, exports, unwind records, TLS, startup routines, load configuration and data summaries for one immutable image. |
+| `analysis/image` | Share imports, exports, unwind records, TLS, startup routines, load configuration, WDF bindings and data summaries for one immutable image. |
 | `analysis/session` | Compute and reuse analysis results when asked. Currently owns dynamic API resolution. |
 | `analysis/inspection` | Select image and function reports through explicit requests, independent of the CLI or output format. |
 | Analysis modules | Recover calls, arguments, behavior, driver interfaces and other evidence. |
@@ -23,6 +23,10 @@ first time something asks for it.
 
 Neither one uses a buffer address as a cache key. If the image changes, make a new
 session.
+
+WDF bindings use the same image-owned cache across call maps, cross-references,
+reconstruction and comparisons. The legacy lookup recomputes instead of caching by
+buffer address.
 
 ## Providers
 

@@ -39,6 +39,7 @@ lists the groups it takes, under these headings.
 | Listing | `--bytes`, `--nodis`, `--ssa`, `--att`, `--rva`, `--offset`, `--max-bytes`, ... | `dump`, `xrefs`, `cfg`, `intelli` |
 | Report sections | `--xrefs`, `--strings`, `--cfg`, `--recomp`, `--c-out`, `--intelli`, `--hookchk`, `--edrchk`, `--sections`, `--show-eat`, `--yara`, ... | `dump`, `xrefs`, `cfg`, `intelli` |
 | Call tree | `--calls`, `--calls-only`, `--calls-exclude`, `--max-subcalls`, `--highlight` | `dump`, `xrefs`, `cfg`, `intelli` |
+| Telemetry | `--telemetry`, `--telemetry-depth` | `dump`, `calls`, `xrefs`, `cfg`, `intelli` |
 | Flow | `--depth`, `--max-callers` | `callers`, `reconstruct-cfg` |
 | Search scope | `--include-dir`, `--include-image`, `--scan-exe`, `--include`, `--exclude`, `--scope-file`, `--filter-dll`, `--workers` | `callers`, `locate`, `locate-sym` |
 | Matching | `--mode`, `--threshold`, `--include-weak`, `--max-functions`, `--max-candidates`, `--max-cfg-blocks` | `diff`, `index`, `hunt` |
@@ -120,6 +121,51 @@ A repeat call to a function whose subtree is already shown is tagged
 `[expanded above]`. Without a PDB, statically linked runtime helpers are
 anonymous `sub_` functions, so `crt` and `winapi` recognize the runtime by its
 imports alone.
+
+Traced functions are decoded whole when their unwind extent is known. When a
+function has more calls than `--max-subcalls` (default 64), system calls and
+imports are rendered before internal calls and runtime helpers such as
+`memset`, so a large function's transitions are not cut. `--max-total` bounds
+how many functions one tree expands; the tree says when it is reached. In color
+output, every user-to-kernel transition and its `kernel:` line is a red band.
+
+### Telemetry reachability
+
+`--telemetry` answers which telemetry a call can produce, and who can see it. It
+searches breadth-first below the traced function: through internal calls,
+imports into other system DLLs and system calls into the kernel, to
+`--telemetry-depth` calls (default 10).
+
+```powershell
+resx calls KernelBase.dll CreateProcessW --depth 1 --telemetry
+resx dump ntdll.dll NtWriteVirtualMemory --telemetry --json
+```
+
+| Kind | Examples | Consumers |
+| --- | --- | --- |
+| Kernel callbacks | `PspCallProcessNotifyRoutines`, `PsCallImageNotifyRoutines`, `ObpPreInterceptHandleCreate`, `CmpCallCallBacksEx` | Drivers registered with `PsSetCreateProcessNotifyRoutineEx`, `PsSetLoadImageNotifyRoutine`, `ObRegisterCallbacks`, `CmRegisterCallbackEx` |
+| ETW Threat-Intelligence | `EtwTiLogAllocExecVm`, `EtwTiLogReadWriteVm` | Antimalware protected processes |
+| ETW kernel providers | `EtwTraceProcess`, `EtwpTraceRegistry`, `EtwWrite`, `EtwTimLog*` | Kernel ETW sessions; WMI process and module trace subscriptions |
+| Security auditing | `SeAuditProcessCreation`, `SepAdtLogAuditRecord` | The Security log when the audit subcategory is enabled; `EvtSubscribe` |
+| Driver stacks | `IofCallDriver` | Filter drivers on the device, such as file-system minifilters |
+| Change notifications | `CmpPostNotify`, `FsRtlNotifyFullReportChange` | `RegNotifyChangeKeyValue`, `ReadDirectoryChangesW`/`ExW` watchers |
+| WMI, WFP, AMSI | `IoWMIWriteEvent`, `Fwpm*`, `AmsiScanBuffer` | WMI subscriptions, WFP auditing and callouts, AMSI providers |
+| ETW user-mode providers | `EtwEventWriteTransfer`, TraceLogging and manifest writers | ETW sessions for the provider; emitted in the calling process |
+
+The compact text report shows relevant candidates and a count of incidental paths hidden from the default view. A name-based heuristic marks paths through generic object cleanup, registry/file object handling, error handling, pool or scheduler tracing as incidental. Audit and exploit-mitigation paths are marked conditional. This classification is triage, not a control-flow or object-type proof. The default report groups relevant candidates by kind and shows each source, what it emits, who can consume it, and its shortest static call path. `--verbose` additionally shows the incidental paths. A live spinner on stderr shows search progress in a terminal. `--verbose` lists every source, including incidental paths, with its full path and relevance label. JSON retains all sources and adds `relevance`. With `--verbose` or `--json`, each source lists what it emits, its consumers, its origin (`kernel`, or
+`in-process` when the calling process could suppress it), its call depth, and the
+shortest path to it. `⇒` marks a system call and `↪` an import into another
+image. When the traced API itself reads or registers for telemetry, such as
+`RegNotifyChangeKeyValue`, `ReadDirectoryChangesExW`, `EvtSubscribe` or
+`PsSetCreateProcessNotifyRoutineEx`, the report names it a consumer. JSON adds a
+`telemetry` object to the `dump` document.
+
+Kernel internals are recognized by name, so load ntoskrnl symbols
+(`--sym-path`, `--sym-server`, or the cache) for full coverage; the report says
+when they were missing. The search follows direct calls only: indirect calls,
+COM, and the registered callbacks themselves are not traversed. Reachable is not
+fired: whether a source emits depends on the path taken and on which providers,
+sessions, callbacks and audit policies are enabled at run time.
 
 ### Dynamically resolved APIs
 
@@ -237,6 +283,13 @@ example `resx peinfo <image>` instead of `resx <image> --peinfo`.
 Every parser and analysis traversal has explicit limits. When a report is
 truncated, it includes the relevant limit and does not present the result as a
 complete image-wide conclusion.
+
+Without `--max-insns`, a function whose unwind extent is known is decoded whole:
+every instruction reachable by direct control flow inside that extent, within a
+safety bound of 262,144 instructions. Other decodes keep the 500-instruction
+default. An explicit `--max-insns N` is honored exactly, and `unlimited` (or
+`--max-total unlimited`) means the safety bound, not a smaller cap.
+Cross-reference searches sweep every executable byte of the image.
 
 ## String evidence controls
 

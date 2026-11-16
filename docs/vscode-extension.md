@@ -1,8 +1,10 @@
 # RESX VS Code Extension
 
-The RESX VS Code extension provides a custom binary viewer for Windows PE images (`.exe`, `.dll`, and `.sys`), plus opt-in support for PE-formatted `.bin` samples, all backed by the bundled `resx.exe`.
+The RESX VS Code extension is a binary viewer and analysis workbench for Windows PE images (`.exe`, `.dll`, `.sys`, and opt-in PE-formatted `.bin` samples), backed by the bundled `resx.exe`.
 
-It is built for repeated reversing work: open a binary, inspect PE metadata, jump from exports/imports/symbols into disassembly, run targeted dumps, review startup flow, and scan folders without leaving VS Code.
+Open a binary to inspect PE metadata, exports, imports, symbols and types. Jump into disassembly with call maps, CFGs, C-like reconstruction, xrefs and callers. Run behavior triage, API contract evidence, driver and IOCTL recovery, strings, entropy, find and YARA on the same image. Diff images, hunt similar samples in a corpus, decode payloads and plan checked patches from the command palette.
+
+Every view is static analysis. Findings describe what the code can do, not what ran.
 
 ## Build and Package
 
@@ -15,51 +17,39 @@ npm run compile
 npm run package
 ```
 
-Install the generated `.vsix` through VS Code:
+Install the generated `.vsix` with **Extensions: Install from VSIX...**.
 
-```text
-Extensions: Install from VSIX...
-```
-
-For development type-checks without writing generated webview files:
+Tests compile the extension, run unit tests, then run every argument list the extension builds against a real analyzer:
 
 ```powershell
-npx tsc -p ./ --noEmit
-npx tsc -p ./tsconfig.webview.json --noEmit
-node --experimental-default-type=module ./test/run-tests.mjs
+npm test
 ```
+
+The analyzer test uses `RESX_EXE` (default: `..\target\release\resx.exe`, then the bundled binary) and `RESX_SAMPLE` (default: `..\quiet_target.exe`). It is skipped when neither is present.
 
 ## Bundled Analyzer
 
-The extension uses:
+The extension runs:
 
 ```text
 resx-vscode/bin/win32-x64/resx.exe
 ```
 
-The bundled binary is intentionally ignored by git. Its trust metadata is:
+The bundled binary is ignored by git. Its trust metadata is `resx-vscode/bin/trust.json`. At runtime the extension checks the binary against the pinned SHA-256. A binary signed by a trusted signer is accepted; an unsigned bundled binary is accepted only when its pinned hash matches.
 
-```text
-resx-vscode/bin/trust.json
-```
-
-At runtime the extension verifies the bundled binary against the pinned SHA-256 in `trust.json`. A signed binary matching the configured trusted signer is accepted, and an unsigned bundled binary is accepted only when its pinned hash matches.
-
-If you rebuild the bundled analyzer locally:
+The extension requires RESX 2.2 or later. To rebuild the bundled analyzer:
 
 ```powershell
 cargo build -p resx --release
 Copy-Item ..\target\release\resx.exe .\bin\win32-x64\resx.exe -Force
-Get-FileHash -Algorithm SHA256 .\bin\win32-x64\resx.exe
+(Get-FileHash -Algorithm SHA256 .\bin\win32-x64\resx.exe).Hash.ToLower()
 ```
 
-Then update `bin/trust.json` locally. The `bin/` folder is ignored, so packaging or release automation must include the intended binary.
+Put the hash in `bin/trust.json` under `bundledSha256["win32-x64/resx.exe"]`. Sign release binaries before packaging.
 
 ## Security Model
 
-By default the extension runs only the bundled analyzer.
-
-Custom analyzer overrides are disabled unless explicitly enabled:
+By default the extension runs only the bundled analyzer. Custom analyzers must be enabled in user settings:
 
 ```json
 {
@@ -68,230 +58,141 @@ Custom analyzer overrides are disabled unless explicitly enabled:
 }
 ```
 
-Use a custom executable only when you trust the binary. The extension performs trust checks before execution and does not permanently cache failed verification results.
+Workspace values for these two settings are ignored.
+
+The viewer webview never supplies command-line arguments. It requests a report by name, and the extension validates each parameter (numbers are clamped, enumerations checked, addresses and call-filter terms matched against fixed patterns) before building the argument list. Operands follow `--`, so a query or path beginning with `-` is never read as an option. Each command receives only the options it accepts.
+
+Payload decoding always writes to a new directory. Patching writes a separate copy after a dry-run plan and a confirmation dialog; the extension never patches in place.
 
 ## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `resx.executablePath` | `""` | Machine-scope path to a trusted `resx.exe` override. |
-| `resx.allowCustomExecutable` | `false` | Allows `resx.executablePath`. Disabled by default. |
-| `resx.loadSymbolsOnOpen` | `false` | Automatically load PDB symbols when opening a binary. |
-| `resx.symbolPaths` | `[]` | Extra symbol search paths passed as `--sym-path`. |
-| `resx.pdbFile` | `""` | Explicit PDB file passed as `--pdb`. |
+| `resx.allowCustomExecutable` | `false` | Allows `resx.executablePath`. |
+| `resx.loadSymbolsOnOpen` | `false` | Load PDB symbols and types when opening a binary. |
+| `resx.symbolPaths` | `[]` | Symbol search paths, joined with `;` into one `--sym-path`. |
+| `resx.symbolServer` | `""` | Symbol server URL passed as `--sym-server`. |
+| `resx.pdbFile` | `""` | Explicit PDB (`--pdb`) for the opened image only, not for modules reached by navigation. |
+| `resx.imagePaths` | `[]` | Image lookup directories (`--path`) for navigation into imported modules and the Locate/Dump pickers. |
+| `resx.apiArguments` | `false` | Recover API call arguments (`--args`) in dumps, behavior and evidence reports. Toggle per viewer. |
+| `resx.useSdkHeaders` | `true` | When off, passes `--no-headers`. |
+| `resx.hostile` | `false` | Start viewers in hostile mode (`--hostile`). Toggle per viewer. |
+| `resx.callDepth` | `1` | Default call-map depth (`--calls N`, 1-8). |
+| `resx.maxInstructions` | `500` | Per-function instruction budget (`--max-insns`); `0` is unlimited. |
+| `resx.scanMaxFiles` | `200` | Images inventoried by Scan Folder (`--max-files`). |
+| `resx.timeoutSeconds` | `120` | Seconds before a RESX process is stopped. |
 
-Symbol loading can be slow against large stores. Leave `resx.loadSymbolsOnOpen` disabled for fast opening, then use symbol-backed workflows when needed.
+Changing a setting updates open viewers. Per-viewer toggles (hostile, arguments, SSA, call depth, call filters) live in the viewer's **Options** panel.
+
+## Windows SDK Headers
+
+Recovered call arguments and API prototypes use a Windows SDK `Include` directory saved in RESX's own preferences. Run **RESX: Configure Windows SDK Headers**. It lists installed Windows Kits and runs `resx config --headers <dir>`; **Disable** runs `resx config --headers off`.
+
+Then enable **Recover arguments** in a viewer or set `resx.apiArguments`. Without headers, `--args` still recovers argument slots but cannot name parameters.
 
 ## Opening Binaries
 
-The extension opens these file types by default:
+`.exe`, `.dll` and `.sys` open in the viewer by default. For `.bin`, `.efi`, `.scr`, `.cpl`, `.ocx` and `.drv`, use **Open With... -> RESX Binary Viewer** or **RESX: Open Binary File** (also in the explorer context menu).
 
-```text
-*.exe
-*.dll
-*.sys
-```
-
-For PE samples stored as `.bin`, the extension exposes RESX as an explicit editor option:
-
-```text
-*.bin
-```
-
-Open `.exe`, `.dll`, or `.sys` files normally, or use:
-
-```text
-Open With... -> RESX Binary Viewer
-```
-
-For `.bin` PE samples, use either:
-
-```text
-Open With... -> RESX Binary Viewer
-RESX: Open Binary File
-```
-
-On load, the viewer runs the baseline analysis:
-
-```text
-peinfo
-eat
-iat
-intelli
-syms
-types
-```
-
-If `resx.loadSymbolsOnOpen` is false, symbol and type loading uses `--no-pdb` or an empty result where appropriate so the viewer stays responsive.
+On open the viewer runs `peinfo`, `eat`, `iat`, `pechk`, `intelli`, `syms` and `types`. Without `resx.loadSymbolsOnOpen`, these run with `--no-pdb` so opening stays fast. Use **Symbols** in the viewer to load PDBs on demand.
 
 ## Viewer Tabs
 
-| Tab | Data |
-| --- | --- |
-| Overview | PE summary, anomalies, runtime/toolchain hints, imports/exports counts. |
-| Entry | PE entry point, TLS callbacks, conservative startup evidence, expected main candidates. |
-| Triage | Intelli findings plus startup execution evidence. |
-| Sections | Section layout, entropy, protections, and expectation warnings. |
-| Exports | Export Address Table with jump-to-dump behaviour. |
-| Imports | Import Address Table with grouped DLL/API references. |
-| Symbols | Export/PDB symbol list and symbol navigation. |
-| Types | PDB-backed type browser and symbol references. |
-| Flow | On-demand `reconstruct-cfg` startup flow view. |
-| Scan | On-demand folder scan and fuzz target candidate view. |
-| Dump | Targeted disassembly/reconstruction results. |
-| Dev | RESX command trace history for debugging extension behaviour. |
-
-The active tab, selected dump state, sidebar widths, Flow tab, and Scan tab are persisted across viewer reloads.
-
-## Dump Workflows
-
-From inside the viewer, clicking an export, symbol, RVA link, call target, or xref opens a Dump view. Dump requests include:
-
-```text
-dump <target> --cfg text --funcs-depth <n> --strings --xrefs --recomp
-```
-
-`--funcs-depth` is the earlier spelling of `--calls <n>` (see [CLI earlier spellings](cli.md#earlier-spellings)). The extension keeps sending it so it still works with older bundled analyzers. Current RESX accepts both.
-
-The Dump view shows:
-
-- Disassembly.
-- Basic CFG output when available.
-- C-like reconstruction when available.
-- API call map and recursive function depth.
-- String references.
-- Incoming xrefs.
-- Type links where PDB type data is available.
-
-The viewer supports a hostile-mode toggle for dump requests. Hostile mode passes `--hostile`, which enables more aggressive tracing and suspicion annotations for hostile or obfuscated binaries.
-
-## Flow Tab
-
-The Flow tab runs:
-
-```text
-resx reconstruct-cfg <image>
-```
-
-It renders:
-
-- Startup roots.
-- Entry/TLS flow.
-- Direct and import call edges.
-- Thread and workpool callback edges where statically resolvable.
-- x64 unwind/exception-handler edges where present.
-- Function discovery and PDB status.
-- Raw JSON access for deeper review.
-
-The command runs on demand the first time the Flow tab is selected. Use the Re-run button to refresh the flow without reopening the editor.
-
-## Scan Tab
-
-The Scan tab can scan:
-
-- The current binary's folder.
-- A selected folder through Browse.
-
-It runs:
-
-```text
-resx scan <folder>
-```
-
-The tab summarises discovered images, anomaly signals, and ranked fuzz target candidates. It is intended for triage and prioritisation, not proof of exploitability.
-
-## Command Palette Commands
-
-| Command | ID | Behaviour |
+| Tab | RESX command | Content |
 | --- | --- | --- |
-| Open Binary File | `resx.openBinaryFile` | Opens a selected PE image in the RESX viewer, including `.bin` samples. |
-| Refresh Binary Analysis | `resx.refreshBinary` | Re-runs analysis in the active RESX binary viewer. |
-| Locate | `resx.locate` | Searches export-backed priority modules, then opens the selected result. |
-| Locate Symbol | `resx.locateSymbol` | Searches exports and PDB symbols, then opens the selected result. |
-| Dump | `resx.dump` | Lets you pick a module and target, then opens the binary viewer at that target. |
-| Reconstruct CFG | `resx.reconstructCfg` | Runs `reconstruct-cfg` for a selected image and opens JSON output. |
-| Scan Folder | `resx.scan` | Runs `scan` for a selected folder and opens JSON output. |
+| Overview | `peinfo` | PE identity, toolchain, mitigations, debug and signer metadata, anomalies. |
+| Entry | `peinfo` | Entry point, TLS callbacks, startup evidence and main candidates. |
+| Triage | `intelli`, `pechk` | Heuristic findings, startup execution evidence and PE validation findings. |
+| Behavior | `behavior` | Findings grouped by category and severity with evidence and sites; how APIs are resolved at run time; dynamically resolved APIs and their call sites. |
+| Sections | `peinfo` | Section layout, entropy and protection expectations. |
+| Exports / Imports | `eat`, `iat` | Export and import tables with navigation into disassembly. |
+| Symbols / Types | `syms`, `types` | PDB symbols and type browser. |
+| Strings | `strings` | ASCII and UTF-16LE strings with minimum length, limit, encoding, text, tag and "interesting" filters. |
+| Evidence | `contracts`, `ipc`, `network`, `crypto` | API call contracts with reconstructed calls, IPC channels, network requests, crypto configurations and string indicators. |
+| Driver | `driver` | Shown for drivers: dispatch routines, IOCTL codes (device type, function, method, access, handler), dispatch candidates, capabilities, device, registry and callback APIs, virtualization evidence. |
+| Entropy | `entropy` | Window entropy chart over sections; click to disassemble at a window. Window, stride and all-sections controls. |
+| Search | `find`, `yara`, `diff`, `api` | Byte, text, constant and instruction search; YARA rules; compare with another image; SDK prototype lookup. |
+| Flow | `reconstruct-cfg` | Startup roots, call, import, thread, workpool and exception edges. |
+| Scan | `scan` | Folder inventory with risk imports and fuzz-target candidates. |
+| Dump | `dump`, `callers` | Disassembly and sub-tabs (see below). |
+| Dev | - | Every RESX invocation with arguments, duration, errors and stderr. |
 
-## Locate and Dump Picker
+Report tabs run the first time they are opened and offer **Re-run**, **Cancel** and **Open JSON**. Tables sort by column and filter by regular expression. Addresses open disassembly.
 
-The command palette uses a module cache seeded with common Windows DLLs:
+## Dump View
+
+Clicking an export, import, symbol, address, call target, xref or finding opens a dump:
 
 ```text
-ntdll.dll
-kernel32.dll
-kernelbase.dll
-advapi32.dll
-user32.dll
-gdi32.dll
-ws2_32.dll
-ole32.dll
-combase.dll
-rpcrt4.dll
-crypt32.dll
-bcrypt.dll
-secur32.dll
-shell32.dll
-shlwapi.dll
-wininet.dll
-winhttp.dll
-netapi32.dll
-iphlpapi.dll
+resx dump <image> <target> --bytes --cfg text --strings --xrefs --recomp --calls <depth> [--args] [--hostile] [--ssa] [--calls-only ...] [--calls-exclude ...]
 ```
 
-It resolves modules through RESX, then uses EAT and symbol data to populate target pickers.
+| Sub-tab | Content |
+| --- | --- |
+| Disasm | Annotated listing with branch arrows, syscall labels, type links and search. |
+| API Calls | Call map to the selected depth. Dynamically resolved calls show how they were resolved; with arguments enabled, each call shows its recovered SDK call. |
+| Xrefs | Incoming references. |
+| Callers | Reverse caller tree (`resx callers`) across the image lookup order. Available for named functions (exports, PDB symbols, imports). |
+| Strings, CFG, Recomp, Hex | String references, graph, C-like reconstruction and opcode bytes. |
 
-## Refresh Behaviour
+The header shows the inferred or PDB prototype, overlapping-decode and dynamic-API counts, and buttons for **Callers**, **Open Recomp**, **Open JSON**, and following import slots or syscalls into their implementing module. Forwarded exports are followed automatically. Back and forward history is kept per viewer.
 
-`RESX: Refresh Binary Analysis` posts a refresh request to the active viewer. The viewer clears current analysis panels, clears caches, resets on-demand Flow/Scan state, and reruns the baseline analysis commands.
+## Commands
 
-If no RESX viewer is active, the command shows an information message instead of reverting the editor.
+| Command | Behaviour |
+| --- | --- |
+| Open Binary File | Opens an image in the viewer. |
+| Refresh Binary Analysis | Re-runs the active viewer's analysis (also in the editor title bar). |
+| Locate Export / Locate Symbol | Searches exports, or exports and PDB symbols, then opens the result. |
+| Dump Function | Picks a system or workspace module and an export, symbol or RVA. |
+| Behavior Triage, API Contract Evidence, Strings, Entropy, Driver and IOCTL Analysis, Find YARA and Compare, Reconstruct Startup Flow | Opens the corresponding viewer tab for the active viewer or a chosen image. |
+| Compare Images (Diff) | Diffs two or more images (explorer multi-select works) with a matching profile; renders matches, changed regions, hotspots, section entropy and metadata differences. Function links open either image at the function. |
+| Scan Folder | Corpus inventory in a report panel. |
+| Index Folder as Corpus / Find Similar Images in Corpus | `index` a folder into a corpus database, and `hunt` ranks indexed images against a sample. |
+| Decode Payload | Applies a codec (auto, zlib, gzip, deflate, base64, hex, AES-CBC with key file and IV) to a file or byte range and writes each layer to a new directory, with hashes. |
+| Patch Image Bytes | Plans a patch with an optional expected-bytes check and checksum update, shows the plan, and writes a separate patched copy after confirmation. |
+| Look Up Windows API Prototype | `resx api` declaration, parameters and SAL directions. |
+| Configure Windows SDK Headers | Saves or disables the SDK include directory. |
+| Show Analyzer Version | Shows the analyzer version and path. |
+
+The explorer context menu offers Open, Behavior Triage, Driver (for `.sys`), Compare (multi-select), Find Similar, Patch, Decode Payload, Scan Folder and Index Folder.
 
 ## Generated Webview Files
 
-Source lives in:
+Webview source is in `resx-vscode/media-src/` and compiles to `resx-vscode/media/`. The generated files are committed; run `npm run compile` after editing webview sources.
 
-```text
-resx-vscode/media-src/
-```
+| Source | Role |
+| --- | --- |
+| `src/cli.ts` | Command catalog and option groups (mirrors `resx/src/cli/args.rs`), argument building and JSON envelope handling. |
+| `src/reports.ts` | Validated plans for viewer report requests. |
+| `src/editor.ts` | Binary viewer provider. |
+| `src/reportPanel.ts` | Standalone report panel for diff, hunt, index, scan, payload, patch and API lookups. |
+| `media-src/main.ts` | Viewer webview. |
+| `media-src/reports.ts` | Report renderers shared by the viewer and the report panel. |
 
-Generated browser JavaScript lives in:
-
-```text
-resx-vscode/media/
-```
-
-When editing webview TypeScript, update both generated files through `npm run compile` before packaging. If a sandbox blocks writes to `media/*.js`, run:
-
-```powershell
-npx tsc -p ./tsconfig.webview.json --noEmit
-```
-
-Then compile outside the sandbox before release.
+When RESX adds an option group or command, update `src/cli.ts` and the integration cases in `test/run-tests.mjs`.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| Viewer says analyzer is not trusted | Verify the bundled binary hash in `bin/trust.json`, or enable and configure a trusted custom executable. |
-| PDB data is missing | Set `resx.symbolPaths`, `resx.pdbFile`, or enable `resx.loadSymbolsOnOpen`. |
-| Opening is slow | Disable `resx.loadSymbolsOnOpen` and load symbols only when needed. |
-| Flow tab is empty | Re-run Flow and check Dev tab command traces. |
-| Scan tab scans the wrong folder | Use Browse in the Scan tab or the `RESX: Scan Folder` command. |
-| `npm run compile` fails with `EPERM` | Check file permissions and sandbox restrictions around `resx-vscode/media/*.js`. |
+| Analyzer is not trusted | Verify the bundled binary hash in `bin/trust.json`, or enable and configure a trusted custom executable. |
+| `unexpected argument` errors in the Dev tab | The analyzer is older than the extension expects; rebuild the bundled analyzer. |
+| PDB data is missing | Set `resx.symbolPaths`, `resx.symbolServer` or `resx.pdbFile`, or use the viewer's Symbols panel. |
+| Arguments show as unknown | Configure SDK headers and enable Recover arguments; unrecoverable values stay `?` by design. |
+| Callers is unavailable | Callers needs a named function; load PDB symbols to name internal functions, or use Xrefs. |
+| Reports time out on large images | Raise `resx.timeoutSeconds` or lower `resx.maxInstructions`. |
+| Driver tab missing | It appears for native-subsystem images and `.sys` files; run **RESX: Driver and IOCTL Analysis** to force it. |
 
 ## Release Checklist
 
 ```powershell
 cd resx-vscode
 npm install
-npm run compile
-node --experimental-default-type=module ./test/run-tests.mjs
+npm test
 npm run package
-```
-
-Also verify the bundled analyzer:
-
-```powershell
 .\bin\win32-x64\resx.exe --version
 Get-FileHash -Algorithm SHA256 .\bin\win32-x64\resx.exe
+Get-AuthenticodeSignature .\bin\win32-x64\resx.exe
 ```

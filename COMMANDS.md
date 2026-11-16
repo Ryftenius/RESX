@@ -38,6 +38,11 @@ Targets accept export/symbol names, `rva:0x...`, `va:0x...`,
 disassembly and `--verbose` for image and function-boundary details. `--calls`,
 `--xrefs`, `--strings`, `--cfg text` and `--recomp` add report sections.
 
+`--telemetry` on `calls`, `dump`, `xrefs`, `cfg` and `intelli` reports the
+telemetry a call can reach (kernel notify callbacks, ETW and ETW-TI providers,
+auditing, driver stacks, change notifications, WMI, WFP and AMSI), who can
+consume it, and the path to it. See [Telemetry reachability](docs/cli.md#telemetry-reachability).
+
 ## Evidence
 
 | Command | Purpose |

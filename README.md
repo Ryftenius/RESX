@@ -14,8 +14,380 @@ API calls through a large function tree, or even reverse-engineering a kernel dr
 of information that is aware of what API's do and which can be for what (eg; malware), driver-constructs,
 hypervisor-capabilities, and some shortcomings of mainstream disassembly tools.
 
+## Showcase & Examples
+
+Every example below is real RESX output. The tested examples are reproducible end to end; the rest show everyday workflows. Click any title to expand it.
+
+<table>
+<tr><th colspan="2">Tested Example 2 at a glance: a syscall stub built to break disassemblers</th></tr>
+<tr><th>IDA Pro 9.0 + Hex-Rays</th><th>RESX 2.2.1</th></tr>
+<tr>
+<td valign="top">
+
+```text
+jz   short near ptr loc_F4C5+2
+jmp  short $+2
+mov  r11, 9F08EB0000000FE8h
+       ; F4C7: Can't disassemble
+mov  eax, 0C0000022h
+...
+db 8Bh, 0C1h, 48h, ...  ; stub = data
+
+void sub_14000F460()
+{
+  JUMPOUT(0x14000F4C7LL);
+}
+```
+
+</td>
+<td valign="top">
+
+```text
+je   short 0x14000f4c7
+jmp  short 0x14000f4c5
+mov  r11, 0x9f08eb0000000fe8
+call 0x14000f4db   ; hidden call
+jmp  short 0x14000f4d6
+mov  eax, 0xc0000022  ; decoy
+...
+Overlapping decode streams: 10
+  nop/mov/lea/cmp/imul carriers
+  each with its hidden jmp
+
+└── 0xF4C7  CALL  sub_0000F4DB
+```
+
+</td>
+</tr>
+</table>
+
+| | Tested example | What RESX shows |
+| --- | --- | --- |
+| **1** | [Encoded APIs & manual resolution](#tested-example-1) | Seven XOR-hidden APIs, the key, the PEB and export-table walk, and every indirect call site |
+| **2** | [Overlapping instruction seams vs IDA Pro](#tested-example-2) | The call IDA cannot decode, the syscall stub IDA leaves as data, and all six seams |
+| **3** | [API hashing vs IDA Pro & Ghidra](#tested-example-3) | The hash algorithm, all six hidden API names, and every indirect call made through them |
+| **4** | [Learning an API for implant & exploit development](#tested-example-4) | `WriteProcessMemory` from SDK prototype to its hidden reprotection, syscall number, kernel access check and EDR telemetry |
+
+<a id="tested-example-1"></a>
 <details>
-<summary><h2 style="display: inline;">Showcase &amp; Examples</h2></summary>
+<summary><h3 style="display: inline;">Tested Example 1: Encoded APIs &amp; Manual Resolution</h3></summary>
+
+Let's say I want to analyze a binary that hides its Windows API names with XOR and resolves them by walking the PEB loader list and the module's export table. The checked-in [C sample](resx/tests/data/manual_resolver.c) allocates a page, writes an inert byte, changes the page protection, releases it, and attempts a protected-directory listing. Its [compiled EXE](resx/tests/data/manual_resolver.exe) has no PDB, and none of the seven APIs below appear in its import table.
+
+```powershell
+> resx behavior .\resx\tests\data\manual_resolver.exe --no-pdb --no-headers
+Dynamic API resolution: PEB loader-list walk; manual export-table walk
+[HIGH] api-resolution export-table-walk (high @ 0x0000138C)
+[HIGH] api-resolution peb-module-walk (high @ 0x00001179)
+
+Dynamically resolved APIs (7):
+  0x0000155C  kernelbase!VirtualAlloc  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x00001578  kernelbase!VirtualProtect  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 2 call sites]
+  0x00001594  kernelbase!VirtualFree  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 3 call sites]
+  0x000015B0  kernelbase!FindFirstFileW  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x000015CC  kernelbase!FindNextFileW  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x000015E8  kernelbase!FindClose  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+  0x00001604  kernelbase!GetLastError  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
+```
+
+The `calls` view connects those resolutions to the indirect calls in the sample:
+
+```powershell
+> resx calls .\resx\tests\data\manual_resolver.exe rentry --depth 8 --only dynamic --no-pdb --no-headers
+      ├── 0x155C  CALL  sub_00001240
+      │   resolves: kernelbase!VirtualAlloc (export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal)
+      ├── 0x1678  CALL  kernelbase!VirtualAlloc [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
+      ├── 0x16BA  CALL  kernelbase!VirtualProtect [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
+      └── 0x17C8  CALL  kernelbase!FindClose [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
+```
+
+With one small sample, RESX recovers the API names, the XOR key, the manual resolution path, and the actual indirect call sites without debug symbols. The executable page contains only `RET` and is never executed; the directory attempt returned `ACCESS_DENIED` in this test.
+
+</details>
+
+<a id="tested-example-2"></a>
+<details>
+<summary><h3 style="display: inline;">Tested Example 2: Overlapping Instruction Seams vs IDA Pro</h3></summary>
+
+Let's say I'm reversing an advanced sample that never calls `ntdll`. It carries its own syscall stub, and the stub is built to break disassemblers. It uses *overlapping instruction seams*: an always-taken `jz` lands two or three bytes inside a longer "carrier" instruction, so the same bytes decode as two different instruction streams. One of those streams is the code that actually runs. The other is a decoy that ends in a fake failure path. The sample has no PDB, and every name below was assigned by the tools.
+
+IDA Pro 9.0 follows the decoy. In `sub_14000F460`, the `jz` at `0xF4C1` targets `0xF4C7`, which is the middle of a 10-byte `mov r11, imm64`. IDA marks `0xF4C7` as *Can't disassemble* and never decodes the `call` hidden there. In IDA's listing the function always returns `0xC0000022` (`STATUS_ACCESS_DENIED`), and Hex-Rays gives up:
+
+```text
+; IDA 9.0, auto-analysis
+.text:000000014000F4C1    jz      short near ptr loc_14000F4C5+2
+.text:000000014000F4C3    jmp     short $+2
+.text:000000014000F4C5    mov     r11, 9F08EB0000000FE8h     ; F4C7 "Can't disassemble"
+.text:000000014000F4CF    mov     eax, 0C0000022h
+.text:000000014000F4D4    jmp     short $+2
+.text:000000014000F4D6    add     rsp, 68h
+.text:000000014000F4DA    retn
+.text:000000014000F4DB    db 8Bh, 0C1h, 48h, 8Bh, 0CAh  ; the real stub, left as data
+.text:000000014000F4E0    dq 8B4CC18B4DD08B49h, ...
+
+; Hex-Rays 9.0
+void sub_14000F460()
+{
+  JUMPOUT(0x14000F4C7LL);
+}
+```
+
+Because the hidden `call` is never decoded, nothing in IDA reaches `0xF4DB`. The routine that performs the syscall is never disassembled and stays as raw `db`/`dq` bytes.
+
+`resx dump` decodes both streams and keeps them side by side. The carrier at `0xF4C5` and the overlapping `call` at `0xF4C7` are both in the listing, and the call map follows the hidden edge into the stub:
+
+```powershell
+> resx dump .\sample.exe --at 0xF460 --bytes --calls --no-pdb
+  0000f4be  45 85 db                       test       r11d, r11d
+  0000f4c1  74 04                          je         short 0x14000f4c7  ; → loc_0000f4c7
+  0000f4c3  eb 00                          jmp        short 0x14000f4c5  ; → loc_0000f4c5
+  0000f4c5  49 bb e8 0f 00 00 00 eb 08 9f  mov        r11, 0x9f08eb0000000fe8
+  0000f4c7  e8 0f 00 00 00                 call       0x14000f4db  ; → loc_0000f4db
+  0000f4cc  eb 08                          jmp        short 0x14000f4d6  ; → loc_0000f4d6
+  0000f4cf  b8 22 00 00 c0                 mov        eax, 0xc0000022  ; possible NTSTATUS: STATUS_ACCESS_DENIED
+  0000f4d4  eb 00                          jmp        short 0x14000f4d6  ; → loc_0000f4d6
+  0000f4d6  48 83 c4 68                    add        rsp, 0x68
+  0000f4da  c3                             ret
+
+API Call Map for fn_0x0000F460  [1 call site(s)]:
+  └── 0xF4C7  CALL  sub_0000F4DB
+```
+
+The stub at `0xF4DB` moves the service number into `eax`, shifts the arguments into the native syscall ABI, and then passes through five more seams. Each one is keyed on a bit of the service number, and the carriers are `nop`, `mov`, `lea`, `cmp` and `imul`, with immediates that differ between builds. A linear decode yields junk such as `nop dword ptr [rax+rax-7844FD15h]` and `imul r11d, 0B3402EBh`, and hides every real `jmp`. With `--verbose`, RESX reports each seam it resolved, naming the carrier and the alternate `jmp` inside it, and lays the real jump directly under its carrier:
+
+```powershell
+> resx dump .\sample.exe --at 0xF4DB --bytes --verbose --no-pdb
+  Overlapping decode streams: 10 finding(s), 10 shown
+  [INFO] branch-into-instruction: stream 0x0000f533 enters 0x0000f53b inside stream instruction 0x0000f537
+    0F 1F 84 00 EB 02 BB 87 | nop dword ptr [rax+rax-0x7844fd15] | alternate: jmp short 000000014000F53Fh
+  [INFO] branch-into-instruction: stream 0x0000f541 enters 0x0000f547 inside stream instruction 0x0000f545
+    49 BB EB 06 4F 96 D2 16 7C 1D | mov r11, 0x1d7c16d2964f06eb | alternate: jmp short 000000014000F54Fh
+  ...
+  0000f4db  8b c1                          mov        eax, ecx
+  0000f4dd  48 8b ca                       mov        rcx, rdx
+  ...
+  0000f569  a8 80                          test       al, 0x80
+  0000f56b  74 05                          je         short 0x14000f572  ; ... alternate stream 0x0000f572 overlaps instruction at 0x0000f56f
+  0000f56d  eb 00                          jmp        short 0x14000f56f
+  0000f56f  45 69 db eb 02 34 0b           imul       r11d, 0xb3402eb
+  0000f572  eb 02                          jmp        short 0x14000f576  ; ... alternate stream 0x0000f572 overlaps instruction at 0x0000f56f
+  0000f576  4c 8b d1                       mov        r10, rcx
+  0000f579  0f 04 c3                       (bad)
+```
+
+The stub ends with a second trick. Where `syscall` (`0F 05`) belongs, the file stores `0F 04`, which is not a valid instruction, and the sample patches that byte at run time. Neither tool can decode an instruction that is not on disk: RESX reports the bytes as `(bad)`, and IDA leaves them as data. The `mov r10, rcx` immediately before it, with the service number in `eax`, is the standard x64 syscall setup, and it points straight at the patched opcode. RESX recovers the full static route from the outer function, through every seam, to that point. IDA's listing and decompiler output lose it at the first seam.
+
+Tested with RESX 2.2.1 and IDA Pro 9.0 (Hex-Rays 9.0.0.240807), both without symbols. Seam recovery is part of `dump`'s per-function multi-stream decoding; the image-wide `xrefs` and `callers` scans do not yet follow calls hidden inside a seam.
+
+</details>
+
+<a id="tested-example-3"></a>
+<details>
+<summary><h3 style="display: inline;">Tested Example 3: API Hashing vs IDA Pro &amp; Ghidra</h3></summary>
+
+Let's say I'm triaging a loader that hides every API it uses behind a hash. This is the shellcode staple: walk the PEB to find a module, walk its export table, and hash each export name until one matches a constant baked into the binary. No API name appears in the image, not even as an encoded string, so there is nothing to decode. The only way to name these calls is to know the hash construction and invert it.
+
+The checked-in [C sample](resx/tests/data/hash_resolver.c) uses ROR13 over the uppercase UTF-16 module name and the ASCII export name. It resolves `LoadLibraryA` by hash, uses it to load a library whose name is built on the stack, and then resolves a function from that library by hash too. It runs recon calls that only report string lengths, and touches an inert executable page that is never run. The [compiled EXE](resx/tests/data/hash_resolver.exe) has no PDB.
+
+IDA Pro 9.0 shows each resolution as an anonymous function pointer filled from a decimal constant. Hex-Rays does rebuild the stack string, but none of the six APIs is ever named, so every later call is `v1(...)`, `v2(...)` and so on:
+
+```c
+// IDA Pro 9.0, Hex-Rays
+v0 = sub_1400010D0(1783282779LL);
+v1 = (void (__fastcall *)(_QWORD *))sub_140001010(v0, 3960360590LL);
+v2 = (__int64 (__fastcall *)(_QWORD, __int64, __int64, __int64, _QWORD, _DWORD))sub_140001010(v0, 2444216916LL);
+v3 = (unsigned int (__fastcall *)(_BYTE *, __int64, __int64, char *))sub_140001010(v0, 2034681371LL);
+v4 = (unsigned int (__fastcall *)(_BYTE *, _QWORD, __int64))sub_140001010(v0, 50738092LL);
+v5 = sub_140001010(v0, 2527339173LL);
+strcpy((char *)v16, "advapi32");
+...
+v13 = (_BYTE *)v2(0LL, 4096LL, 12288LL, 4LL, v16[0], v16[1]);
+```
+
+Ghidra 11.2.1 prints the hashes in hex but otherwise does less. The stack string stays as two integers, and the resolved pointers are untyped `code *`. Because Ghidra doesn't know the pointer at `pcVar7` is `GetComputerNameW`, it drops the size argument and folds the returned length to its initial value, `0x100`:
+
+```c
+// Ghidra 11.2.1
+pcVar3 = (code *)FUN_140001010(psVar2,0xec0e4e8e);
+pcVar4 = (code *)FUN_140001010(psVar2,0x91afca54);
+...
+local_238 = 0x61766461;
+local_234 = 0x32336970;
+...
+iVar1 = (*pcVar7)(local_228);
+uVar9 = 0;
+if (iVar1 != 0) {
+  uVar9 = 0x100;
+}
+```
+
+Both tools need a hash-database plugin and some manual retyping to get further. RESX inverts the hashes itself. It reads the rotate count from the resolver's code, tries the matching constructions against the local system's export names, and names all six APIs, including `GetUserNameW` from the library that was loaded at run time:
+
+```powershell
+> resx behavior .\resx\tests\data\hash_resolver.exe --no-pdb --no-headers
+Dynamic API resolution: PEB loader-list walk; API hashing (ror13-add); manual export-table walk; loader API by name
+[HIGH] api-resolution api-hashing (high @ 0x000011F8)
+  APIs or modules are looked up by hash (ror13-add)
+...
+Dynamically resolved APIs (7):
+  0x000011F8  ?!LoadLibraryA  [export-table walk sub_00001010 · ror13-add hash 0xEC0E4E8E, 1 call site]
+  0x00001208  ?!VirtualAlloc  [export-table walk sub_00001010 · ror13-add hash 0x91AFCA54, 1 call site]
+  0x00001218  ?!VirtualProtect  [export-table walk sub_00001010 · ror13-add hash 0x7946C61B, 1 call site]
+  0x00001228  ?!VirtualFree  [export-table walk sub_00001010 · ror13-add hash 0x30633AC, 2 call sites]
+  0x00001238  ?!GetComputerNameW  [export-table walk sub_00001010 · ror13-add hash 0x96A422A5, 1 call site]
+  0x0000129B  ?!GetUserNameW  [export-table walk sub_00001010 · ror13-add hash 0x5C52AA4A, 1 call site]
+  0x0000798B  mscoree!CorExitProcess  [GetProcAddress]
+```
+
+The call map then follows each resolved pointer to the indirect calls that use it, so `call r14` reads as `VirtualAlloc`:
+
+```powershell
+> resx calls .\resx\tests\data\hash_resolver.exe 0x11D0 --depth 2 --only dynamic --no-pdb --no-headers
+  ├── 0x1238  CALL  sub_00001010
+  │   resolves: ?!GetComputerNameW (export-table walk sub_00001010 · ror13-add hash 0x96A422A5)
+  ├── 0x1287  CALL  !LoadLibraryA [dynamic · export-table walk sub_00001010 · ror13-add hash 0xEC0E4E8E]
+  ├── 0x129B  CALL  sub_00001010
+  │   resolves: ?!GetUserNameW (export-table walk sub_00001010 · ror13-add hash 0x5C52AA4A)
+  ├── 0x12C4  CALL  !GetComputerNameW [dynamic · export-table walk sub_00001010 · ror13-add hash 0x96A422A5]
+  ├── 0x12F7  CALL  !GetUserNameW [dynamic · export-table walk sub_00001010 · ror13-add hash 0x5C52AA4A]
+  ├── 0x1324  CALL  !VirtualAlloc [dynamic · export-table walk sub_00001010 · ror13-add hash 0x91AFCA54]
+  ├── 0x134F  CALL  !VirtualProtect [dynamic · export-table walk sub_00001010 · ror13-add hash 0x7946C61B]
+  ├── 0x1360  CALL  !VirtualFree [dynamic · export-table walk sub_00001010 · ror13-add hash 0x30633AC]
+  └── 0x1369  CALL  !VirtualFree [dynamic · export-table walk sub_00001010 · ror13-add hash 0x30633AC]
+```
+
+Without symbols or plugins, RESX recovers the hash algorithm, every hidden API name, the resolver that produced each pointer, and every call made through it. The module hashes are not inverted yet, so modules print as `?`. `CorExitProcess` is the C runtime's own `GetProcAddress` lookup, not part of the sample's logic. The sample printed the two name lengths and released its inert page in this test.
+
+Tested with RESX 2.2.1, IDA Pro 9.0 (Hex-Rays 9.0.0.240807) and Ghidra 11.2.1, each with default auto-analysis.
+
+</details>
+
+<a id="tested-example-4"></a>
+<details>
+<summary><h3 style="display: inline;">Tested Example 4: Learning an API for Implant &amp; Exploit Development</h3></summary>
+
+Now let's look at it from the other side. Say I'm writing an implant or an exploit and need to write into another process. Before I use `WriteProcessMemory`, I want to know exactly what it takes, where it really lives, what it does under the hood, and what the kernel does with it, without opening a disassembler or a debugger.
+
+First, the contract. `resx api` reads it straight from the Windows SDK headers, SAL annotations included. Note the `nSize` annotation tying `lpBuffer` to its length:
+
+```powershell
+> resx api WriteProcessMemory
+BOOL WriteProcessMemory(
+    _In_ HANDLE hProcess,
+    _In_ LPVOID lpBaseAddress,
+    _In_ LPCVOID lpBuffer  /* nSize */,
+    _In_ SIZE_T nSize,
+    _Out_opt_ SIZE_T* lpNumberOfBytesWritten
+);
+```
+
+Next, where it lives. The `kernel32` export is only a forwarding stub, and the implementation is in `KernelBase`:
+
+```powershell
+> resx locate WriteProcessMemory
+  C:\WINDOWS\System32\KernelBase.dll  KernelBase.dll!WriteProcessMemory  ord:1990  RVA:0x0008E1B0
+  C:\WINDOWS\System32\kernel32.dll  kernel32.dll!WriteProcessMemory  ord:1648  RVA:0x00040A60  → api-ms-win-core-memory-l1-1-0.dll!WriteProcessMemory  [stub]
+  C:\WINDOWS\SysWOW64\KernelBase.dll  KernelBase.dll!WriteProcessMemory  ord:1996  RVA:0x0024CC10
+  C:\WINDOWS\SysWOW64\kernel32.dll  kernel32.dll!WriteProcessMemory  ord:1632  RVA:0x00033C80
+```
+
+Now the interesting part: what it actually calls. Filtering the call map to syscalls shows `WriteProcessMemory` is not a thin wrapper around `NtWriteVirtualMemory`. It can make two `NtProtectVirtualMemory` calls in the *target* process, and each native call is followed into the kernel routine that services it:
+
+```powershell
+> resx calls KernelBase.dll WriteProcessMemory --depth 1 --only syscall --rva
+API Call Map for WriteProcessMemory  [6 of 18 call site(s) · filter: syscall]:
+  ├── RVA 0x0008E24D  CALL  ntdll!NtQueryVirtualMemory
+  │   kernel: ntoskrnl!NtQueryVirtualMemory
+  ├── RVA 0x0008E287  CALL  ntdll!NtWriteVirtualMemory
+  │   kernel: ntoskrnl!NtWriteVirtualMemory
+  ├── RVA 0x0008E32E  CALL  ntdll!NtProtectVirtualMemory
+  │   kernel: ntoskrnl!NtProtectVirtualMemory
+  ├── RVA 0x0008E3EF  CALL  ntdll!NtProtectVirtualMemory
+  │   kernel: ntoskrnl!NtProtectVirtualMemory
+  ├── RVA 0x0008E4FA  CALL  ntdll!NtUnmapViewOfSection
+  │   kernel: ntoskrnl!NtUnmapViewOfSection
+  └── RVA 0x0008E50A  CALL  ntdll!NtClose
+      kernel: ntoskrnl!NtClose
+```
+
+`resx dump KernelBase.dll WriteProcessMemory` shows why. It queries the target page and tests its protection against `0xCC`, which covers every writable protection. This excerpt has my comments added on the right:
+
+```powershell
+  0008e24d  call       qword ptr [_imp_NtQueryVirtualMemory]
+  0008e25f  mov        r14d, dword ptr [rbp+0xb]          ; MEMORY_BASIC_INFORMATION.Protect
+  0008e263  test       r14b, 0xcc                         ; already writable?
+  0008e267  je         0x18008e372                        ; no: try to make it writable
+  0008e287  call       qword ptr [_imp_NtWriteVirtualMemory]
+  ...
+  0008e372  test       r14b, 0x30                         ; executable?
+  0008e376  je         0x18008e491                        ; no: fail with STATUS_ACCESS_VIOLATION
+  0008e37c  cmp        dword ptr [rbp+0xf], 0x1000000     ; MEM_IMAGE?
+  0008e389  mov        eax, 0x60000080                    ; + PAGE_EXECUTE_WRITECOPY
+  0008e3ef  call       qword ptr [_imp_NtProtectVirtualMemory]
+  0008e40c  mov        r15b, 1                            ; remember to restore
+  0008e40f  jmp        0x18008e26d                        ; back to the write
+  ...
+  0008e420  cmp        dword ptr [rbp+0xf], 0x20000       ; MEM_MAPPED?
+  0008e429  mov        eax, 0x60000040                    ; + PAGE_EXECUTE_READWRITE
+```
+
+If the page is already writable, it writes. If it is executable image or mapped memory, it reprotects the page range in the target process, writes, then restores the original protection with the second `NtProtectVirtualMemory`. Any other read-only page fails with `ERROR_NOACCESS`. That is why `WriteProcessMemory` can patch code in a remote process when the documentation never mentions changing protection.
+
+Down at the boundary, the `ntdll` stub gives the service number:
+
+```powershell
+> resx dump ntdll.dll NtWriteVirtualMemory
+  00166b10  mov        r10, rcx
+  00166b13  mov        eax, 0x3a  ; syscall 0x3A (58)
+  00166b18  test       byte ptr [0x7ffe0308], 1  ; KUSER_SHARED_DATA.SystemCall
+  00166b20  jne        short 0x180166b25  ; → loc_00166b25
+  00166b22  syscall
+  00166b24  ret
+```
+
+And in the kernel, the write is validated, performed and reported:
+
+```powershell
+> resx calls ntoskrnl.exe NtWriteVirtualMemory --depth 2 --rva
+API Call Map for NtWriteVirtualMemory  [1 call site(s)]:
+  └── RVA 0x009C4C0B  CALL  MiReadWriteVirtualMemory
+      ├── RVA 0x009C4DAB  CALL  ObpReferenceObjectByHandleWithTag
+      ├── RVA 0x009C4E1B  CALL  MiCopyVirtualMemory
+      ├── RVA 0x009C4E37  CALL  PsIsProcessLoggingEnabled
+      ├── RVA 0x009C4E48  CALL  ObfDereferenceObjectWithTag
+      └── RVA 0x009C4EBB  CALL  EtwTiLogReadWriteVm
+```
+
+`NtWriteVirtualMemory` passes `0x20` (`PROCESS_VM_WRITE`) as the access `ObpReferenceObjectByHandleWithTag` requires of the handle. After the copy, it can report the operation through `EtwTiLogReadWriteVm`, part of the Threat-Intelligence ETW provider that EDRs subscribe to. The same trace on `NtProtectVirtualMemory` shows a direct call to `EtwTiLogProtectExecVm`. So a `WriteProcessMemory` into executable image memory can produce a protection-change event as well as the write event.
+
+The new `--telemetry` flag follows those paths across the syscall boundary. The default report shows each relevant source's event, consumers, and call path; incidental paths remain available with `--verbose`. Excerpt:
+
+```powershell
+> resx calls KernelBase.dll WriteProcessMemory --depth 1 --only syscall --rva --telemetry
+Telemetry: WriteProcessMemory
+  6 candidates (2 direct, 4 conditional) · 17 incidental hidden
+  2411 functions searched · depth ≤10
+  ETW Threat-Intelligence (2)
+    ● ntoskrnl!EtwTiLogProtectExecVm  [kernel · depth 2 · direct]
+      fires    : Microsoft-Windows-Threat-Intelligence event
+      consumers: consumers running as antimalware protected processes (EDR); cannot be patched from user mode
+      path     : KernelBase!WriteProcessMemory ⇒ ntoskrnl!NtProtectVirtualMemory → EtwTiLogProtectExecVm
+    ● ntoskrnl!EtwTiLogReadWriteVm  [kernel · depth 3 · direct]
+      fires    : Microsoft-Windows-Threat-Intelligence event
+      consumers: consumers running as antimalware protected processes (EDR); cannot be patched from user mode
+      path     : KernelBase!WriteProcessMemory ⇒ ntoskrnl!NtWriteVirtualMemory → MiReadWriteVirtualMemory → EtwTiLogReadWriteVm
+  ...
+```
+
+The two ETW-TI entries are the relevant write and reprotection paths. The audit and mitigation entries need additional runtime conditions. The 17 hidden paths include generic handle cleanup, object-type branches and failure handling; `--verbose` shows them with their call paths. This relevance filter is heuristic, and neither category proves that an event fired.
+
+In a few commands I have the prototype, the real implementation, the hidden protection change, the service number, the access right the kernel checks and the telemetry the call can produce. All of it is read from the binaries on this machine, so it matches the Windows build the code will actually run on.
+
+Tested with RESX 2.2.1 against the system binaries of the test machine. RVAs and service numbers differ between Windows builds.
+
+</details>
+
+#### Workflows
 
 <details>
 <summary><h3 style="display: inline;">Binary Triage & API Call Graphs</h3></summary>
@@ -574,44 +946,6 @@ The call at `0x1160` is six bytes long, so `0x1166` is the return address immedi
 
 </details>
 
-<details>
-<summary><h3 style="display: inline;">Tested Example: Encoded APIs &amp; Manual Resolution</h3></summary>
-
-Let's say I want to analyze a binary that hides its Windows API names with XOR and resolves them by walking the PEB loader list and the module's export table. The checked-in [C sample](resx/tests/data/manual_resolver.c) allocates a page, writes an inert byte, changes the page protection, releases it, and attempts a protected-directory listing. Its [compiled EXE](resx/tests/data/manual_resolver.exe) has no PDB, and none of the seven APIs below appear in its import table.
-
-```powershell
-> resx behavior .\resx\tests\data\manual_resolver.exe --no-pdb --no-headers
-Dynamic API resolution: PEB loader-list walk; manual export-table walk
-[HIGH] api-resolution export-table-walk (high @ 0x0000138C)
-[HIGH] api-resolution peb-module-walk (high @ 0x00001179)
-
-Dynamically resolved APIs (7):
-  0x0000155C  kernelbase!VirtualAlloc  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
-  0x00001578  kernelbase!VirtualProtect  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 2 call sites]
-  0x00001594  kernelbase!VirtualFree  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 3 call sites]
-  0x000015B0  kernelbase!FindFirstFileW  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
-  0x000015CC  kernelbase!FindNextFileW  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
-  0x000015E8  kernelbase!FindClose  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
-  0x00001604  kernelbase!GetLastError  [export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal, 1 call site]
-```
-
-The `calls` view connects those resolutions to the indirect calls in the sample:
-
-```powershell
-> resx calls .\resx\tests\data\manual_resolver.exe rentry --depth 8 --only dynamic --no-pdb --no-headers
-      ├── 0x155C  CALL  sub_00001240
-      │   resolves: kernelbase!VirtualAlloc (export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal)
-      ├── 0x1678  CALL  kernelbase!VirtualAlloc [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
-      ├── 0x16BA  CALL  kernelbase!VirtualProtect [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
-      └── 0x17C8  CALL  kernelbase!FindClose [dynamic · export-table walk sub_00001240 · xor 0x5A · loader-list walk, literal]
-```
-
-With one small sample, RESX recovers the API names, the XOR key, the manual resolution path, and the actual indirect call sites without debug symbols. The executable page contains only `RET` and is never executed; the directory attempt returned `ACCESS_DENIED` in this test.
-
-</details>
-
-</details>
-
 ## Documentation
 
 - [Full changelog](CHANGELOG.md)
@@ -623,6 +957,7 @@ With one small sample, RESX recovers the API names, the XOR key, the manual reso
 - [Architecture](docs/architecture.md)
 - [JSON schemas](docs/json-schemas.md)
 - [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md): contributors are welcome
 
 ## Features
 
@@ -633,7 +968,7 @@ With one small sample, RESX recovers the API names, the XOR key, the manual reso
 - Reverse caller tracing across priority modules and custom scan scopes.
 - Startup-flow reconstruction from entry points, TLS callbacks, thread and work-pool callbacks, import calls, indirect edges, and x64 unwind or exception-handler evidence.
 - Structural diffing, CFG diff views, code and control heatmaps, corpus indexing, and sample hunting.
-- Integrated VS Code binary viewer for navigation, triage, flow, symbols, types, scans, and function analysis.
+- Integrated VS Code binary viewer for navigation, behavior triage, API evidence, drivers and IOCTLs, strings, entropy, YARA, flow, symbols, types, diffing, corpus hunting, and function analysis.
 - Protected-file triage for packer markers, OEP handoff candidates, import-rebuild leads, VM dispatcher or handler candidates, and bounded payload recovery.
 - C-like reconstruction and bounded CFG rendering for selected functions.
 - Hardened PE32+ metadata, section, data-directory, debug, CLR, TLS, load-configuration, certificate, version, and anomaly inspection.
@@ -720,17 +1055,9 @@ Install the generated `.vsix` with:
 Extensions: Install from VSIX...
 ```
 
-The extension contributes a custom editor for Windows binaries and command-palette workflows:
+The extension contributes a custom editor for Windows binaries. Its tabs cover Overview, Entry, Triage (with `pechk`), Behavior, Sections, Exports, Imports, Symbols, Types, Strings, Evidence (contracts, IPC, network, crypto), Driver (IOCTLs), Entropy, Search (find, YARA, compare, SDK prototypes), Flow, Scan, Dump and Dev. Dumps add call maps, xrefs, callers, CFG, C-like reconstruction and hex, with hostile mode, `--args` and call filters in the viewer's Options panel.
 
-- `RESX: Open Binary File`
-- `RESX: Refresh Binary Analysis`
-- `RESX: Locate`
-- `RESX: Locate Symbol`
-- `RESX: Dump`
-- `RESX: Reconstruct CFG`
-- `RESX: Scan Folder`
-
-The viewer includes Overview, Entry, Triage, Sections, Exports, Imports, Symbols, Types, Flow, Scan, Dump, and Dev tabs.
+Command-palette and explorer workflows include Locate, Dump, Compare Images (diff), Scan Folder, Index Folder as Corpus, Find Similar Images (hunt), Decode Payload, Patch Image Bytes, Look Up Windows API Prototype and Configure Windows SDK Headers.
 
 See [docs/vscode-extension.md](docs/vscode-extension.md) for build, packaging, settings, trust model, and workflow details.
 
