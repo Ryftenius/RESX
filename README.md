@@ -24,7 +24,7 @@ Every example below is real RESX output. The tested examples are reproducible en
 <tr>
 <td valign="top">
 
-```text
+```asm
 jz   short near ptr loc_F4C5+2
 jmp  short $+2
 mov  r11, 9F08EB0000000FE8h
@@ -32,7 +32,9 @@ mov  r11, 9F08EB0000000FE8h
 mov  eax, 0C0000022h
 ...
 db 8Bh, 0C1h, 48h, ...  ; stub = data
+```
 
+```c
 void sub_14000F460()
 {
   JUMPOUT(0x14000F4C7LL);
@@ -42,7 +44,7 @@ void sub_14000F460()
 </td>
 <td valign="top">
 
-```text
+```asm
 je   short 0x14000f4c7
 jmp  short 0x14000f4c5
 mov  r11, 0x9f08eb0000000fe8
@@ -113,7 +115,7 @@ Let's say I'm reversing an advanced sample that never calls `ntdll`. It carries 
 
 IDA Pro 9.0 follows the decoy. In `sub_14000F460`, the `jz` at `0xF4C1` targets `0xF4C7`, which is the middle of a 10-byte `mov r11, imm64`. IDA marks `0xF4C7` as *Can't disassemble* and never decodes the `call` hidden there. In IDA's listing the function always returns `0xC0000022` (`STATUS_ACCESS_DENIED`), and Hex-Rays gives up:
 
-```text
+```asm
 ; IDA 9.0, auto-analysis
 .text:000000014000F4C1    jz      short near ptr loc_14000F4C5+2
 .text:000000014000F4C3    jmp     short $+2
@@ -124,8 +126,10 @@ IDA Pro 9.0 follows the decoy. In `sub_14000F460`, the `jz` at `0xF4C1` targets 
 .text:000000014000F4DA    retn
 .text:000000014000F4DB    db 8Bh, 0C1h, 48h, 8Bh, 0CAh  ; the real stub, left as data
 .text:000000014000F4E0    dq 8B4CC18B4DD08B49h, ...
+```
 
-; Hex-Rays 9.0
+```c
+// Hex-Rays 9.0
 void sub_14000F460()
 {
   JUMPOUT(0x14000F4C7LL);
@@ -312,7 +316,7 @@ API Call Map for WriteProcessMemory  [6 of 18 call site(s) · filter: syscall]:
 
 `resx dump KernelBase.dll WriteProcessMemory` shows why. It queries the target page and tests its protection against `0xCC`, which covers every writable protection. This excerpt has my comments added on the right:
 
-```powershell
+```asm
   0008e24d  call       qword ptr [_imp_NtQueryVirtualMemory]
   0008e25f  mov        r14d, dword ptr [rbp+0xb]          ; MEMORY_BASIC_INFORMATION.Protect
   0008e263  test       r14b, 0xcc                         ; already writable?
@@ -479,7 +483,7 @@ For example, using `--args`:
 > resx /calls "SAMPLE.exe" ENTRY --depth 5 --only winapi --no-pdb --args
 ```
 
-```powershell
+```console
 ├── 0x15D0  CALL  KERNEL32!VirtualAlloc
 │   └── args
 │       ├── lpAddress        = NULL
@@ -526,7 +530,7 @@ RESX can statically recover dynamically resolved Windows APIs, including those h
 > resx /calls "HASHED.exe" rva:0x1770 --depth 3 --only dynamic --no-pdb
 ```
 
-```powershell
+```console
 ├── 0x1779  CALL  sub_00001000
 │   ├── 0x101F  CALL  sub_00001230
 │   │   resolves: kernel32!VirtualAlloc (export-table walk · ror13-add hash 0x91AFCA54 · loader-list walk, djb2 hash 0x7040EE75)
@@ -543,7 +547,7 @@ RESX can statically recover dynamically resolved Windows APIs, including those h
 > resx /calls "ENCODED.exe" rva:0x16B0 --depth 3 --only dynamic --no-pdb
 ```
 
-```powershell
+```console
 ├── 0x16E0  CALL  sub_000010C0
 │   ├── 0x1113  CALL  KERNEL32!GetProcAddress
 │   │   resolves: kernel32!CreateThread (GetProcAddress · xor 0x5A)
@@ -646,7 +650,7 @@ RESX can statically reconstruct Windows driver communication interfaces from bot
 > resx /ioctl client.dll --args
 ```
 
-```powershell
+```console
 IOCTL and NDIS recovery
 Image:  client.dll
 Result:  28 IOCTL code evidence record(s), 0 registered dispatch root(s)
@@ -684,7 +688,7 @@ For example, analyzing Microsoft's DirectX graphics kernel driver:
 > resx /ioctl dxgkrnl.sys
 ```
 
-```text
+```console
 IOCTL and NDIS recovery
 Image:  dxgkrnl.sys
 Result:  14 IOCTL code evidence record(s), 2 registered dispatch root(s)
@@ -696,7 +700,7 @@ Dispatch RVA    Codes  Registration evidence
 
 RESX can further recover request buffer checks and trace their associated failure paths:
 
-```text
+```console
 Code        Buffer  Guard    Check RVA   Failure status  Failure RVA
 0x00234003  input   == 16    0x00074B42  0xC0000206      0x00074FBF
 0x00234003  output  == 8     0x00074B6B  0xC0000206      0x00074FBF
@@ -725,7 +729,7 @@ Using the same sample from the API-argument example:
 resx reconstruct-cfg "SAMPLE.exe" --thread-filter spawned --depth 5 --max-total 800 --no-pdb --no-color
 ```
 
-```text
+```console
 Root 1/3: PE Entry Point sub_000023E0 0x000023E0 PE Entry Point [.text] <synthetic, bound .pdata 0x000023E0..0x000023F2> (AddressOfEntryPoint; declared executable entry point; transfer and execution unobserved)
 `-- 0x000023ED jmp -> sub_00002260 0x00002260 [tail-jump, unknown]
     `-- 0x0000236A call -> sub_000019E0 0x000019E0 [unknown]
@@ -752,7 +756,7 @@ Let's say we have two versions of a DLL and want to figure out where to look fir
 resx diff "sample.dll" "sample-v2.dll" --max-functions 200 --no-pdb --no-color
 ```
 
-```text
+```console
 Similarity :   90
 Unique     :   87  (180 noisy matches filtered)
 Coverage   :  left 97% / right 97%
@@ -781,7 +785,7 @@ resx index "sample.dll" --db samples.resxdb --max-functions 200 --no-pdb --no-co
 resx hunt "sample-v2.dll" --db samples.resxdb --max-functions 200 --no-pdb --no-color --quiet
 ```
 
-```text
+```console
 1. [ 96] sample.dll  sample.dll
    unique  95 | metadata 98 | coverage left 100% / right 99% | matches 198
    tags: shared-codebase, shared-exports, variant-build
@@ -830,7 +834,7 @@ $rows = foreach ($site in $report.behavior.api_signatures.PSObject.Properties) {
 $rows | Format-Table -AutoSize
 ```
 
-```text
+```console
 RVA        API            Protection Executable
 ---        ---            ---------- ----------
 0x000015D0 VirtualAlloc   0x1             False
@@ -861,7 +865,7 @@ Before diving into individual functions, we can also check how the image is laid
 resx sections "sample.dll" --no-pdb --no-color --quiet
 ```
 
-```text
+```console
 Sections:
 ┌────────────────┬──────────────────┬──────────────────┬──────────────────┬────────────┬────────────────┬──────────────┐
 │ Name           │ RVA              │ VSize            │ Raw              │ Prot       │ Expected       │ Entropy      │
@@ -884,7 +888,7 @@ For structural validation:
 resx pechk "sample.dll" --no-pdb --no-color
 ```
 
-```text
+```console
 Findings: 0
   ✓ no structural PE anomalies
 ```
@@ -904,7 +908,7 @@ Let's take `DYNAMIC.exe`. It resolves `VirtualAlloc` through `GetProcAddress`, s
 resx /calls "DYNAMIC.exe" rva:0x1100 --depth 1 --only kernel32 --args --no-pdb --no-color
 ```
 
-```powershell
+```console
   ├── 0x1160  CALL  kernel32!VirtualAlloc [dynamic · GetProcAddress]
   │   └── args
   │       ├── lpAddress        = NULL
@@ -919,7 +923,7 @@ RESX identifies a 4 KiB allocation with `MEM_COMMIT|MEM_RESERVE` and `PAGE_READW
 sk run "DYNAMIC.exe" --api NtAllocateVirtualMemory,NtFreeVirtualMemory --stack --timeout 10s
 ```
 
-```powershell
+```console
 [skugga] NtAllocateVirtualMemory hit status=0x00000000 target=self(pid=44368 name=DYNAMIC.exe) addr=0x1C97CE20000 size=0x1000 pages=1 alloc=COMMIT|RESERVE protect=RW vad=MEM_PRIVATE/UNKNOWN region=0x1C97CE20000-0x1C97CE2E000 region_size=56.00KB caller=KERNELBASE.dll+0xB6694
     #00 [system]   KERNELBASE.dll+0xB6694
     #01 [app]      DYNAMIC.exe+0x1166
@@ -937,7 +941,7 @@ The application frame is `DYNAMIC.exe+0x1166`. We can line that up with the orig
 resx /dump "DYNAMIC.exe" --at 0x1100 --bytes --max-insns 100 --no-pdb --no-color --quiet
 ```
 
-```powershell
+```asm
   00001160  ff 15 2a 20 00 00              call       qword ptr [0x140003190]
   00001166  48 85 c0                       test       rax, rax
 ```
@@ -1051,7 +1055,7 @@ npm run package
 
 Install the generated `.vsix` with:
 
-```text
+```console
 Extensions: Install from VSIX...
 ```
 
@@ -1071,9 +1075,7 @@ cargo build -p resx --release
 
 Use the public header:
 
-```text
-resx/include/resx.h
-```
+`resx/include/resx.h`
 
 Example C call:
 
