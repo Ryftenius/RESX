@@ -340,4 +340,3 @@ All notable public changes to RESX are recorded here.
 - Added guarded PE byte patching.
 - Improved PDB-backed metadata, startup analysis, string resolution, and versioned JSON output.
 - Added the first VS Code binary viewer workflows and native DLL interface.
-
