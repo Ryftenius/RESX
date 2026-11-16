@@ -2,17 +2,23 @@ const TOP_TABS = new Set([
     'overview',
     'entry',
     'triage',
+    'behavior',
     'sections',
     'exports',
     'imports',
     'symbols',
     'types',
+    'strings',
+    'evidence',
+    'driver',
+    'entropy',
+    'search',
     'flow',
     'scan',
     'dump',
     'dev',
 ]);
-const DUMP_TABS = new Set(['disasm', 'calls', 'xrefs', 'strings', 'cfg', 'recomp', 'hex']);
+const DUMP_TABS = new Set(['disasm', 'calls', 'xrefs', 'callers', 'strings', 'cfg', 'recomp', 'hex']);
 export function coercePersistedUiState(raw) {
     const data = raw && typeof raw === 'object' ? raw : {};
     const topTab = typeof data.topTab === 'string' && TOP_TABS.has(data.topTab)

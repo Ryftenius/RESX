@@ -11,3 +11,6 @@ vsc-extension-quickstart.md
 **/*.ts
 node_modules/**
 media-src/**
+test/**
+scripts/**
+*.vsix

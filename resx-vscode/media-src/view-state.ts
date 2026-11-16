@@ -2,18 +2,24 @@ const TOP_TABS = new Set([
     'overview',
     'entry',
     'triage',
+    'behavior',
     'sections',
     'exports',
     'imports',
     'symbols',
     'types',
+    'strings',
+    'evidence',
+    'driver',
+    'entropy',
+    'search',
     'flow',
     'scan',
     'dump',
     'dev',
 ]);
 
-const DUMP_TABS = new Set(['disasm', 'calls', 'xrefs', 'strings', 'cfg', 'recomp', 'hex']);
+const DUMP_TABS = new Set(['disasm', 'calls', 'xrefs', 'callers', 'strings', 'cfg', 'recomp', 'hex']);
 
 export interface PersistedUiState {
     topTab: string;

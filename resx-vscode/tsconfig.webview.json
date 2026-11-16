@@ -13,7 +13,11 @@
   },
   "files": [
     "./media-src/main.ts",
+    "./media-src/report.ts",
+    "./media-src/reports.ts",
     "./media-src/cfg.ts",
-    "./media-src/tables.ts"
+    "./media-src/tables.ts",
+    "./media-src/view-state.ts",
+    "./media-src/payloads.ts"
   ]
 }

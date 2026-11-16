@@ -12,7 +12,10 @@ export function activate(context: vscode.ExtensionContext): void {
             if (!refreshed) {
                 void vscode.window.showInformationMessage('Open a RESX binary viewer before refreshing analysis.');
             }
-        })
+        }),
+        vscode.workspace.onDidChangeConfiguration(event => {
+            if (event.affectsConfiguration('resx')) ResxEditorProvider.broadcastSettings();
+        }),
     );
 }
 

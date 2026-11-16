@@ -2,6 +2,11 @@ import { renderCfgVisual } from './cfg.js';
 import { createSearchBar as _searchBar, wireSearch as _wireSearch, sortTable } from './tables.js';
 import { unwrapListPayload, unwrapObjectPayload } from './payloads.js';
 import { buildPersistedUiState, coercePersistedUiState } from './view-state.js';
+import {
+    button as rButton, errorBox as rError, h, hex as rHex, jsonButton, loading as rLoading,
+    renderBehavior, renderCallers, renderDriver, renderEntropy, renderEvidence, renderFind,
+    renderPechk, renderStrings, renderYara, ReportContext, toolbar as rToolbar,
+} from './reports.js';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: unknown): void;
@@ -84,7 +89,8 @@ vscode.postMessage({ command: 'ready' });
         ['0xC0000142', 'STATUS_DLL_INIT_FAILED'],
         ['0xC0000225', 'STATUS_NOT_FOUND'],
     ]);
-    const DUMP_SUBTABS = ['disasm', 'calls', 'xrefs', 'strings', 'cfg', 'recomp', 'hex'];
+    const DUMP_SUBTABS = ['disasm', 'calls', 'xrefs', 'callers', 'strings', 'cfg', 'recomp', 'hex'];
+    const MAX_CALL_DEPTH = 8;
     const st = {
         navHistory: [], // [{label, fn, dll, dllPath, rva}]
         navPos: -1,
@@ -98,13 +104,24 @@ vscode.postMessage({ command: 'ready' });
         pdbPaths: [],
         pdbFile: '',
         symServer: '',
-        // root = the file originally opened in the editor, never changes on navigation
         rootDll: '',
         rootDllPath: '',
         currentDumpDll: '',
         currentDumpPath: '',
         apiDepth: 1,
         hostile: false,
+        apiArgs: false,
+        ssa: false,
+        callsOnly: '',
+        callsExclude: '',
+        settingsApplied: false,
+        resxVersion: '',
+        imagePath: '',
+        isDriver: false,
+        reports: new Map() as Map<string, { requested: boolean; params: any; requestId: string }>,
+        pechk: null as any,
+        currentDump: null as any,
+        callersDepth: 3,
         devLogs: [],
         reconstructRequested: false,
         scanRequested: false,
@@ -277,10 +294,13 @@ function resolveNavigationTarget(funcName, dll = null) {
     const inferredDll = dll || st.iatIndex.get(cleaned) || st.iatIndex.get(funcName) || null;
     return { func: cleaned || funcName, dll: normalizeModuleName(inferredDll) };
 }
+function dumpOptionsKey() {
+    return [st.hostile ? 'h' : '', st.apiArgs ? 'a' : '', st.ssa ? 's' : '', st.callsOnly, st.callsExclude].join('|');
+}
 function dumpCacheKey(entry) {
     const scope = moduleScope(entry);
-    const depth = Math.max(1, Math.min(5, Number(entry?.funcsDepth || 1) || 1));
-    const hostile = st.hostile ? ':hostile' : '';
+    const depth = Math.max(1, Math.min(MAX_CALL_DEPTH, Number(entry?.funcsDepth || 1) || 1));
+    const hostile = `:${dumpOptionsKey()}`;
     if (entry?.rva)
         return `rva:${scope}:${normalizeRva(entry.rva)}:depth:${depth}${hostile}`;
     const dll = entry?.dll ? String(entry.dll).toLowerCase() : '';
@@ -346,14 +366,12 @@ function summarizeStartupRoutines(startupRoutines = []) {
         const note = String(entry?.note || '').toLowerCase();
         const section = String(entry?.section || '').toLowerCase();
         const rva = startupRvaValue(entry);
-        // Source instruction type
         if (source.includes('lea'))
             score += 18;
         if (source.includes('mov'))
             score += 8;
         if (source.includes('push'))
             score += 4;
-        // Section hint
         if (section === '.text' || section === 'text')
             score += 14;
         if (note.includes('callback or main routine'))
@@ -365,7 +383,6 @@ function summarizeStartupRoutines(startupRoutines = []) {
             score += 6;
         if ((rva & 1n) !== 0n)
             score -= 18;
-        // Depth: prefer candidates closer to entry point (lower depth = more direct)
         const depth = startupDepth(entry);
         if (depth !== 99) {
             if (depth <= 1)
@@ -375,7 +392,6 @@ function summarizeStartupRoutines(startupRoutines = []) {
             else if (depth >= 4)
                 score -= 12;
         }
-        // Proximity to known startup handoff/chain anchors
         let nearest = null;
         for (const anchor of handoffAnchors) {
             const delta = anchor > rva ? anchor - rva : rva - anchor;
@@ -1401,8 +1417,7 @@ document.querySelectorAll<HTMLElement>('.tab').forEach(btn => {
         if (btn.dataset.tab === 'scan') {
             ensureScanPanel();
         }
-        // If a data-symbol or disasm type-link triggered a jump to the Types tab while
-        // the panel is already rendered, find and select the right type entry now.
+        ensureReportTab(btn.dataset.tab);
         if (btn.dataset.tab === 'types' && st._pendingTypeNav) {
             const pending = st._pendingTypeNav;
             st._pendingTypeNav = null;
@@ -1530,9 +1545,7 @@ function navigateRva(rva, label) {
     _navPush(entry);
     _requestDump(entry);
 }
-// Always navigates within the root file (the file opened in the editor).
-// Use this for imports, exports, sections, symbols — panels that are always
-// scoped to the original binary, even if the dump panel has navigated elsewhere.
+// These panels navigate within the root binary, independent of dump navigation.
 function navigateRootRva(rva, label) {
     const entry = {
         label: label || `@${rva}`,
@@ -1618,8 +1631,7 @@ function _requestDump(entry, prefetch = false) {
             dllPath: entry.dllPath || st.currentDumpPath || null,
             rva: normalizeRva(entry.rva),
             label: entry.label,
-            funcsDepth: Math.max(1, Math.min(5, Number(entry.funcsDepth || st.apiDepth || 1) || 1)),
-            hostile: st.hostile,
+            ...dumpViewOptions(entry),
             ...request,
         });
     }
@@ -1630,11 +1642,20 @@ function _requestDump(entry, prefetch = false) {
             dll: entry.dll,
             dllPath: entry.dllPath || null,
             sourceLabel: entry.label,
-            funcsDepth: Math.max(1, Math.min(5, Number(entry.funcsDepth || st.apiDepth || 1) || 1)),
-            hostile: st.hostile,
+            ...dumpViewOptions(entry),
             ...request,
         });
     }
+}
+function dumpViewOptions(entry) {
+    return {
+        funcsDepth: Math.max(1, Math.min(MAX_CALL_DEPTH, Number(entry.funcsDepth || st.apiDepth || 1) || 1)),
+        hostile: st.hostile,
+        apiArgs: st.apiArgs,
+        ssa: st.ssa,
+        callsOnly: st.callsOnly,
+        callsExclude: st.callsExclude,
+    };
 }
 function _showDumpLoading(label) {
     initDumpShell();
@@ -1675,6 +1696,7 @@ function initDumpShell() {
                 <button class="stab active" data-stab="disasm">Disasm</button>
                 <button class="stab hidden" data-stab="calls">API Calls</button>
                 <button class="stab hidden" data-stab="xrefs">Xrefs</button>
+                <button class="stab hidden" data-stab="callers">Callers</button>
                 <button class="stab hidden" data-stab="strings">Strings</button>
                 <button class="stab hidden" data-stab="cfg">CFG</button>
                 <button class="stab hidden" data-stab="recomp">Recomp</button>
@@ -1684,6 +1706,7 @@ function initDumpShell() {
                 <div id="stab-disasm"  class="stab-panel active"></div>
                 <div id="stab-calls"   class="stab-panel"></div>
                 <div id="stab-xrefs"   class="stab-panel"></div>
+                <div id="stab-callers" class="stab-panel"></div>
                 <div id="stab-strings" class="stab-panel"></div>
                 <div id="stab-cfg"     class="stab-panel" style="padding:0"></div>
                 <div id="stab-recomp"  class="stab-panel"></div>
@@ -1694,11 +1717,13 @@ function initDumpShell() {
     panel.querySelectorAll<HTMLElement>('.stab').forEach(btn => {
         btn.addEventListener('click', () => {
             activateDumpSubTab(btn.dataset.stab || 'disasm');
+            if (btn.dataset.stab === 'callers')
+                ensureCallersView();
         });
     });
 }
 function setCurrentDepth(depth) {
-    st.apiDepth = Math.max(1, Math.min(5, Number(depth) || 1));
+    st.apiDepth = Math.max(1, Math.min(MAX_CALL_DEPTH, Number(depth) || 1));
     const entry = currentNavEntry();
     if (entry)
         entry.funcsDepth = st.apiDepth;
@@ -1777,6 +1802,8 @@ function showCtxMenu(e, funcName, dll) {
     const srcDll = navTarget.dll;
     if (srcDll)
         add(`View System API  (${srcDll.replace(/\.(dll|exe|sys)$/i, '')})`, () => navigate(funcName, srcDll));
+    add('Find callers', () => showCallersFor(navTarget.func, srcDll));
+    add('Look up SDK prototype', () => vscode.postMessage({ command: 'api_lookup', name: srcDll ? `${srcDll.replace(/\.(dll|exe|sys)$/i, '')}!${navTarget.func}` : navTarget.func }));
     const sep = document.createElement('div');
     sep.className = 'ctx-sep';
     menu.appendChild(sep);
@@ -1893,7 +1920,10 @@ document.addEventListener('contextmenu', e => { if (!(e.target instanceof Elemen
             </div>`;
     document.body.appendChild(panel);
     panel.querySelector('.pdb-panel-close').addEventListener('click', () => panel.classList.remove('open'));
-    btn.addEventListener('click', () => panel.classList.toggle('open'));
+    btn.addEventListener('click', () => {
+        $('opts-panel')?.classList.remove('open');
+        panel.classList.toggle('open');
+    });
     _renderPathsList();
     $('pdb-add-path').addEventListener('click', () => {
         const inp = $('pdb-path-input') as HTMLInputElement;
@@ -1998,9 +2028,502 @@ window.addEventListener('message', e => {
                 navigateRva(msg.rva, msg.sourceLabel || msg.func || msg.rva);
             else if (msg.func)
                 navigate(msg.func, msg.dll || null);
+            else if (msg.tab)
+                showTab(msg.tab);
+            break;
+        case 'show_tab':
+            showTab(msg.tab);
+            break;
+        case 'viewer_settings':
+            applyViewerSettings(msg);
+            break;
+        case 'pechk':
+            st.pechk = msg;
+            renderPechkInTriage();
+            break;
+        case 'report_pending':
+            if (msg.id === 'yara')
+                setSearchResult('yara', rLoading('Running YARA rules…'));
+            break;
+        case 'report_result':
+            handleReportResult(msg);
             break;
     }
 });
+const reportCtx: ReportContext = {
+    navigateRva: (rva, label) => navigateRootRva(rva, label),
+    navigate: (name, dll) => navigate(name, dll || null),
+    openJson: (data, title) => vscode.postMessage({ command: 'open_json', data, title }),
+    copy: text => { copyText(text); },
+    openImage: (path, rva, label) => vscode.postMessage({ command: 'open_image', path, rva, label }),
+};
+/** Reports that run on first visit to their tab. */
+const REPORT_TABS: Record<string, { id: string; title: string; running: string }> = {
+    behavior: { id: 'behavior', title: 'Behavior triage', running: 'Running behavior triage…' },
+    strings: { id: 'strings', title: 'Strings', running: 'Extracting strings…' },
+    evidence: { id: 'contracts', title: 'API evidence', running: 'Recovering API contracts…' },
+    driver: { id: 'driver', title: 'Driver', running: 'Analyzing driver dispatch and IOCTLs…' },
+    entropy: { id: 'entropy', title: 'Entropy', running: 'Computing entropy…' },
+};
+const EVIDENCE_KINDS = ['contracts', 'ipc', 'network', 'crypto'];
+function showTab(tab) {
+    if (!tab)
+        return;
+    if (tab === 'driver')
+        setTabVisible('driver', true);
+    activateTab(tab);
+}
+function applyViewerSettings(msg) {
+    if (!st.settingsApplied) {
+        st.hostile = !!msg.hostile;
+        st.apiArgs = !!msg.apiArgs;
+        st.apiDepth = Math.max(1, Math.min(MAX_CALL_DEPTH, Number(msg.callDepth) || 1));
+        st.settingsApplied = true;
+    }
+    if (msg.version)
+        st.resxVersion = msg.version;
+    if (msg.imagePath) {
+        st.imagePath = msg.imagePath;
+        if (/\.sys$/i.test(msg.imagePath))
+            markDriver();
+    }
+    if (msg.versionError)
+        $('panel-overview')?.prepend(errBox(`RESX analyzer unavailable: ${msg.versionError}`));
+    syncOptionsPanel();
+}
+function markDriver() {
+    st.isDriver = true;
+    setTabVisible('driver', true);
+}
+function reportState(id) {
+    let state = st.reports.get(id);
+    if (!state) {
+        state = { requested: false, params: {}, requestId: '' };
+        st.reports.set(id, state);
+    }
+    return state;
+}
+function requestReport(id, params = {}, panelId = null) {
+    const state = reportState(id);
+    state.requested = true;
+    state.params = { ...state.params, ...params };
+    state.requestId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    const body = panelId ? $(panelId)?.querySelector('.report-body') : null;
+    if (body) {
+        body.innerHTML = '';
+        body.append(rLoading('Running…'), rButton('Cancel', () => vscode.postMessage({ command: 'cancel_report', id })));
+    }
+    vscode.postMessage({ command: 'report', id, params: { apiArgs: st.apiArgs, hostile: st.hostile, ...state.params }, requestId: state.requestId });
+}
+function ensureReportTab(tab) {
+    if (tab === 'search') {
+        ensureSearchPanel();
+        return;
+    }
+    const spec = REPORT_TABS[tab];
+    if (!spec)
+        return;
+    const id = tab === 'evidence' ? (reportState('evidence').params.kind || 'contracts') : spec.id;
+    const state = reportState(tab === 'evidence' ? 'evidence' : id);
+    if (state.requested)
+        return;
+    buildReportShell(tab);
+    if (tab === 'evidence')
+        runEvidence(id);
+    else
+        requestReport(id, {}, `panel-${tab}`);
+}
+/** Toolbar plus a body the report renders into. Controls depend on the report. */
+function buildReportShell(tab) {
+    const panel = $(`panel-${tab}`);
+    if (!panel)
+        return;
+    panel.innerHTML = '';
+    const spec = REPORT_TABS[tab];
+    const controls = h('div', { class: 'report-controls' });
+    const rerun = rButton('Re-run', () => rerunReportTab(tab));
+    if (tab === 'strings') {
+        const minLen = h('input', { type: 'number', min: '1', max: '4096', value: '5', class: 'report-num', title: 'Minimum length' }) as HTMLInputElement;
+        const limit = h('input', { type: 'number', min: '1', max: '8192', value: '2000', class: 'report-num', title: 'Maximum strings' }) as HTMLInputElement;
+        const enc = h('select', { class: 'report-select', title: 'Encoding' },
+            h('option', { value: 'both', text: 'ASCII + UTF-16' }), h('option', { value: 'ascii', text: 'ASCII' }), h('option', { value: 'utf16le', text: 'UTF-16LE' })) as HTMLSelectElement;
+        const match = h('input', { type: 'text', placeholder: 'contains…', class: 'report-text', title: 'Only strings containing this text' }) as HTMLInputElement;
+        const tagIn = h('input', { type: 'text', placeholder: 'tag…', class: 'report-text', title: 'Only strings carrying this tag (e.g. url, path, registry)' }) as HTMLInputElement;
+        const interesting = checkbox('Interesting only', false);
+        const rawWide = checkbox('Raw UTF-16', false, 'Keep permissive UTF-16 candidates, including binary coincidences');
+        controls.append(labelled('Min', minLen), labelled('Limit', limit), enc, match, tagIn, interesting.label, rawWide.label);
+        const run = () => requestReport('strings', {
+            minLen: Number(minLen.value), limit: Number(limit.value), encoding: enc.value,
+            match: match.value, tag: tagIn.value, interesting: interesting.input.checked, rawWide: rawWide.input.checked,
+        }, 'panel-strings');
+        [minLen, limit, match, tagIn].forEach(i => i.addEventListener('keydown', e => { if ((e as KeyboardEvent).key === 'Enter') run(); }));
+        rerun.textContent = 'Extract';
+        rerun.onclick = run;
+    }
+    else if (tab === 'entropy') {
+        const win = h('input', { type: 'number', min: '64', value: '1024', step: '256', class: 'report-num', title: 'Window bytes' }) as HTMLInputElement;
+        const stride = h('input', { type: 'number', min: '16', value: '512', step: '128', class: 'report-num', title: 'Stride bytes' }) as HTMLInputElement;
+        const all = checkbox('All sections', false, 'Include non-executable sections');
+        controls.append(labelled('Window', win), labelled('Stride', stride), all.label);
+        rerun.onclick = () => requestReport('entropy', { window: Number(win.value), stride: Number(stride.value), all: all.input.checked }, 'panel-entropy');
+    }
+    else if (tab === 'evidence') {
+        const kind = h('select', { class: 'report-select', title: 'Evidence family' },
+            ...EVIDENCE_KINDS.map(k => h('option', { value: k, text: k === 'contracts' ? 'All contracts' : k.toUpperCase() === 'IPC' ? 'IPC' : k[0].toUpperCase() + k.slice(1) }))) as HTMLSelectElement;
+        kind.value = reportState('evidence').params.kind || 'contracts';
+        kind.addEventListener('change', () => runEvidence(kind.value));
+        controls.append(kind);
+        rerun.onclick = () => runEvidence(kind.value);
+    }
+    if (tab === 'evidence' || tab === 'behavior' || tab === 'driver') {
+        const args = checkbox('Recover arguments', st.apiArgs, 'Pass --args: recover API call arguments (uses configured SDK headers when available)');
+        args.input.addEventListener('change', () => {
+            setApiArgs(args.input.checked);
+            rerunReportTab(tab);
+        });
+        args.input.dataset.sync = 'apiArgs';
+        controls.append(args.label);
+    }
+    panel.append(rToolbar(spec.title, controls, rerun));
+    panel.append(h('div', { class: 'report-body' }, rLoading(spec.running)));
+}
+function rerunReportTab(tab) {
+    const panel = $(`panel-${tab}`);
+    if (tab === 'evidence') {
+        runEvidence(reportState('evidence').params.kind || 'contracts');
+        return;
+    }
+    const spec = REPORT_TABS[tab];
+    if (!spec)
+        return;
+    if (tab === 'strings' || tab === 'entropy') {
+        const btn = panel?.querySelector<HTMLButtonElement>('.analysis-toolbar > .btn-sm');
+        if (btn) {
+            btn.click();
+            return;
+        }
+    }
+    requestReport(spec.id, {}, `panel-${tab}`);
+}
+function runEvidence(kind) {
+    const state = reportState('evidence');
+    state.requested = true;
+    state.params.kind = EVIDENCE_KINDS.includes(kind) ? kind : 'contracts';
+    requestReport(state.params.kind, {}, 'panel-evidence');
+}
+function checkbox(label, checked, title = '') {
+    const input = h('input', { type: 'checkbox' }) as HTMLInputElement;
+    input.checked = !!checked;
+    const wrap = h('label', { class: 'report-check', title: title || undefined }, input, ` ${label}`);
+    return { input, label: wrap };
+}
+function labelled(text, input) {
+    return h('label', { class: 'report-field' }, h('span', { class: 'dim', text }), input);
+}
+function reportPanelFor(id) {
+    if (EVIDENCE_KINDS.includes(id))
+        return 'panel-evidence';
+    if (id === 'ioctl')
+        return 'panel-driver';
+    return `panel-${id}`;
+}
+function handleReportResult(msg) {
+    if (msg.id === 'callers') {
+        renderCallersResult(msg);
+        return;
+    }
+    if (msg.id === 'find' || msg.id === 'yara') {
+        renderSearchResult(msg);
+        return;
+    }
+    const stateId = EVIDENCE_KINDS.includes(msg.id) ? msg.id : msg.id;
+    const state = st.reports.get(stateId);
+    if (state && msg.requestId && state.requestId && msg.requestId !== state.requestId)
+        return;
+    const panel = $(reportPanelFor(msg.id));
+    if (!panel)
+        return;
+    let body = panel.querySelector('.report-body');
+    if (!body) {
+        const tab = panel.id.replace(/^panel-/, '');
+        if (REPORT_TABS[tab])
+            buildReportShell(tab);
+        body = panel.querySelector('.report-body');
+        if (!body)
+            return;
+    }
+    body.innerHTML = '';
+    if (msg.error) {
+        body.append(rError(msg.error));
+        if (msg.cancelled && state)
+            state.requested = false;
+        return;
+    }
+    const payload = msg.payload || {};
+    const meta = panel.querySelector('.analysis-toolbar-meta');
+    if (meta)
+        meta.textContent = `${REPORT_TABS[panel.id.replace(/^panel-/, '')]?.title || msg.id}${msg.argsEnabled ? ' · arguments' : ''}`;
+    const actions = h('div', { class: 'report-actions' }, jsonButton(reportCtx, msg.data, `RESX ${msg.id}`));
+    body.append(actions);
+    try {
+        switch (msg.id) {
+            case 'behavior':
+                renderBehavior(body as HTMLElement, payload, reportCtx);
+                break;
+            case 'contracts':
+            case 'ipc':
+            case 'network':
+            case 'crypto':
+                renderEvidence(body as HTMLElement, payload, reportCtx, !!msg.argsEnabled);
+                break;
+            case 'strings':
+                renderStrings(body as HTMLElement, payload, reportCtx);
+                break;
+            case 'entropy':
+                renderEntropy(body as HTMLElement, payload, reportCtx);
+                break;
+            case 'driver':
+                renderDriver(body as HTMLElement, payload, reportCtx);
+                break;
+        }
+    }
+    catch (error) {
+        body.append(rError(`Could not render ${msg.id}: ${error instanceof Error ? error.message : String(error)}. Use Open JSON to inspect the report.`));
+    }
+}
+function renderPechkInTriage() {
+    const panel = $('panel-triage');
+    if (!panel || !st.pechk)
+        return;
+    panel.querySelector('.pechk-section')?.remove();
+    const msg = st.pechk;
+    const wrap = h('div', { class: 'pechk-section' });
+    const d = msg.payload || unwrapObjectPayload<any>(msg.data, 'pechk');
+    if (msg.error) {
+        wrap.append(h('div', { class: 'section-label', text: 'PE validation' }), errBox(msg.error));
+    }
+    else if (d) {
+        const count = d.finding_count ?? (d.findings || []).length;
+        const details = h('details', { class: 'finding-group' },
+            h('summary', { class: 'finding-group-title' }, 'PE validation (pechk) ', h('span', { class: 'tag', text: String(count) })));
+        details.open = count > 0;
+        renderPechk(details, d);
+        wrap.append(details);
+    }
+    panel.prepend(wrap);
+}
+function ensureSearchPanel() {
+    const panel = $('panel-search');
+    if (!panel || panel.dataset.built)
+        return;
+    panel.dataset.built = '1';
+    panel.innerHTML = '';
+    const query = h('input', { type: 'text', class: 'report-text wide', placeholder: 'Bytes (48 8b c4), text, a constant (0xDEADBEEF) or an instruction pattern (mov eax, ?)', spellcheck: 'false' }) as HTMLInputElement;
+    const mode = h('select', { class: 'report-select', title: 'Matching mode' },
+        ...['auto', 'raw', 'decoded', 'semantic'].map(m => h('option', { value: m, text: m }))) as HTMLSelectElement;
+    const encoded = checkbox('Try single-byte transforms', false, 'Try bounded single-byte transforms (XOR/ADD) before decoding a candidate stream');
+    const run = () => {
+        if (!query.value.trim())
+            return;
+        setSearchResult('find', rLoading('Searching…'));
+        vscode.postMessage({ command: 'report', id: 'find', params: { query: query.value, mode: mode.value, encoded: encoded.input.checked } });
+    };
+    query.addEventListener('keydown', e => { if ((e as KeyboardEvent).key === 'Enter') run(); });
+    panel.append(h('div', { class: 'section-label', text: 'Find' }));
+    panel.append(h('div', { class: 'report-controls' }, query, mode, encoded.label, rButton('Find', run, 'Search the image', 'btn-sm primary')));
+    panel.append(h('div', { class: 'search-find report-body' }));
+    panel.append(h('div', { class: 'section-label', text: 'YARA' }));
+    panel.append(h('div', { class: 'report-controls' },
+        h('span', { class: 'dim', text: 'Scan this image with YARA-compatible rule files, rule folders or JSON rule lists.' }),
+        rButton('Choose rules…', () => vscode.postMessage({ command: 'yara_pick' }), 'Pick .yar/.yara files or folders')));
+    panel.append(h('div', { class: 'search-yara report-body' }));
+    panel.append(h('div', { class: 'section-label', text: 'Compare' }));
+    panel.append(h('div', { class: 'report-controls' },
+        h('span', { class: 'dim', text: 'Structural diff against another image (functions, CFG shape, APIs, constants, metadata).' }),
+        rButton('Compare with…', () => vscode.postMessage({ command: 'diff_pick' }), 'Pick another image to diff against')));
+    panel.append(h('div', { class: 'section-label', text: 'Windows SDK' }));
+    const api = h('input', { type: 'text', class: 'report-text', placeholder: 'VirtualAlloc or kernel32!OpenProcess', spellcheck: 'false' }) as HTMLInputElement;
+    const lookup = () => { if (api.value.trim()) vscode.postMessage({ command: 'api_lookup', name: api.value.trim() }); };
+    api.addEventListener('keydown', e => { if ((e as KeyboardEvent).key === 'Enter') lookup(); });
+    panel.append(h('div', { class: 'report-controls' }, api, rButton('Look up prototype', lookup)));
+}
+function setSearchResult(id, node) {
+    ensureSearchPanel();
+    const target = $('panel-search')?.querySelector(id === 'yara' ? '.search-yara' : '.search-find');
+    if (!target)
+        return;
+    target.innerHTML = '';
+    target.append(node);
+}
+function renderSearchResult(msg) {
+    const body = h('div');
+    if (msg.error)
+        body.append(rError(msg.error));
+    else {
+        body.append(h('div', { class: 'report-actions' }, jsonButton(reportCtx, msg.data, `RESX ${msg.id}`)));
+        if (msg.id === 'yara')
+            renderYara(body, msg.payload || {}, reportCtx);
+        else
+            renderFind(body, msg.payload || {}, reportCtx);
+    }
+    setSearchResult(msg.id, body);
+}
+function currentDumpTargetName() {
+    const entry = currentNavEntry();
+    const d = st.currentDump;
+    return d?.function || entry?.fn || '';
+}
+/** `callers` resolves exports, PDB symbols and imports by name only. */
+function isNamedTarget(name) {
+    return !!name && !/^(?:entry|rentry|sub_[0-9a-f]+|loc_[0-9a-f]+|(?:rva|va|file):.*|0x[0-9a-f]+|[0-9a-f]+h?|@.*)$/i.test(String(name).trim());
+}
+function ensureCallersView(force = false) {
+    const pane = $('stab-callers');
+    if (!pane)
+        return;
+    const target = currentDumpTargetName();
+    if (!force && pane.dataset.target === `${st.currentDumpPath}|${target}`)
+        return;
+    pane.dataset.target = `${st.currentDumpPath}|${target}`;
+    pane.innerHTML = '';
+    if (!isNamedTarget(target)) {
+        pane.append(h('p', { class: 'no-data', text: target
+            ? `Callers are traced by name (export, PDB symbol or import). "${target}" has no resolvable name; load PDB symbols to name internal functions, or use the Xrefs tab.`
+            : 'No named function selected. Use the Xrefs tab for incoming references to this address.' }));
+        return;
+    }
+    pane.append(rLoading(`Tracing callers of ${target}…`));
+    vscode.postMessage({
+        command: 'report',
+        id: 'callers',
+        image: st.currentDumpPath || st.rootDllPath || undefined,
+        params: { target, depth: st.callersDepth || 3 },
+    });
+}
+function showCallersFor(func, dll) {
+    if (!func)
+        return;
+    const sameImage = !dll || sameImageModule(dll, st.currentDumpDll);
+    if (!sameImage) {
+        navigate(func, dll);
+        st.activeDumpSubTab = 'callers';
+        return;
+    }
+    if (st.activeTopTab !== 'dump' || currentDumpTargetName() !== func) {
+        navigate(func, dll);
+        st.activeDumpSubTab = 'callers';
+        return;
+    }
+    activateDumpSubTab('callers');
+    ensureCallersView(true);
+}
+function renderCallersResult(msg) {
+    const pane = $('stab-callers');
+    if (!pane)
+        return;
+    pane.innerHTML = '';
+    const depthSel = h('select', { class: 'report-select', title: 'Caller depth' },
+        ...[1, 2, 3, 4, 5, 6].map(n => h('option', { value: String(n), text: `Depth ${n}` }))) as HTMLSelectElement;
+    depthSel.value = String(st.callersDepth || 3);
+    depthSel.addEventListener('change', () => { st.callersDepth = Number(depthSel.value); ensureCallersView(true); });
+    pane.append(rToolbar('Reverse call tree across the image lookup order', depthSel, msg.data ? jsonButton(reportCtx, msg.data, 'RESX callers') : null));
+    if (msg.error) {
+        pane.append(rError(msg.error));
+        return;
+    }
+    const ctx: ReportContext = {
+        ...reportCtx,
+        navigateRva: (rva, label) => navigateRva(rva, label),
+    };
+    renderCallers(pane, msg.payload || {}, ctx);
+}
+let optionsPanelBuilt = false;
+function syncOptionsPanel() {
+    document.querySelectorAll<HTMLInputElement>('input[data-sync="apiArgs"]').forEach(i => { i.checked = st.apiArgs; });
+    document.querySelectorAll<HTMLInputElement>('input[data-sync="hostile"]').forEach(i => { i.checked = st.hostile; });
+    document.querySelectorAll<HTMLInputElement>('input[data-sync="ssa"]').forEach(i => { i.checked = st.ssa; });
+    document.querySelectorAll<HTMLSelectElement>('select[data-sync="depth"]').forEach(s => { s.value = String(st.apiDepth); });
+    const ver = $('opts-version');
+    if (ver)
+        ver.textContent = st.resxVersion ? `RESX ${st.resxVersion}` : '';
+}
+function setApiArgs(value) {
+    if (st.apiArgs === !!value)
+        return;
+    st.apiArgs = !!value;
+    syncOptionsPanel();
+    reloadCurrentDump();
+}
+/** Re-requests the current dump after a dump option changed. */
+function reloadCurrentDump() {
+    const entry = currentNavEntry();
+    if (entry && st.activeTopTab === 'dump') {
+        _showDumpLoading(entry.label);
+        _requestDump(entry);
+    }
+}
+(function initOptionsPanel() {
+    const btn = $('opts-btn');
+    if (!btn || optionsPanelBuilt)
+        return;
+    optionsPanelBuilt = true;
+    const panel = h('div', { id: 'opts-panel', class: 'side-panel' });
+    const close = rButton('×', () => panel.classList.remove('open'), 'Close', 'pdb-panel-close');
+    const hostile = checkbox('Hostile mode', st.hostile, 'Pass --hostile: recursive register slices, decoder-driven xref scan, indirect-JMP emission and suspicion annotations');
+    hostile.input.dataset.sync = 'hostile';
+    hostile.input.addEventListener('change', () => { st.hostile = hostile.input.checked; reloadCurrentDump(); });
+    const args = checkbox('Recover API arguments', st.apiArgs, 'Pass --args to dump, calls, behavior and evidence reports');
+    args.input.dataset.sync = 'apiArgs';
+    args.input.addEventListener('change', () => {
+        setApiArgs(args.input.checked);
+        ['behavior', 'evidence', 'driver'].forEach(tab => {
+            const id = tab === 'evidence' ? 'evidence' : tab;
+            if (reportState(id).requested)
+                rerunReportTab(tab);
+        });
+    });
+    const ssa = checkbox('SSA annotations', st.ssa, 'Pass --ssa: bounded SSA, stack-slot and control-transfer annotations');
+    ssa.input.dataset.sync = 'ssa';
+    ssa.input.addEventListener('change', () => { st.ssa = ssa.input.checked; reloadCurrentDump(); });
+    const depth = h('select', { class: 'report-select' },
+        ...Array.from({ length: MAX_CALL_DEPTH }, (_, i) => h('option', { value: String(i + 1), text: String(i + 1) }))) as HTMLSelectElement;
+    depth.dataset.sync = 'depth';
+    depth.addEventListener('change', () => { setCurrentDepth(Number(depth.value)); reloadCurrentDump(); });
+    const only = h('input', { type: 'text', class: 'report-text', placeholder: 'winapi, iat, syscall, kernel32…', value: st.callsOnly }) as HTMLInputElement;
+    const exclude = h('input', { type: 'text', class: 'report-text', placeholder: 'crt, internal…', value: st.callsExclude }) as HTMLInputElement;
+    const applyFilters = () => {
+        if (only.value.trim() === st.callsOnly && exclude.value.trim() === st.callsExclude)
+            return;
+        st.callsOnly = only.value.trim();
+        st.callsExclude = exclude.value.trim();
+        reloadCurrentDump();
+    };
+    [only, exclude].forEach(i => {
+        i.addEventListener('change', applyFilters);
+        i.addEventListener('keydown', e => { if ((e as KeyboardEvent).key === 'Enter') applyFilters(); });
+    });
+    panel.append(
+        h('div', { class: 'pdb-panel-header' }, h('span', { text: 'Analysis Options' }), close),
+        h('div', { class: 'pdb-panel-body' },
+            h('div', { class: 'pdb-section-title', text: 'Dump' }),
+            hostile.label, args.label, ssa.label,
+            labelled('Call map depth', depth),
+            h('div', { class: 'pdb-section-title', text: 'Call filter' }),
+            h('div', { class: 'dim small', text: 'Terms: winapi, iat, internal, crt, syscall, dynamic, or a DLL name. Comma-separated.' }),
+            labelled('Only', only),
+            labelled('Exclude', exclude),
+            h('div', { class: 'pdb-section-title', text: 'Windows SDK' }),
+            h('div', { class: 'dim small', text: 'Argument recovery uses the SDK headers saved with "RESX: Configure SDK Headers".' }),
+            h('div', { class: 'report-controls' },
+                rButton('Settings…', () => vscode.postMessage({ command: 'open_settings' }))),
+            h('div', { id: 'opts-version', class: 'dim small' })));
+    document.body.appendChild(panel);
+    btn.addEventListener('click', () => {
+        $('pdb-panel')?.classList.remove('open');
+        syncOptionsPanel();
+        panel.classList.toggle('open');
+    });
+})();
 function refreshAnalysisPanels() {
     ['overview', 'entry', 'triage', 'sections', 'exports', 'imports', 'symbols', 'types'].forEach(id => {
         const panel = $(`panel-${id}`);
@@ -2013,6 +2536,20 @@ function refreshAnalysisPanels() {
     st.dumpCache.clear();
     st.reconstructRequested = false;
     st.scanRequested = false;
+    st.reports.clear();
+    st.pechk = null;
+    for (const [tab, spec] of Object.entries(REPORT_TABS)) {
+        const panel = $(`panel-${tab}`);
+        if (panel)
+            panel.innerHTML = `<p class="loading">${esc(spec.title)} runs when this tab is opened.</p>`;
+    }
+    const search = $('panel-search');
+    if (search) {
+        search.innerHTML = '';
+        delete search.dataset.built;
+    }
+    if (REPORT_TABS[st.activeTopTab] || st.activeTopTab === 'search')
+        requestAnimationFrame(() => ensureReportTab(st.activeTopTab));
     $('panel-flow').innerHTML = '<p class="loading">Run reconstruct-cfg to build startup flow.</p>';
     $('panel-scan').innerHTML = '<p class="loading">Run scan to discover fuzz candidates.</p>';
     vscode.postMessage({ command: 'refresh' });
@@ -2394,9 +2931,11 @@ function renderPeInfo(msg) {
         return;
     }
     st.currentPeInfo = d;
-    st.currentDumpDll = d.dll || basenamePath(d.dll_path || '') || '';
-    st.currentDumpPath = d.dll_path || '';
-    // Root paths are fixed to the file opened in the editor — never updated on navigation.
+    const imagePath = cleanImagePath(d.dll_path || d.path || st.imagePath || '');
+    st.currentDumpDll = d.dll || d.file_name || basenamePath(imagePath) || '';
+    st.currentDumpPath = imagePath;
+    if (String(d.subsystem || '').toLowerCase() === '0x0001' || d.mitigations?.wdm_driver || /\.sys$/i.test(imagePath))
+        markDriver();
     if (!st.rootDllPath) {
         st.rootDll = st.currentDumpDll;
         st.rootDllPath = st.currentDumpPath;
@@ -2685,7 +3224,6 @@ function renderEat(msg) {
         const tr = body.insertRow();
         const ntd = tr.insertCell();
         if (e.name) {
-            // Always navigate within the root binary, not whatever the dump panel last showed.
             const link = document.createElement('span');
             link.className = 'fn-link';
             link.textContent = e.name;
@@ -2766,8 +3304,6 @@ function renderIat(msg) {
                 ntd.appendChild(link);
             }
             else if (imp.slot_rva) {
-                // Use navigateRootRva so the IAT slot RVA is always resolved in the
-                // original binary, not whatever the dump panel last navigated to.
                 const link = document.createElement('span');
                 link.className = 'fn-link';
                 link.textContent = imp.name;
@@ -2871,7 +3407,6 @@ function renderSyms(msg) {
         const ntd = tr.insertCell();
         const isCode = s.kind === 'function' || s.kind === 'public';
         if (isCode) {
-            // Navigate within root binary — not whatever DLL the dump panel last visited.
             const link = document.createElement('span');
             link.className = 'fn-link';
             link.textContent = s.name;
@@ -2881,8 +3416,6 @@ function renderSyms(msg) {
             link.addEventListener('dblclick', () => navigateRootRva(s.rva, s.name));
             ntd.appendChild(link);
         } else {
-            // Data / label symbol — not disassemblable. Navigate to Types if a matching
-            // type entry exists; otherwise just show as plain text.
             const typeName = (s.type_name || s.name).toLowerCase();
             const typeEntry = st.typesByName.get(typeName) || st.typesByName.get(s.name.toLowerCase());
             if (typeEntry) {
@@ -2939,7 +3472,6 @@ function renderTypes(msg) {
         rememberTypeEntry(byName, String(entry.name || '').trim().toLowerCase(), entry);
         rememberTypeEntry(byName, canonicalTypeName(entry.name), entry);
     });
-    // Keep a global index so other panels (symbols, disasm) can resolve type names.
     st.typesByName = byName;
     const { bar, lbl } = _searchBar(panel, 'Search types or refs…');
     lbl.textContent = `${types.length} types`;
@@ -3071,7 +3603,6 @@ function renderTypes(msg) {
         }
         renderList(filtered);
     });
-    // If a symbol panel click asked us to jump to a specific type, select it now.
     if (st._pendingTypeNav) {
         const pending = st._pendingTypeNav;
         st._pendingTypeNav = null;
@@ -3099,6 +3630,7 @@ function renderTriage(msg) {
     const startupRoutines = Array.isArray(st.currentPeInfo?.startup_routines) ? st.currentPeInfo.startup_routines : [];
     if (!findings.length && !startupRoutines.length) {
         panel.innerHTML = '<p class="no-data">No triage findings.</p>';
+        renderPechkInTriage();
         return;
     }
     const grouped: Record<string, any[]> = {};
@@ -3128,8 +3660,11 @@ function renderTriage(msg) {
         items.forEach(f => {
             const row = document.createElement('div');
             row.className = 'finding-row';
-            row.dataset.text = `${f.category} ${f.rule} ${f.source} ${f.value}`.toLowerCase();
-            row.innerHTML = `<span class="finding-rule">${esc(f.rule)}</span><span class="finding-source">${esc(f.source)}</span><span class="finding-val">${esc(f.value)}</span>`;
+            row.dataset.text = `${f.category} ${f.rule} ${f.source} ${f.value} ${f.status || ''}`.toLowerCase();
+            const where = f.rva ? '' : f.file_offset != null ? ` @file ${rHex(f.file_offset)}` : '';
+            row.innerHTML = `<span class="finding-rule">${esc(f.rule)}</span><span class="finding-source">${esc(f.source)}${esc(where)}</span><span class="finding-val">${esc(f.value)}</span>`;
+            if (f.status)
+                row.title = f.status;
             if (f.rva) {
                 row.title = `Disassemble ${f.rva}`;
                 row.addEventListener('click', () => navigateRva(f.rva, `${f.rule}@${f.rva}`));
@@ -3173,6 +3708,7 @@ function renderTriage(msg) {
         container.querySelectorAll<HTMLElement>('.finding-group').forEach(g => g.style.display = vis.has(g) ? '' : 'none');
         lbl.textContent = re ? `${visible} / ${totalFindings} findings` : `${totalFindings} findings`;
     });
+    renderPechkInTriage();
 }
 function renderDevLogs() {
     const panel = $('panel-dev');
@@ -3269,7 +3805,8 @@ function renderDump(msg) {
         return;
     }
     st.currentDumpDll = d.dll || basenamePath(d.dll_path || '') || st.currentDumpDll || '';
-    st.currentDumpPath = d.dll_path || st.currentDumpPath || '';
+    st.currentDumpPath = cleanImagePath(d.dll_path) || st.currentDumpPath || '';
+    st.currentDump = d;
     setCurrentDepth(currentNavEntry()?.funcsDepth || st.apiDepth || 1);
     const currentSyscall = d.current_syscall || detectCurrentSyscallInfo(d, label);
     const isImportSlot = !!d.is_import_slot;
@@ -3293,7 +3830,26 @@ function renderDump(msg) {
     hHtml += `<span class="dump-meta">Xrefs ${hdrMeta.xrefCount}</span>`;
     if (d.hook_indicators?.length)
         hHtml += `<span class="dump-hook">⚠ HOOKED: ${d.hook_indicators.map(esc).join(', ')}</span>`;
+    const conflicts = Array.isArray(d.decode_conflicts?.findings) ? d.decode_conflicts.findings.length : 0;
+    if (conflicts)
+        hHtml += `<span class="dump-meta dump-warn" title="Overlapping instruction streams were decoded; see Open JSON for decode_conflicts">Overlapping decodes ${conflicts}</span>`;
+    const dynamicCalls = (d.api_calls || []).filter(c => c.dynamic).length;
+    if (dynamicCalls)
+        hHtml += `<span class="dump-meta dump-warn" title="Calls through APIs resolved at run time">Dynamic APIs ${dynamicCalls}</span>`;
+    const proto = d.signature?.prototype || d.typed_ir?.prototype;
+    if (proto && !/arguments unknown/.test(proto))
+        hHtml += `<div class="dump-proto" title="${esc(`${d.signature?.source || ''} · ${d.signature?.confidence || ''}`)}">${esc(proto)}</div>`;
     $('dump-header').innerHTML = hHtml;
+    if (!isImportSlot && isNamedTarget(d.function)) {
+        const callersBtn = document.createElement('button');
+        callersBtn.className = 'btn-sm';
+        callersBtn.textContent = 'Callers';
+        callersBtn.title = 'Trace callers of this function';
+        callersBtn.addEventListener('click', () => { activateDumpSubTab('callers'); ensureCallersView(); });
+        $('dump-header').appendChild(callersBtn);
+    }
+    const jsonBtn = jsonButton(reportCtx, msg.data, `RESX dump ${label}`);
+    $('dump-header').appendChild(jsonBtn);
     const hasInsns = !isImportSlot && d.instructions?.length > 0;
     const hasCalls = !isImportSlot && ((d.api_calls?.length > 0) || !!currentSyscall);
     const hasXrefs = true;
@@ -3305,7 +3861,7 @@ function renderDump(msg) {
     const callCommentMap = buildCallCommentMap(callArgumentNotes);
     document.querySelectorAll<HTMLElement>('.stab').forEach(btn => {
         const s = btn.dataset.stab;
-        const show = s === 'disasm' || (s === 'calls' && hasCalls) ||
+        const show = s === 'disasm' || (s === 'calls' && hasCalls) || (s === 'callers' && !isImportSlot && isNamedTarget(d.function)) ||
             (s === 'xrefs' && hasXrefs) || (s === 'strings' && hasStrings) || (s === 'cfg' && hasCfg) ||
             (s === 'recomp' && hasRecomp) || (s === 'hex' && hasHex);
         btn.classList.toggle('hidden', !show);
@@ -3363,7 +3919,7 @@ function renderDump(msg) {
         depthLabel.textContent = 'Depth';
         const depthSelect = document.createElement('select');
         depthSelect.className = 'calls-depth-select';
-        for (let i = 1; i <= 5; i++) {
+        for (let i = 1; i <= MAX_CALL_DEPTH; i++) {
             const opt = document.createElement('option');
             opt.value = String(i);
             opt.textContent = String(i);
@@ -3371,7 +3927,7 @@ function renderDump(msg) {
             depthSelect.appendChild(opt);
         }
         depthSelect.addEventListener('change', () => {
-            const nextDepth = Math.max(1, Math.min(5, Number(depthSelect.value) || 1));
+            const nextDepth = Math.max(1, Math.min(MAX_CALL_DEPTH, Number(depthSelect.value) || 1));
             if (nextDepth === st.apiDepth)
                 return;
             setCurrentDepth(nextDepth);
@@ -3391,8 +3947,10 @@ function renderDump(msg) {
         hostileCheck.type = 'checkbox';
         hostileCheck.className = 'calls-hostile-check';
         hostileCheck.checked = st.hostile;
+        hostileCheck.dataset.sync = 'hostile';
         hostileCheck.addEventListener('change', () => {
             st.hostile = hostileCheck.checked;
+            syncOptionsPanel();
             const entry = currentNavEntry();
             if (entry) {
                 st.dumpCache.clear();
@@ -3403,6 +3961,22 @@ function renderDump(msg) {
         hostileLabel.appendChild(hostileCheck);
         hostileLabel.appendChild(document.createTextNode(' Hostile'));
         toolbar.appendChild(hostileLabel);
+        const argsLabel = document.createElement('label');
+        argsLabel.className = 'calls-hostile-label';
+        argsLabel.title = 'Recover API call arguments (--args); uses the configured Windows SDK headers';
+        const argsCheck = document.createElement('input');
+        argsCheck.type = 'checkbox';
+        argsCheck.checked = st.apiArgs;
+        argsCheck.dataset.sync = 'apiArgs';
+        argsCheck.addEventListener('change', () => setApiArgs(argsCheck.checked));
+        argsLabel.append(argsCheck, document.createTextNode(' Arguments'));
+        toolbar.appendChild(argsLabel);
+        if (st.callsOnly || st.callsExclude) {
+            const filt = document.createElement('span');
+            filt.className = 'dim small';
+            filt.textContent = `filter: ${[st.callsOnly, st.callsExclude ? `!${st.callsExclude.split(',').join(',!')}` : ''].filter(Boolean).join(',')}`;
+            toolbar.appendChild(filt);
+        }
 
         cp.appendChild(toolbar);
         const wrap = document.createElement('div');
@@ -3418,16 +3992,20 @@ function renderDump(msg) {
         });
         const body = tbl.createTBody();
         const treeRows = st.apiDepth > 1 && d.api_call_tree ? parseApiCallTree(d.api_call_tree) : [];
-        const baseCalls = d.api_calls.map(c => ({
+        const baseCalls = (d.api_calls || []).map(c => ({
             depth: 0,
             rva: c.rva,
             kind: c.kind,
             label: c.label,
             dll: c.dll || '',
-            indirect: [c.is_indirect ? (c.indirect_method || 'indirect') : '', c.switch_cases?.length ? `${c.switch_cases.length} cases` : '']
+            indirect: [c.dynamic ? `dynamic · ${c.dynamic}` : '', c.is_indirect ? (c.indirect_method || 'indirect') : '', c.switch_cases?.length ? `${c.switch_cases.length} cases` : '']
                 .filter(Boolean)
                 .join(' · '),
-            notes: callArgumentNotes.get(normalizeRva(c.rva)) || [],
+            notes: [
+                c.signature?.call ? String(c.signature.call).replace(/\s*\n\s*/g, ' ') : '',
+                c.resolves ? `resolves: ${c.resolves}` : '',
+                ...(c.signature?.call ? [] : (callArgumentNotes.get(normalizeRva(c.rva)) || [])),
+            ].filter(Boolean),
             target_rva: c.target_rva || '',
             syscall: c.syscall || null,
         }));
@@ -3674,9 +4252,19 @@ function renderDump(msg) {
         hp.innerHTML = '';
         hp.appendChild(renderHexView(d.instructions));
     }
+    const callersPane = $('stab-callers');
+    if (callersPane) {
+        callersPane.innerHTML = '<p class="no-data">Open this tab to trace callers.</p>';
+        delete callersPane.dataset.target;
+    }
     restoreDumpViewState(currentNavEntry());
+    if (st.activeDumpSubTab === 'callers' && !isImportSlot)
+        ensureCallersView();
     if (!isImportSlot)
         prefetchCallTargets(d.api_calls || []);
+}
+function cleanImagePath(p) {
+    return String(p || '').replace(/^\\\\\?\\/, '');
 }
 function renderImportSlotView(d, slotSection) {
     const wrap = document.createElement('div');
@@ -3868,7 +4456,6 @@ function renderDisasmView(insns, apiCalls, imageName, currentSyscall = null, sec
             }
             else {
                 const rawComment = resolvedLabel || insn.comment || '';
-                // Annotate type-name references in parentheses as clickable links to the Types tab.
                 const typeRefMatch = rawComment.match(/^(.*)\(([A-Za-z_][A-Za-z0-9_*[\] :<>]*)\)\s*$/);
                 const candidateType = typeRefMatch ? typeRefMatch[2].trim().replace(/\s*[*[\]]+\s*$/, '').trim() : null;
                 const typeEntry = candidateType && st.typesByName.size > 0

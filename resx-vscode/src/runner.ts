@@ -3,10 +3,17 @@ import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { buildArgs, COMMANDS, envelopeKey, ResxCommand, SharedOptions, sharedArgs, unwrapEnvelope } from './cli';
 
 export interface RunResult {
+    /** The JSON document exactly as RESX printed it. */
     data: any | null;
+    /** The envelope `kind`, when present. */
+    kind?: string;
+    /** The command object inside the envelope (or `data` for unversioned output). */
+    payload?: any;
     error?: string;
+    cancelled?: boolean;
 }
 
 export interface RunOptions {
@@ -43,7 +50,6 @@ interface TrustManifest {
 const trustedSignerThumbprints = new Set([
     'B138F1E76E48FDBAD32E4256B6DBB6B362272AD7',
 ]);
-const RESX_EXEC_TIMEOUT_MS = 120000;
 
 const verificationCache = new Map<string, Promise<string>>();
 const trustManifestCache = new Map<string, TrustManifest>();
@@ -284,10 +290,94 @@ $sig = Get-AuthenticodeSignature -LiteralPath $env:RESX_TARGET
     });
 }
 
+function execTimeoutMs(): number {
+    const seconds = vscode.workspace.getConfiguration('resx').get<number>('timeoutSeconds', 120);
+    return Math.max(10, Math.min(3600, Number(seconds) || 120)) * 1000;
+}
+
+export interface ExecOptions {
+    token?: vscode.CancellationToken;
+}
+
+/** Runs a RESX command (`buildArgs` output) and parses its JSON document. */
+export function runResx(
+    context: vscode.ExtensionContext,
+    command: ResxCommand,
+    operands: string[],
+    flags: string[] = [],
+    shared: SharedOptions = {},
+    exec: ExecOptions = {},
+): Promise<RunResult> {
+    return runArgv(context, buildArgs(command, operands, flags, shared), exec);
+}
+
+/** Runs a command whose output is text (e.g. `config`), returning stdout, stderr and success. */
+export async function runResxText(
+    context: vscode.ExtensionContext,
+    argv: string[],
+): Promise<{ ok: boolean; stdout: string; error?: string }> {
+    let exe: string;
+    try {
+        exe = await resolveResxExe(context);
+    } catch (error) {
+        return { ok: false, stdout: '', error: error instanceof Error ? error.message : String(error) };
+    }
+    const allArgs = [...argv, '--no-color'];
+    const started = Date.now();
+    const trace: RunTraceEntry = { id: nextRunTraceId++, exe, args: allArgs, startedAt: new Date(started).toISOString(), status: 'running' };
+    emitRunTrace(trace);
+    return new Promise(resolve => {
+        execFile(exe, allArgs, { timeout: execTimeoutMs(), windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+            const error = err ? cleanStderr(stderr) || err.message : undefined;
+            emitRunTrace({ ...trace, endedAt: new Date().toISOString(), durationMs: Date.now() - started, status: err ? 'error' : 'ok', error, stderr: stderr || undefined });
+            resolve({ ok: !err, stdout: String(stdout || ''), error });
+        });
+    });
+}
+
+/** Runs `resx --version` and returns its first line, or an error message. */
+export async function resxVersion(context: vscode.ExtensionContext): Promise<{ exe?: string; version?: string; error?: string }> {
+    let exe: string;
+    try {
+        exe = await resolveResxExe(context);
+    } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+    }
+    return new Promise(resolve => {
+        execFile(exe, ['--version'], { timeout: 15000, windowsHide: true }, (err, stdout, stderr) => {
+            const text = String(stdout || '').trim();
+            if (err && !text) {
+                resolve({ exe, error: stderr || err.message });
+                return;
+            }
+            const match = text.match(/Version\s+([0-9][^\s]*)/i);
+            resolve({ exe, version: match ? match[1] : text.split(/\r?\n/)[0] });
+        });
+    });
+}
+
+/** @deprecated Use runResx; kept for callers that build legacy argv themselves. */
 export function runJson(
     context: vscode.ExtensionContext,
     args: string[],
     opts?: RunOptions
+): Promise<RunResult> {
+    const [command, ...rest] = args;
+    const shared: SharedOptions = {
+        symPaths: opts?.symPaths,
+        pdbFile: opts?.pdbFile,
+        hostile: opts?.hostile,
+    };
+    if (command && command in COMMANDS) {
+        return runArgv(context, [command, ...rest, ...sharedArgs(command as ResxCommand, shared), '--json', '--no-color', '--quiet']);
+    }
+    return runArgv(context, [...args, '--json', '--no-color', '--quiet']);
+}
+
+function runArgv(
+    context: vscode.ExtensionContext,
+    allArgs: string[],
+    exec: ExecOptions = {},
 ): Promise<RunResult> {
     return new Promise(async (resolve) => {
         let exe: string;
@@ -300,22 +390,11 @@ export function runJson(
             });
             return;
         }
-        const extra: string[] = [];
-
-        if (opts?.symPaths?.length) {
-            for (const p of opts.symPaths) {
-                extra.push('--sym-path', p);
-            }
+        if (exec.token?.isCancellationRequested) {
+            resolve({ data: null, error: 'cancelled', cancelled: true });
+            return;
         }
-        if (opts?.pdbFile) {
-            extra.push('--pdb', opts.pdbFile);
-        }
-
-        if (opts?.hostile) {
-            extra.push('--hostile');
-        }
-
-        const allArgs = [...args, ...extra, '--json', '--no-color', '--quiet'];
+        const timeoutMs = execTimeoutMs();
         const started = Date.now();
         const traceId = nextRunTraceId++;
         const traceBase: RunTraceEntry = {
@@ -327,12 +406,25 @@ export function runJson(
         };
         emitRunTrace(traceBase);
 
-        execFile(exe, allArgs, {
-            maxBuffer: 64 * 1024 * 1024,
-            timeout: RESX_EXEC_TIMEOUT_MS,
+        let cancelled = false;
+        const child = execFile(exe, allArgs, {
+            maxBuffer: 256 * 1024 * 1024,
+            timeout: timeoutMs,
             windowsHide: true,
         }, (err, stdout, stderr) => {
+            cancelSubscription?.dispose();
             const finished = Date.now();
+            if (cancelled) {
+                emitRunTrace({
+                    ...traceBase,
+                    endedAt: new Date(finished).toISOString(),
+                    durationMs: finished - started,
+                    status: 'error',
+                    error: 'cancelled',
+                });
+                resolve({ data: null, error: 'cancelled', cancelled: true });
+                return;
+            }
             const traceDone: RunTraceEntry = {
                 ...traceBase,
                 endedAt: new Date(finished).toISOString(),
@@ -341,10 +433,11 @@ export function runJson(
                 stderr: stderr || undefined,
             };
             if (!stdout && err) {
-                const timeoutMsg = (err as NodeJS.ErrnoException)?.code === 'ETIMEDOUT'
-                    ? `resx timed out after ${Math.round(RESX_EXEC_TIMEOUT_MS / 1000)}s`
+                const timedOut = (err as NodeJS.ErrnoException)?.code === 'ETIMEDOUT' || (err as { killed?: boolean }).killed;
+                const timeoutMsg = timedOut
+                    ? `resx timed out after ${Math.round(timeoutMs / 1000)}s (raise resx.timeoutSeconds for large images)`
                     : '';
-                const errorText = stderr || timeoutMsg || err.message;
+                const errorText = cleanStderr(stderr) || timeoutMsg || err.message;
                 emitRunTrace({
                     ...traceDone,
                     status: 'error',
@@ -355,7 +448,7 @@ export function runJson(
             }
             const raw = stdout.trim();
             if (!raw) {
-                const errorText = stderr || 'no output from resx';
+                const errorText = cleanStderr(stderr) || 'no output from resx';
                 emitRunTrace({
                     ...traceDone,
                     status: 'error',
@@ -365,10 +458,14 @@ export function runJson(
                 return;
             }
             try {
+                const data = JSON.parse(raw);
                 emitRunTrace(traceDone);
-                resolve({ data: JSON.parse(raw) });
+                resolve({ data, kind: envelopeKey(data), payload: unwrapEnvelope(data) });
             } catch {
-                const errorText = `JSON parse failed: ${raw.slice(0, 300)}`;
+                // RESX prints usage and lookup errors as text, sometimes on stdout.
+                const errorText = err
+                    ? cleanStderr(stderr) || cleanStderr(raw).replace(/^Error:\s*/i, '').slice(0, 2000)
+                    : `JSON parse failed: ${raw.slice(0, 300)}`;
                 emitRunTrace({
                     ...traceDone,
                     status: 'error',
@@ -377,5 +474,19 @@ export function runJson(
                 resolve({ data: null, error: errorText });
             }
         });
+        const cancelSubscription = exec.token?.onCancellationRequested(() => {
+            cancelled = true;
+            child.kill();
+        });
     });
+}
+
+/** Drops ANSI escapes and blank lines; RESX writes `error: ...` lines to stderr. */
+function cleanStderr(stderr: string | undefined): string {
+    return String(stderr || '')
+        .replace(/\x1b\[[0-9;]*m/g, '')
+        .split(/\r?\n/)
+        .map(line => line.trimEnd())
+        .filter(Boolean)
+        .join('\n');
 }
