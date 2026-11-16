@@ -39,24 +39,33 @@ All notable public changes to RESX are recorded here.
 - Fixed dumps of syscall stubs failing to render, the viewer losing track of the opened image's path, and analyzer errors printed as text being reported as JSON parse failures.
 - Added tests that run every argument list the extension builds against the analyzer.
 
-## 2.2.1 - 2026-11-15
+## 2.2.1 - 2026-11-16
+
+### Security patches
+
+- Overrode the VS Code extension's transitive `minimatch`, `glob` and `qs` development dependencies to patched releases (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4, GHSA-6pq8-jhm2-2vcw).
+
+### Feature additions
 
 - Recovered XOR-encoded API names and their indirect call sites through MSVC-generated PEB and export-table walkers, including a checked-in PDB-free C sample.
+
+### Documentation
+
+- Rewrote the security policy and added private vulnerability reporting through GitHub Security Advisories.
+- Rewrote the analysis-surface, architecture and IOCTL guides. Documented `--unsafe-map-image` as retired.
+- Aligned the VS Code extension version with RESX.
 
 ## 2.2.0 - 2026-10-27
 
 ### Security patches
 
 - Fixed crashes from overflowing export, entry-point and rebased addresses.
-- Fixed overflowing WDF component addresses and missed binding records at the end of a section.
 - Fixed function discovery slicing past EOF when a section declares unavailable file data. Discovery now shares checked section mappings and bounds prologue scanning.
 - Bounded behavior scanning to one million instructions and 8,192 findings, with partial-analysis details in text and JSON. Ambiguous section mappings no longer bypass the shared reader.
 - Indexed driver export and unwind ownership lookups to prevent repeated table scans on heavily aliased inputs.
 - Restricted DbgHelp loading to the Windows system directory, checked embedded module and PDB filenames, and bounded the LLVM PDB fallback's runtime and output.
 ### Architecture and performance
 
-- Moved WDF binding reuse into immutable image facts, fixing stale results when a buffer changes or is reused.
-- Removed redundant source commentary while keeping CLI help, API contracts and unsafe-code rationale.
 - Added shared, lazy image facts for calls, behavior, API arguments, driver, IOCTL and contract analysis.
 - Scoped dynamic API resolution reuse to an immutable analysis session. Fixed stale results when an image buffer was changed or reused.
 - Indexed behavior import lookups instead of parsing the import table at each call. Rejected import addresses that overflow the RVA range.
@@ -331,3 +340,4 @@ All notable public changes to RESX are recorded here.
 - Added guarded PE byte patching.
 - Improved PDB-backed metadata, startup analysis, string resolution, and versioned JSON output.
 - Added the first VS Code binary viewer workflows and native DLL interface.
+
