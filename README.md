@@ -423,7 +423,7 @@ Tested with RESX 2.3.0 against the system binaries of the test machine. RVAs and
 
 </details>
 
-#### Workflows
+## Workflows
 
 <details>
 <summary><h3 style="display: inline;">Binary Triage & API Call Graphs</h3></summary>
