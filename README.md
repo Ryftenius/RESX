@@ -16,10 +16,10 @@ hypervisor-capabilities, and some shortcomings of mainstream disassembly tools.
 
 ## Showcase & Examples
 
-Every example below is real RESX output. The tested examples are reproducible end to end; the rest show everyday workflows. Click any title to expand it.
+Every example below is real RESX output. The tested examples include checked-in public fixtures where linked; Example 2 also preserves a historical IDA comparison from a separate sample. Click any title to expand it.
 
 <table>
-<tr><th colspan="2">Tested Example 2 at a glance: a syscall stub built to break disassemblers</th></tr>
+<tr><th colspan="2">Historical Example 2 comparison: a syscall stub built to break disassemblers</th></tr>
 <tr><th>IDA Pro 9.0 + Hex-Rays</th><th>RESX 2.2.1</th></tr>
 <tr>
 <td valign="top">
@@ -109,9 +109,28 @@ With one small sample, RESX recovers the API names, the XOR key, the manual reso
 
 <a id="tested-example-2"></a>
 <details>
-<summary><h3 style="display: inline;">Tested Example 2: Overlapping Instruction Seams vs IDA Pro</h3></summary>
+<summary><h3 style="display: inline;">Tested Example 2: Overlapping Instruction Seams (with a historical IDA comparison)</h3></summary>
 
-Let's say I'm reversing an advanced sample that never calls `ntdll`. It carries its own syscall stub, and the stub is built to break disassemblers. It uses *overlapping instruction seams*: an always-taken `jz` lands two or three bytes inside a longer "carrier" instruction, so the same bytes decode as two different instruction streams. One of those streams is the code that actually runs. The other is a decoy that ends in a fake failure path. The sample has no PDB, and every name below was assigned by the tools.
+**Reproduce the overlap with the public fixture.** The checked-in [x64 assembly source](resx/tests/data/overlap_probe.asm) and [2 KB PE](resx/tests/data/overlap_probe.exe) live with the other public samples in [the test-data directory](resx/tests/data/README.md), which includes a warning and rebuild instructions. Its entry point and hidden callee are inert. From the repository root:
+
+```powershell
+> resx dump .\resx\tests\data\overlap_probe.exe OverlapProbe --bytes --calls --no-pdb --no-color
+OverlapProbe @ RVA 0x00001003  (ord 2)
+
+overlap_probe.exe!OverlapProbe  [RVA 0x00001003, VA 0x140001003]
+  00001009  74 04                          je         short 0x14000100f
+  0000100b  eb 00                          jmp        short 0x14000100d
+  0000100d  49 bb e8 0f 00 00 00 eb 08 9f  mov        r11, 0x9f08eb0000000fe8
+  0000100f  e8 0f 00 00 00                 call       HiddenTarget
+  00001014  eb 08                          jmp        short 0x14000101e
+
+API Call Map for OverlapProbe  [1 call site(s)]:
+  └── 0x100F  CALL  HiddenTarget
+```
+
+The `je` at `0x1009` enters two bytes into the `mov` at `0x100D`; RESX shows both decodes and follows the hidden call. These lines are excerpted from the checked-in binary's output. The fixture proves this overlap behavior, but it is **not** the syscall-stub binary used for the historical IDA Pro comparison below.
+
+The historical comparison used an advanced sample that never calls `ntdll`. It carries its own syscall stub, and the stub is built to break disassemblers. It uses *overlapping instruction seams*: an always-taken `jz` lands two or three bytes inside a longer "carrier" instruction, so the same bytes decode as two different instruction streams. One of those streams is the code that actually runs. The other is a decoy that ends in a fake failure path. The sample has no PDB, and every name below was assigned by the tools.
 
 IDA Pro 9.0 follows the decoy. In `sub_14000F460`, the `jz` at `0xF4C1` targets `0xF4C7`, which is the middle of a 10-byte `mov r11, imm64`. IDA marks `0xF4C7` as *Can't disassemble* and never decodes the `call` hidden there. In IDA's listing the function always returns `0xC0000022` (`STATUS_ACCESS_DENIED`), and Hex-Rays gives up:
 
@@ -141,7 +160,7 @@ Because the hidden `call` is never decoded, nothing in IDA reaches `0xF4DB`. The
 `resx dump` decodes both streams and keeps them side by side. The carrier at `0xF4C5` and the overlapping `call` at `0xF4C7` are both in the listing, and the call map follows the hidden edge into the stub:
 
 ```powershell
-> resx dump .\sample.exe --at 0xF460 --bytes --calls --no-pdb
+> resx dump .\sample.exe --at 0xF460 --bytes --calls --no-pdb  # historical sample
   0000f4be  45 85 db                       test       r11d, r11d
   0000f4c1  74 04                          je         short 0x14000f4c7  ; → loc_0000f4c7
   0000f4c3  eb 00                          jmp        short 0x14000f4c5  ; → loc_0000f4c5
@@ -160,7 +179,7 @@ API Call Map for fn_0x0000F460  [1 call site(s)]:
 The stub at `0xF4DB` moves the service number into `eax`, shifts the arguments into the native syscall ABI, and then passes through five more seams. Each one is keyed on a bit of the service number, and the carriers are `nop`, `mov`, `lea`, `cmp` and `imul`, with immediates that differ between builds. A linear decode yields junk such as `nop dword ptr [rax+rax-7844FD15h]` and `imul r11d, 0B3402EBh`, and hides every real `jmp`. With `--verbose`, RESX reports each seam it resolved, naming the carrier and the alternate `jmp` inside it, and lays the real jump directly under its carrier:
 
 ```powershell
-> resx dump .\sample.exe --at 0xF4DB --bytes --verbose --no-pdb
+> resx dump .\sample.exe --at 0xF4DB --bytes --verbose --no-pdb  # historical sample
   Overlapping decode streams: 10 finding(s), 10 shown
   [INFO] branch-into-instruction: stream 0x0000f533 enters 0x0000f53b inside stream instruction 0x0000f537
     0F 1F 84 00 EB 02 BB 87 | nop dword ptr [rax+rax-0x7844fd15] | alternate: jmp short 000000014000F53Fh
