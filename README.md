@@ -113,6 +113,19 @@ With one small sample, RESX recovers the API names, the XOR key, the manual reso
 
 **Reproduce the overlap with the public fixture.** The checked-in [x64 assembly source](resx/tests/data/overlap_probe.asm) and [2 KB PE](resx/tests/data/overlap_probe.exe) live with the other public samples in [the test-data directory](resx/tests/data/README.md), which includes a warning and rebuild instructions. Its entry point and hidden callee are inert. From the repository root:
 
+IDA Pro 9.0's default auto-analysis of this same public PE produces this listing for `OverlapProbe`:
+
+```asm
+.text:0000000140001009  jz   short near ptr loc_14000100D+2
+.text:000000014000100B  jmp  short $+2
+.text:000000014000100D  mov  r11, 9F08EB0000000FE8h
+.text:0000000140001017  mov  eax, 0C0000022h
+.text:000000014000101C  jmp  short $+2
+.text:000000014000101E  retn
+```
+
+IDA does not decode an instruction at `0x14000100F` or create a code reference from it to `HiddenTarget`. It does identify `HiddenTarget` separately because the fixture exports that name. On the same PE, RESX shows both streams and the call:
+
 ```powershell
 > resx dump .\resx\tests\data\overlap_probe.exe OverlapProbe --bytes --calls --no-pdb --no-color
 OverlapProbe @ RVA 0x00001003  (ord 2)
@@ -128,7 +141,7 @@ API Call Map for OverlapProbe  [1 call site(s)]:
   └── 0x100F  CALL  HiddenTarget
 ```
 
-The `je` at `0x1009` enters two bytes into the `mov` at `0x100D`; RESX shows both decodes and follows the hidden call. These lines are excerpted from the checked-in binary's output. The fixture proves this overlap behavior, but it is **not** the syscall-stub binary used for the historical IDA Pro comparison below.
+The `je` at `0x1009` enters two bytes into the `mov` at `0x100D`; RESX shows both decodes and follows the hidden call. These lines are excerpted from the checked-in binary's output. Both tools were run without a PDB. The fixture proves this overlap behavior, but it is **not** the syscall-stub binary used for the historical IDA Pro comparison below.
 
 The historical comparison used an advanced sample that never calls `ntdll`. It carries its own syscall stub, and the stub is built to break disassemblers. It uses *overlapping instruction seams*: an always-taken `jz` lands two or three bytes inside a longer "carrier" instruction, so the same bytes decode as two different instruction streams. One of those streams is the code that actually runs. The other is a decoy that ends in a fake failure path. The sample has no PDB, and every name below was assigned by the tools.
 

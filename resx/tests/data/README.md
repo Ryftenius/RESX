@@ -8,7 +8,7 @@ This directory holds the small Windows PE samples used by the tested README exam
 | `hash_resolver.c` | `hash_resolver.exe` | ROR13 API hashes (Example 3) |
 | `overlap_probe.asm` | `overlap_probe.exe` | Branch into an x64 instruction to expose an alternate `call` (Example 2) |
 
-`overlap_probe.exe` is a standalone, inert sample. Its entry point returns zero. The exported `OverlapProbe` has a predictable branch into a 10-byte `mov` carrier; the alternate stream calls the benign `HiddenTarget`, which also returns zero. It has no imports, network operations, dynamic patching, or syscall. Do not interpret it as proof of the separate historical syscall-stub or IDA comparison in the root README.
+`overlap_probe.exe` is a standalone, inert sample. Its entry point returns zero. The exported `OverlapProbe` has a predictable branch into a 10-byte `mov` carrier; the alternate stream calls the benign `HiddenTarget`, which also returns zero. It has no imports, network operations, dynamic patching, or syscall. The root README compares IDA Pro and RESX on this public fixture. Its separate historical syscall-stub comparison used another binary.
 
 To reproduce the RESX output from the repository root on Windows:
 
