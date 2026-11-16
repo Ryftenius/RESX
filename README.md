@@ -383,7 +383,7 @@ The two ETW-TI entries are the relevant write and reprotection paths. The audit 
 
 In a few commands I have the prototype, the real implementation, the hidden protection change, the service number, the access right the kernel checks and the telemetry the call can produce. All of it is read from the binaries on this machine, so it matches the Windows build the code will actually run on.
 
-Tested with RESX 2.2.1 against the system binaries of the test machine. RVAs and service numbers differ between Windows builds.
+Tested with RESX 2.3.0 against the system binaries of the test machine. RVAs and service numbers differ between Windows builds.
 
 </details>
 
