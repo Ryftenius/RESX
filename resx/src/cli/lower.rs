@@ -22,6 +22,9 @@ fn apply_saved_limits(options: &mut Options, preferences: &Preferences) {
     if let Some(value) = preferences.max_total {
         options.max_total = value;
     }
+    if let Some(value) = preferences.max_index_sites {
+        options.max_index_sites = value;
+    }
     if let Some(value) = preferences.strings_limit {
         options.strings_limit = value;
     }
@@ -206,6 +209,7 @@ impl Command {
                 o.headers = args.headers;
                 o.saved_max_insns = args.max_insns;
                 o.saved_max_total = args.max_total;
+                o.saved_max_index_sites = args.max_index_sites;
                 o.saved_strings_limit = args.strings_limit;
                 o.saved_strings_scan_mb = args.strings_scan_mb;
                 o.reset_limits = args.reset_limits;
@@ -439,6 +443,9 @@ impl CallersArgs {
         o.follow_format = self.format;
         o.show_site = self.show_site;
         o.show_rva = self.show_rva;
+        if let Some(value) = self.max_index_sites {
+            o.max_index_sites = value;
+        }
         self.flow.apply(o);
         self.scope.apply(o);
         self.analysis.apply(o);
@@ -526,6 +533,7 @@ mod tests {
         let preferences = Preferences {
             max_insns: Some(1_200),
             max_total: Some(900),
+            max_index_sites: Some(2_000),
             strings_limit: Some(1_400),
             strings_scan_mb: Some(64),
             ..Preferences::default()
@@ -535,6 +543,7 @@ mod tests {
         assert_eq!(options.max_insns, 1_200);
         assert!(!options.whole_function);
         assert_eq!(options.max_total, 900);
+        assert_eq!(options.max_index_sites, 2_000);
         assert_eq!(options.strings_limit, 1_400);
         assert_eq!(options.strings_scan_mb, 64);
 

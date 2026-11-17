@@ -133,6 +133,47 @@ pub fn attribute_to_func(rva: u32, exports: &[Export]) -> Option<&Export> {
         .max_by_key(|e| e.rva)
 }
 
+/// Export locations sorted by RVA for repeated ownership queries. The original
+/// export order is retained as a tie breaker: predecessor lookup chooses the
+/// last export at an RVA, while successor lookup chooses the first.
+#[derive(Debug, Clone)]
+pub struct ExportOwnerIndex {
+    positions: Vec<usize>,
+}
+
+impl ExportOwnerIndex {
+    pub fn new(exports: &[Export]) -> Self {
+        let mut positions: Vec<usize> = (0..exports.len())
+            .filter(|&index| exports[index].rva != 0)
+            .collect();
+        positions.sort_by_key(|&index| (exports[index].rva, index));
+        Self { positions }
+    }
+
+    pub fn at_or_before<'a>(&self, exports: &'a [Export], rva: u32) -> Option<&'a Export> {
+        let end = self
+            .positions
+            .partition_point(|&index| exports[index].rva <= rva);
+        end.checked_sub(1)
+            .map(|index| &exports[self.positions[index]])
+    }
+
+    pub fn first_in_range<'a>(
+        &self,
+        exports: &'a [Export],
+        begin: u32,
+        end: u32,
+    ) -> Option<&'a Export> {
+        let index = self
+            .positions
+            .partition_point(|&index| exports[index].rva < begin);
+        self.positions
+            .get(index)
+            .map(|&position| &exports[position])
+            .filter(|export| export.rva < end)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +198,37 @@ mod tests {
         let owner = attribute_to_func(0x2100, &exports).expect("owner");
 
         assert_eq!(owner.name, "OrdinalHighRvaMid");
+    }
+
+    #[test]
+    fn export_owner_index_preserves_predecessor_and_range_ties() {
+        let exports = vec![
+            export("zero", 1, 0),
+            export("high", 2, 0x3000),
+            export("first-mid", 3, 0x2000),
+            export("low", 4, 0x1000),
+            export("last-mid", 5, 0x2000),
+        ];
+        let index = ExportOwnerIndex::new(&exports);
+        for rva in [0, 0xfff, 0x1000, 0x1fff, 0x2000, 0x2fff, 0x3000] {
+            assert_eq!(
+                index.at_or_before(&exports, rva).map(|e| e.name.as_str()),
+                attribute_to_func(rva, &exports).map(|e| e.name.as_str()),
+                "rva 0x{rva:X}"
+            );
+        }
+        assert_eq!(
+            index
+                .first_in_range(&exports, 0x2000, 0x3000)
+                .map(|e| e.name.as_str()),
+            Some("first-mid")
+        );
+        assert_eq!(
+            index
+                .first_in_range(&exports, 0x1001, 0x2001)
+                .map(|e| e.name.as_str()),
+            Some("first-mid")
+        );
+        assert!(index.first_in_range(&exports, 0x3001, 0x4000).is_none());
     }
 }

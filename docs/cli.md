@@ -258,7 +258,7 @@ Two forms without a command remain for compatibility:
 ## Earlier spellings
 
 Option names from releases before per-command options are still accepted, so
-existing scripts, FFI callers and the VS Code extension keep working. New
+existing scripts and FFI callers keep working. New
 scripts should use the current names.
 
 | Earlier | Current |
@@ -293,6 +293,13 @@ default. An explicit `--max-insns N` is honored exactly, and `unlimited` (or
 `--max-total unlimited`) means the safety bound, not a smaller cap.
 Cross-reference searches sweep every executable byte of the image.
 
+`callers` indexes at most 50,000 call sites across its scanned images by
+default. If that limit is reached, the command exits with an explicit
+incomplete-analysis error instead of returning a partial caller tree. Use
+`--max-index-sites N` to set a limit from 1 to 250,000 for one run. This limit
+also bounds expansion of wrapper callers; `--max-callers` limits only the
+displayed callers per tree node.
+
 ## String evidence controls
 
 `resx strings <image>` defaults to 2,048 results from a 32 MiB scan and filters low-quality UTF-16
@@ -306,6 +313,7 @@ evidence. `--raw-wide` restores permissive UTF-16 candidates. Values such as
 commands. `resx config --strings-scan-mb 64` saves a scan size (1–128 MiB) for
 commands. `resx config --max-total 1000` saves the recursive traversal budget,
 and `resx config --max-insns 1500` saves the per-function instruction budget.
+`resx config --max-index-sites 100000` saves the `callers` index limit.
 Use `unlimited` for the analyzer's safety bound on either analysis budget.
 Command options override saved values for one run; `resx config --reset-limits`
 restores the defaults. Saved nonzero analysis budgets may be at most 1,000,000.

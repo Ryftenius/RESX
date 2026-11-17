@@ -16,6 +16,8 @@ pub struct Preferences {
     pub max_insns: Option<usize>,
     /// Optional recursive traversal budget; 0 means unlimited.
     pub max_total: Option<usize>,
+    /// Optional aggregate call-site indexing limit for `callers`.
+    pub max_index_sites: Option<usize>,
     /// Optional string result cap; the default is 2048.
     pub strings_limit: Option<usize>,
     /// Optional string scan size in MiB; the default is 32.
@@ -32,6 +34,7 @@ impl Default for Preferences {
             headers: None,
             max_insns: None,
             max_total: None,
+            max_index_sites: None,
             strings_limit: None,
             strings_scan_mb: None,
         }
@@ -46,6 +49,9 @@ impl Preferences {
         let mut preferences: Self = serde_json::from_str(&text).unwrap_or_default();
         preferences.max_insns = preferences.max_insns.filter(|value| *value <= 1_000_000);
         preferences.max_total = preferences.max_total.filter(|value| *value <= 1_000_000);
+        preferences.max_index_sites = preferences
+            .max_index_sites
+            .filter(|value| (1..=250_000).contains(value));
         preferences.strings_limit = preferences
             .strings_limit
             .filter(|value| (1..=32768).contains(value));
@@ -64,6 +70,9 @@ impl Preferences {
         }
         if self.max_insns.is_some_and(|value| value > 1_000_000)
             || self.max_total.is_some_and(|value| value > 1_000_000)
+            || self
+                .max_index_sites
+                .is_some_and(|value| !(1..=250_000).contains(&value))
             || self
                 .strings_limit
                 .is_some_and(|value| !(1..=32768).contains(&value))

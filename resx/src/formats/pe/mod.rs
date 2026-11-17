@@ -12,7 +12,7 @@ mod validation;
 mod safety_tests;
 
 pub use constants::*;
-pub use exports::{attribute_to_func, read_exports};
+pub use exports::{attribute_to_func, read_exports, ExportOwnerIndex};
 pub use imports::{
     find_iat_slots_by_name, import_slot_map_by_rva, import_slot_map_by_va, read_imports,
     resolve_iat_slot,

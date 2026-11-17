@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::follow::scan::{
-    import_lookup_key, CallSite, Caller, FollowScanConfig, ScanImage, WrapperTarget,
+    import_lookup_key, CallSite, Caller, FollowScanConfig, IndexBudget, ScanImage, WrapperTarget,
 };
 use crate::core::color::Colors;
 use crate::core::output::{AsyncProgress, StageProgress};
@@ -125,20 +125,22 @@ impl GlobalCallGraph {
         cfg: &FollowScanConfig,
         target_arch: u32,
         c: &Colors,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let lane_count = cfg.workers.clamp(1, 8);
         let progress = AsyncProgress::new(scan_images.len(), lane_count, c.on && !cfg.quiet, c.on);
-        let loaded: Vec<_> = scan_images
+        let budget = IndexBudget::new(cfg.max_index_sites);
+        let loaded: Result<Vec<_>, String> = scan_images
             .par_iter()
-            .filter_map(|image| {
+            .map(|image| {
                 let lane = rayon::current_thread_index().unwrap_or(0);
                 let label = image.path.file_name().unwrap_or_default().to_string_lossy();
-                let loaded = image.index(cfg).cloned();
+                let loaded = image.index(cfg, &budget).map(|index| index.cloned());
                 progress.tick(lane, &label);
                 loaded
             })
             .collect();
         progress.finish();
+        let loaded: Vec<_> = loaded?.into_iter().flatten().collect();
 
         let mut stage = StageProgress::new(3, c.on && !cfg.quiet, c.on);
         stage.tick("merging direct caller buckets");
@@ -147,6 +149,17 @@ impl GlobalCallGraph {
             std::collections::HashMap::new();
         let mut imports: std::collections::HashMap<String, Vec<Caller>> =
             std::collections::HashMap::new();
+        // The cached indexes remain resident while these buckets are built.
+        // Account for every cloned site, including wrapper expansions.
+        let merged_budget = IndexBudget::new(cfg.max_index_sites.saturating_mul(2));
+        let reserve_merged = |count| {
+            merged_budget.reserve(count).map_err(|_| {
+                format!(
+                    "callers graph expansion exceeded {} cloned sites (analysis incomplete; raise --max-index-sites)",
+                    cfg.max_index_sites.saturating_mul(2)
+                )
+            })
+        };
 
         for index in &loaded {
             let arch_match = match cfg.arch.as_str() {
@@ -159,6 +172,7 @@ impl GlobalCallGraph {
             }
 
             for (target_rva, callers) in &index.direct {
+                reserve_merged(callers.iter().map(|c| c.sites.len()).sum())?;
                 direct
                     .entry(DirectTarget {
                         dll_base: index.dll_base_lower.clone(),
@@ -169,6 +183,7 @@ impl GlobalCallGraph {
             }
 
             for (key, callers) in &index.imports {
+                reserve_merged(callers.iter().map(|c| c.sites.len()).sum())?;
                 imports
                     .entry(key.clone())
                     .or_default()
@@ -192,12 +207,14 @@ impl GlobalCallGraph {
                     rva: wrapper.rva,
                 };
                 let wrapper_callers = match direct.get(&wrapper_dt) {
-                    Some(c) if !c.is_empty() => c.clone(),
+                    Some(c) if !c.is_empty() => c,
                     _ => continue,
                 };
+                reserve_merged(wrapper_callers.iter().map(|c| c.sites.len()).sum())?;
                 let via = format!("{}!{}", index.dll_name, wrapper.name);
                 let expanded: Vec<Caller> = wrapper_callers
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(|mut c| {
                         c.via_wrapper = Some(via.clone());
                         c
@@ -225,12 +242,12 @@ impl GlobalCallGraph {
 
         stage.finish();
 
-        Self {
+        Ok(Self {
             direct,
             imports,
             image_count: loaded.len(),
             total_file_bytes: loaded.iter().map(|idx| idx.file_len).sum(),
-        }
+        })
     }
 
     pub fn image_count(&self) -> usize {

@@ -56,7 +56,8 @@ $ErrorActionPreference = 'Stop'
 $path = $env:RESX_PATH
 $item = Get-Item -LiteralPath $path
 $vi = $item.VersionInfo
-$sig = Get-AuthenticodeSignature -LiteralPath $path
+$sig = $null
+try { $sig = Get-AuthenticodeSignature -LiteralPath $path } catch { }
 [ordered]@{
   FileDescription = [string]$vi.FileDescription
   CompanyName = [string]$vi.CompanyName
@@ -67,21 +68,26 @@ $sig = Get-AuthenticodeSignature -LiteralPath $path
   InternalName = [string]$vi.InternalName
   Comments = [string]$vi.Comments
   LegalCopyright = [string]$vi.LegalCopyright
-  SignatureStatus = [string]$sig.Status
+  SignatureStatus = if ($sig) { [string]$sig.Status } else { 'Unavailable' }
   SignerSubject = if ($sig.SignerCertificate) { [string]$sig.SignerCertificate.Subject } else { '' }
   SignerIssuer = if ($sig.SignerCertificate) { [string]$sig.SignerCertificate.Issuer } else { '' }
   SignerThumbprint = if ($sig.SignerCertificate) { [string]$sig.SignerCertificate.Thumbprint } else { '' }
 } | ConvertTo-Json -Compress
 "#;
 
-        let output = Command::new("powershell.exe")
+        let mut command = Command::new("powershell.exe");
+        command
             .arg("-NoProfile")
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(script)
-            .env("RESX_PATH", path)
-            .output()
-            .map_err(|e| format!("query file metadata: {}", e))?;
+            .env("RESX_PATH", path);
+        let output = crate::core::process::capture(
+            &mut command,
+            std::time::Duration::from_secs(30),
+            256 * 1024,
+        )
+        .map_err(|e| format!("query file metadata: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -116,5 +122,18 @@ $sig = Get-AuthenticodeSignature -LiteralPath $path
     {
         let _ = path;
         Err("file metadata query is only supported on Windows".to_owned())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_metadata_helper_returns_windows_version_info() {
+        let path = std::env::var("RESX_METADATA_TEST_PATH")
+            .unwrap_or_else(|_| r"C:\Windows\System32\notepad.exe".to_owned());
+        let metadata = query_file_metadata(&path).expect("Windows metadata helper failed");
+        assert!(!metadata.file_version.is_empty());
     }
 }

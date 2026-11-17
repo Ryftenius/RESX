@@ -79,7 +79,7 @@ pub fn run(
 
     let scan_paths = build_scan_list(&scan_cfg, &dll_path);
     let scan_images: Vec<ScanImage> = scan_paths.into_iter().map(ScanImage::new).collect();
-    let graph = GlobalCallGraph::build(&scan_images, &scan_cfg, pe.arch, c);
+    let graph = GlobalCallGraph::build(&scan_images, &scan_cfg, pe.arch, c)?;
     if !cfg.quiet {
         writeln!(
             w,

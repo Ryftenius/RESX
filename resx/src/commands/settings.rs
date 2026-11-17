@@ -73,6 +73,13 @@ pub fn run(options: &Options, output: &mut dyn Write, colors: &Colors) -> Result
                     .unwrap_or_else(|| "500".to_owned()),
             ],
             vec![
+                "Call index site limit".into(),
+                preferences
+                    .max_index_sites
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "50000".to_owned()),
+            ],
+            vec![
                 "String result limit".into(),
                 preferences
                     .strings_limit
@@ -100,6 +107,7 @@ fn apply_limits(preferences: &mut Preferences, options: &Options) {
     if options.reset_limits {
         preferences.max_insns = None;
         preferences.max_total = None;
+        preferences.max_index_sites = None;
         preferences.strings_limit = None;
         preferences.strings_scan_mb = None;
     }
@@ -108,6 +116,9 @@ fn apply_limits(preferences: &mut Preferences, options: &Options) {
     }
     if let Some(value) = options.saved_max_total {
         preferences.max_total = Some(value);
+    }
+    if let Some(value) = options.saved_max_index_sites {
+        preferences.max_index_sites = Some(value);
     }
     if let Some(value) = options.saved_strings_limit {
         preferences.strings_limit = Some(value);
@@ -132,6 +143,7 @@ mod tests {
         let options = Options {
             saved_max_insns: Some(1200),
             saved_max_total: Some(900),
+            saved_max_index_sites: Some(2_000),
             saved_strings_limit: Some(4096),
             saved_strings_scan_mb: Some(64),
             ..Options::default()
@@ -139,6 +151,7 @@ mod tests {
         apply_limits(&mut preferences, &options);
         assert_eq!(preferences.max_insns, Some(1200));
         assert_eq!(preferences.max_total, Some(900));
+        assert_eq!(preferences.max_index_sites, Some(2_000));
         assert_eq!(preferences.strings_limit, Some(4096));
         assert_eq!(preferences.strings_scan_mb, Some(64));
 
@@ -151,6 +164,7 @@ mod tests {
         );
         assert!(preferences.max_insns.is_none());
         assert!(preferences.max_total.is_none());
+        assert!(preferences.max_index_sites.is_none());
         assert!(preferences.strings_limit.is_none());
         assert!(preferences.strings_scan_mb.is_none());
         assert_eq!(preferences.command_style, "slash");

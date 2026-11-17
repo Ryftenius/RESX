@@ -81,12 +81,25 @@ fn collect_image_paths(
     let mut out = Vec::new();
     let mut skipped = Vec::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut walked = 0usize;
 
     while let Some(path) = stack.pop() {
         if out.len() >= max_files.max(1) {
             break;
         }
-        let metadata = match std::fs::metadata(&path) {
+        if walked >= crate::core::input::MAX_DIRECTORY_WALK_ENTRIES {
+            skipped.push(IndexSkip {
+                path: path.to_string_lossy().to_string(),
+                reason: "Directory traversal exceeded 100,000 entries".into(),
+            });
+            break;
+        }
+        walked += 1;
+        let metadata = match if path == root {
+            std::fs::metadata(&path)
+        } else {
+            std::fs::symlink_metadata(&path)
+        } {
             Ok(metadata) => metadata,
             Err(err) => {
                 skipped.push(IndexSkip {
@@ -96,6 +109,9 @@ fn collect_image_paths(
                 continue;
             }
         };
+        if path != root && crate::core::input::is_reparse_point(&metadata) {
+            continue;
+        }
         if metadata.is_dir() {
             let entries = match std::fs::read_dir(&path) {
                 Ok(entries) => entries,
@@ -108,6 +124,13 @@ fn collect_image_paths(
                 }
             };
             for entry in entries.flatten() {
+                if stack.len() >= crate::core::input::MAX_DIRECTORY_WALK_ENTRIES {
+                    skipped.push(IndexSkip {
+                        path: path.to_string_lossy().to_string(),
+                        reason: "Directory queue exceeded 100,000 entries".into(),
+                    });
+                    break;
+                }
                 stack.push(entry.path());
             }
             continue;

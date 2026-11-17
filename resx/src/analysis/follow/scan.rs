@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -12,12 +12,43 @@ use crate::core::config::Config;
 use crate::core::priority::{default_priority_dirs, matcher_from_lists};
 use crate::core::search::image_name_candidates;
 use crate::formats::pe::{
-    attribute_to_func, import_slot_map_by_va, parse_pe, read_exports, read_runtime_functions,
+    import_slot_map_by_va, parse_pe, read_exports, read_runtime_functions, ExportOwnerIndex,
     PeRuntimeFunctionInfo,
 };
 
 /// Bump whenever indexed call resolution changes, including the WDF table.
-const REVERSE_CALL_INDEX_VERSION: u32 = 4;
+const REVERSE_CALL_INDEX_VERSION: u32 = 5;
+const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INSTRUCTION_BOUNDARIES: usize = 4_000_000;
+const MAX_WDF_INSTRUCTIONS: usize = 250_000;
+
+pub(crate) struct IndexBudget {
+    max: usize,
+    used: AtomicUsize,
+}
+
+impl IndexBudget {
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            max,
+            used: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn reserve(&self, count: usize) -> Result<(), String> {
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(count).filter(|next| *next <= self.max)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                format!(
+                    "callers index exceeded --max-index-sites {} (analysis incomplete)",
+                    self.max
+                )
+            })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct FollowScanConfig {
@@ -40,6 +71,7 @@ pub struct FollowScanConfig {
     pub arch: String,
     pub depth: usize,
     pub max_callers: usize,
+    pub max_index_sites: usize,
     pub max_total: usize,
     pub filter_dll: String,
     pub show_rva: bool,
@@ -71,6 +103,7 @@ impl FollowScanConfig {
             arch: cfg.arch.clone(),
             depth: cfg.depth,
             max_callers: cfg.max_callers,
+            max_index_sites: cfg.max_index_sites,
             max_total: cfg.max_total,
             filter_dll: cfg.filter_dll.clone(),
             show_rva: cfg.show_rva,
@@ -138,15 +171,16 @@ pub struct ReverseCallIndex {
 
 pub struct ScanImage {
     pub path: PathBuf,
-    index: OnceLock<Option<Arc<ReverseCallIndex>>>,
+    index: OnceLock<Result<Option<Arc<ReverseCallIndex>>, String>>,
 }
 
 struct ScanImageData {
     raw: Vec<u8>,
     pe: crate::formats::pe::PeFile,
     exports: Vec<crate::formats::pe::Export>,
+    export_owners: ExportOwnerIndex,
     runtime_functions: Vec<PeRuntimeFunctionInfo>,
-    instruction_boundaries: HashSet<u32>,
+    instruction_boundaries: Vec<u32>,
     dll_name: String,
     dll_base_lower: String,
     dll_path_str: String,
@@ -160,10 +194,18 @@ impl ScanImage {
         }
     }
 
-    pub fn index(&self, cfg: &FollowScanConfig) -> Option<&Arc<ReverseCallIndex>> {
+    pub(crate) fn index(
+        &self,
+        cfg: &FollowScanConfig,
+        budget: &IndexBudget,
+    ) -> Result<Option<&Arc<ReverseCallIndex>>, String> {
         self.index
-            .get_or_init(|| load_or_build_index(&self.path, cfg).map(Arc::new))
+            .get_or_init(|| {
+                load_or_build_index(&self.path, cfg, budget).map(|index| index.map(Arc::new))
+            })
             .as_ref()
+            .map(|index| index.as_ref())
+            .map_err(Clone::clone)
     }
 }
 
@@ -182,16 +224,9 @@ fn owner_func_for_site(
     data: &ScanImageData,
 ) -> (u32, crate::analysis::follow::trace::FuncRef) {
     if let Some(runtime) = runtime_for_site(data, site_rva) {
-        let export = data
-            .exports
-            .iter()
-            .find(|e| e.rva == runtime.begin_rva)
-            .or_else(|| {
-                data.exports
-                    .iter()
-                    .filter(|e| e.rva >= runtime.begin_rva && e.rva < runtime.end_rva)
-                    .min_by_key(|e| e.rva)
-            });
+        let export =
+            data.export_owners
+                .first_in_range(&data.exports, runtime.begin_rva, runtime.end_rva);
         let (name, is_internal) = export
             .map(|e| (e.name.clone(), false))
             .unwrap_or_else(|| (format!("sub_{:08X}", runtime.begin_rva), true));
@@ -208,7 +243,7 @@ fn owner_func_for_site(
         );
     }
 
-    if let Some(e) = attribute_to_func(site_rva, &data.exports) {
+    if let Some(e) = data.export_owners.at_or_before(&data.exports, site_rva) {
         (
             e.rva,
             crate::analysis::follow::trace::FuncRef::new(
@@ -250,14 +285,16 @@ fn is_decoded_instruction_boundary(data: &ScanImageData, site_rva: u32) -> bool 
     if data.pe.arch != 64 {
         return true;
     }
-    data.instruction_boundaries.contains(&site_rva)
+    data.instruction_boundaries.binary_search(&site_rva).is_ok()
 }
 
 fn push_indexed_site(
     bucket: &mut std::collections::HashMap<u32, Caller>,
     site: CallSite,
     data: &ScanImageData,
-) {
+    budget: &IndexBudget,
+) -> Result<(), String> {
+    budget.reserve(1)?;
     let (owner_rva, func) = owner_func_for_site(site.rva, data);
     let entry = bucket.entry(owner_rva).or_insert_with(|| Caller {
         func,
@@ -265,6 +302,7 @@ fn push_indexed_site(
         via_wrapper: None,
     });
     entry.sites.push(site);
+    Ok(())
 }
 
 fn direct_target_rva(pe: &crate::formats::pe::PeFile, target_va: u64) -> Option<u32> {
@@ -274,7 +312,12 @@ fn direct_target_rva(pe: &crate::formats::pe::PeFile, target_va: u64) -> Option<
     Some(rva)
 }
 
-fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -> ReverseCallIndex {
+fn build_reverse_index(
+    data: &ScanImageData,
+    meta: &SourceMeta,
+    hostile: bool,
+    budget: &IndexBudget,
+) -> Result<ReverseCallIndex, String> {
     let mut direct: std::collections::HashMap<u32, std::collections::HashMap<u32, Caller>> =
         std::collections::HashMap::new();
     let mut imports: std::collections::HashMap<String, std::collections::HashMap<u32, Caller>> =
@@ -330,7 +373,8 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
                             .to_owned(),
                         },
                         data,
-                    );
+                        budget,
+                    )?;
                 }
                 continue;
             }
@@ -357,12 +401,13 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
                         .to_owned(),
                     },
                     data,
-                );
+                    budget,
+                )?;
             }
         }
 
         if has_wdf_runtime && data.pe.arch == 64 {
-            index_wdf_table_calls(sec, sec_va_base, data, &mut imports);
+            index_wdf_table_calls(sec, sec_va_base, data, &mut imports, budget)?;
         }
 
         if hostile {
@@ -393,7 +438,8 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
                         },
                     },
                     data,
-                );
+                    budget,
+                )?;
             }
         }
     }
@@ -464,7 +510,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         });
     }
 
-    ReverseCallIndex {
+    Ok(ReverseCallIndex {
         index_version: REVERSE_CALL_INDEX_VERSION,
         source_path: meta.path.clone(),
         file_len: meta.file_len,
@@ -478,7 +524,7 @@ fn build_reverse_index(data: &ScanImageData, meta: &SourceMeta, hostile: bool) -
         direct,
         imports,
         wrappers,
-    }
+    })
 }
 
 fn index_wdf_table_calls(
@@ -486,7 +532,8 @@ fn index_wdf_table_calls(
     sec_va_base: u64,
     data: &ScanImageData,
     imports: &mut std::collections::HashMap<String, std::collections::HashMap<u32, Caller>>,
-) {
+    budget: &IndexBudget,
+) -> Result<(), String> {
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
     let mut decoder = Decoder::with_ip(data.pe.arch, sec, sec_va_base, DecoderOptions::NONE);
@@ -495,6 +542,11 @@ fn index_wdf_table_calls(
         let instr = decoder.decode();
         if instr.len() == 0 {
             break;
+        }
+        if insns.len() >= MAX_WDF_INSTRUCTIONS {
+            return Err(format!(
+                "WDF decode exceeded {MAX_WDF_INSTRUCTIONS} instructions (analysis incomplete)"
+            ));
         }
         insns.push(instr);
     }
@@ -525,7 +577,8 @@ fn index_wdf_table_calls(
                 pattern: format!("CALL WDF[0x{offset:X}]"),
             },
             data,
-        );
+            budget,
+        )?;
     }
 
     fn resolve_wdf_table_register_call(
@@ -574,6 +627,7 @@ fn index_wdf_table_calls(
         }
         None
     }
+    Ok(())
 }
 
 pub fn system_dirs(cfg: &FollowScanConfig) -> Vec<PathBuf> {
@@ -791,35 +845,44 @@ fn read_source_meta(path: &Path) -> Option<SourceMeta> {
     })
 }
 
-fn load_scan_data(path: &Path) -> Option<ScanImageData> {
-    let raw = crate::core::input::read_image(path).ok()?;
-    let pe = parse_pe(&raw).ok()?;
+fn load_scan_data(path: &Path) -> Result<Option<ScanImageData>, String> {
+    let Ok(raw) = crate::core::input::read_image(path) else {
+        return Ok(None);
+    };
+    let Ok(pe) = parse_pe(&raw) else {
+        return Ok(None);
+    };
     let exports = read_exports(&pe, &raw);
+    let export_owners = ExportOwnerIndex::new(&exports);
     let runtime_functions = read_runtime_functions(&pe, &raw);
-    let instruction_boundaries = collect_instruction_boundaries(&pe, &raw, &runtime_functions);
-    let dll_name = path.file_name()?.to_string_lossy().to_string();
+    let instruction_boundaries = collect_instruction_boundaries(&pe, &raw, &runtime_functions)?;
+    let Some(name) = path.file_name() else {
+        return Ok(None);
+    };
+    let dll_name = name.to_string_lossy().to_string();
     let dll_base_lower = normalize_dll_base(&dll_name);
     let dll_path_str = path.to_string_lossy().to_string();
-    Some(ScanImageData {
+    Ok(Some(ScanImageData {
         raw,
         pe,
         exports,
+        export_owners,
         runtime_functions,
         instruction_boundaries,
         dll_name,
         dll_base_lower,
         dll_path_str,
-    })
+    }))
 }
 
 fn collect_instruction_boundaries(
     pe: &crate::formats::pe::PeFile,
     raw: &[u8],
     runtime_functions: &[PeRuntimeFunctionInfo],
-) -> HashSet<u32> {
-    let mut out = HashSet::new();
+) -> Result<Vec<u32>, String> {
+    let mut out = Vec::new();
     if pe.arch != 64 {
-        return out;
+        return Ok(out);
     }
 
     use iced_x86::{Decoder, DecoderOptions};
@@ -848,31 +911,72 @@ fn collect_instruction_boundaries(
             if instr.len() == 0 {
                 break;
             }
-            out.insert(instr.ip().wrapping_sub(pe.image_base) as u32);
+            if out.len() >= MAX_INSTRUCTION_BOUNDARIES {
+                return Err(format!(
+                    "x64 call-boundary decode exceeded {MAX_INSTRUCTION_BOUNDARIES} instructions (analysis incomplete)"
+                ));
+            }
+            out.push(instr.ip().wrapping_sub(pe.image_base) as u32);
         }
     }
-    out
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
-fn load_or_build_index(path: &Path, cfg: &FollowScanConfig) -> Option<ReverseCallIndex> {
-    let meta = read_source_meta(path)?;
+fn load_or_build_index(
+    path: &Path,
+    cfg: &FollowScanConfig,
+    budget: &IndexBudget,
+) -> Result<Option<ReverseCallIndex>, String> {
+    let Some(meta) = read_source_meta(path) else {
+        return Ok(None);
+    };
     if !cfg.reload {
         if let Some(cached) = load_index_from_cache(path, &meta) {
-            return Some(cached);
+            budget.reserve(index_site_count(&cached))?;
+            return Ok(Some(cached));
         }
     }
 
-    let data = load_scan_data(path)?;
-    let index = build_reverse_index(&data, &meta, cfg.hostile);
+    let Some(data) =
+        load_scan_data(path).map_err(|error| format!("{}: {error}", path.display()))?
+    else {
+        return Ok(None);
+    };
+    let index = build_reverse_index(&data, &meta, cfg.hostile, budget)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     if !cfg.reload {
         let _ = write_index_to_cache(path, &index);
     }
-    Some(index)
+    Ok(Some(index))
+}
+
+fn index_site_count(index: &ReverseCallIndex) -> usize {
+    index
+        .direct
+        .values()
+        .chain(index.imports.values())
+        .flat_map(|callers| callers.iter())
+        .fold(0usize, |total, caller| {
+            total.saturating_add(caller.sites.len())
+        })
 }
 
 fn load_index_from_cache(path: &Path, meta: &SourceMeta) -> Option<ReverseCallIndex> {
     let cache_path = cache_path_for_image(path);
-    let bytes = std::fs::read(cache_path).ok()?;
+    // Cache contents are local but may be stale or malformed. Bound the read
+    // before deserializing rather than allocating from its declared size.
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    std::fs::File::open(cache_path)
+        .ok()?
+        .take(MAX_CACHE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_CACHE_BYTES {
+        return None;
+    }
     let cached: ReverseCallIndex = serde_json::from_slice(&bytes).ok()?;
     if cached.index_version == REVERSE_CALL_INDEX_VERSION
         && cached.source_path.eq_ignore_ascii_case(&meta.path)
@@ -892,6 +996,9 @@ fn write_index_to_cache(path: &Path, index: &ReverseCallIndex) -> Result<(), Str
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let bytes = serde_json::to_vec(index).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_CACHE_BYTES {
+        return Ok(());
+    }
     std::fs::write(cache_path, bytes).map_err(|e| e.to_string())
 }
 
@@ -912,4 +1019,23 @@ fn follow_cache_root() -> PathBuf {
         return PathBuf::from(local).join("resx").join("follow-index");
     }
     std::env::temp_dir().join("resx").join("follow-index")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IndexBudget;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn index_budget_accepts_boundary_and_rejects_next_site() {
+        let budget = IndexBudget::new(3);
+        budget.reserve(2).unwrap();
+        budget.reserve(1).unwrap();
+        assert!(budget
+            .reserve(1)
+            .unwrap_err()
+            .contains("analysis incomplete"));
+        assert_eq!(budget.used.load(Ordering::Relaxed), 3);
+        assert!(budget.reserve(usize::MAX).is_err());
+    }
 }

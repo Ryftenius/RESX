@@ -1,8 +1,8 @@
 //! Command-line grammar. Every command owns its arguments; shared concerns are
 //! flattened option groups, each rendered under its own `--help` heading.
 //!
-//! Option names from earlier releases stay accepted as hidden aliases so scripts,
-//! the FFI layer, and the VS Code extension keep working unchanged.
+//! Option names from earlier releases stay accepted as hidden aliases so scripts
+//! and the FFI layer keep working unchanged.
 
 use clap::{Args, Parser, Subcommand};
 
@@ -37,6 +37,14 @@ fn parse_strings_scan_mb(value: &str) -> Result<usize, String> {
         .ok()
         .filter(|value| (1..=128).contains(value))
         .ok_or_else(|| "strings scan size must be between 1 and 128 MiB".to_owned())
+}
+
+fn parse_index_sites(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=250_000).contains(value))
+        .ok_or_else(|| "call index site limit must be between 1 and 250000".to_owned())
 }
 
 const FILTER_TERMS: &str = "winapi, iat, internal, crt, syscall, or a DLL name";
@@ -900,6 +908,10 @@ pub struct CallersArgs {
     /// Function whose callers are traced
     pub function: String,
 
+    /// Maximum call sites indexed across scanned images, 1-250000
+    #[arg(long = "max-index-sites", value_name = "N", value_parser = parse_index_sites)]
+    pub max_index_sites: Option<usize>,
+
     /// Output layout: tree, flat, or list
     #[arg(long = "format", value_name = "FORMAT", default_value = "tree")]
     pub format: String,
@@ -1365,6 +1377,10 @@ pub struct ConfigArgs {
     #[arg(long = "max-total", value_name = "N|unlimited", value_parser = parse_budget)]
     pub max_total: Option<usize>,
 
+    /// Saved call-site indexing limit for `callers`, 1-250000
+    #[arg(long = "max-index-sites", value_name = "N", value_parser = parse_index_sites)]
+    pub max_index_sites: Option<usize>,
+
     /// Saved maximum number of strings returned, 1-32768
     #[arg(long = "strings-limit", value_name = "N", value_parser = parse_strings_limit)]
     pub strings_limit: Option<usize>,
@@ -1374,7 +1390,7 @@ pub struct ConfigArgs {
     pub strings_scan_mb: Option<usize>,
 
     /// Restore the default analysis limits
-    #[arg(long = "reset-limits", conflicts_with_all = ["max_insns", "max_total", "strings_limit", "strings_scan_mb"])]
+    #[arg(long = "reset-limits", conflicts_with_all = ["max_insns", "max_total", "max_index_sites", "strings_limit", "strings_scan_mb"])]
     pub reset_limits: bool,
 }
 
@@ -1424,6 +1440,18 @@ mod tests {
             .map(str::to_owned)
             .collect();
         parse_cli(args).map(Cli::lower)
+    }
+
+    #[test]
+    fn callers_index_limit_has_checked_cli_and_saved_forms() {
+        let (_, options) = parse(&["callers", "a.exe", "f", "--max-index-sites", "250000"])
+            .expect("callers site limit");
+        assert_eq!(options.max_index_sites, 250_000);
+        assert!(parse(&["callers", "a.exe", "f", "--max-index-sites", "0"]).is_err());
+        assert!(parse(&["callers", "a.exe", "f", "--max-index-sites", "250001"]).is_err());
+        let (_, options) =
+            parse(&["config", "--max-index-sites", "12000"]).expect("saved site limit");
+        assert_eq!(options.saved_max_index_sites, Some(12_000));
     }
 
     #[test]
@@ -1535,8 +1563,8 @@ mod tests {
         assert!(parse(&["dump", "a.dll", "f", "--branch-arrows"]).is_err());
     }
 
-    /// Spellings from before per-command options. Scripts, the FFI layer and the VS Code
-    /// extension pass these, so each must keep parsing under its command.
+    /// Spellings from before per-command options. Scripts and the FFI layer
+    /// pass these, so each must keep parsing under its command.
     #[test]
     fn legacy_spellings_still_parse() {
         let dump = ["dump", "a.dll", "f"];

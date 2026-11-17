@@ -27,7 +27,7 @@ option groups.
 | `xrefs <image> <target>` | Incoming references |
 | `cfg <image> <target>` | Function CFG |
 | `reconstruct-cfg <image>` | Startup and reachable image flow |
-| `callers <image> <target>` | Reverse caller tree |
+| `callers <image> <target>` | Reverse caller tree; `--max-index-sites N` bounds indexed call sites (default 50,000) |
 | `intelli <image> [target]` | Bounded static intelligence report |
 | `behavior <image>` | Static behavior indicators, including how APIs are resolved at run time |
 

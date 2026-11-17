@@ -1,6 +1,6 @@
 use super::api::{is_guard_dispatch_call, track_indirect_register, track_wdf_table_register};
 use super::*;
-use crate::formats::pe::attribute_to_func;
+use crate::formats::pe::ExportOwnerIndex;
 
 /// Instructions decoded per chunk of the linear sweep.
 const XREF_CHUNK_INSNS: usize = 32_768;
@@ -44,6 +44,7 @@ pub fn find_xrefs(
         dispatch_slot,
         target_rva,
         target_name,
+        owner_index: ExportOwnerIndex::new(exports),
     };
 
     for section in &pe.sections {
@@ -149,6 +150,7 @@ struct XrefScan<'a> {
     dispatch_slot: u64,
     target_rva: u32,
     target_name: &'a str,
+    owner_index: ExportOwnerIndex,
 }
 
 impl XrefScan<'_> {
@@ -174,20 +176,29 @@ impl XrefScan<'_> {
         {
             {
                 let site_rva = insn.rva;
-                let owner = attribute_to_func(site_rva, exports)
-                    .map(|e| e.name.clone())
-                    .or_else(|| {
-                        symbols.and_then(|si| {
-                            si.lookup(pe.image_base + site_rva as u64).map(|m| {
-                                if m.displacement == 0 {
-                                    m.symbol.name.clone()
-                                } else {
-                                    format!("{}+0x{:X}", m.symbol.name, m.displacement)
-                                }
+                // Most decoded instructions do not reference the requested target.
+                // Resolve their owner only when emitting a matching result; a PE
+                // can legally contain tens of thousands of export names.
+                let owner_name = std::cell::OnceCell::new();
+                let owner = || {
+                    owner_name.get_or_init(|| {
+                        self.owner_index
+                            .at_or_before(exports, site_rva)
+                            .map(|e| e.name.clone())
+                            .or_else(|| {
+                                symbols.and_then(|si| {
+                                    si.lookup(pe.image_base + site_rva as u64).map(|m| {
+                                        if m.displacement == 0 {
+                                            m.symbol.name.clone()
+                                        } else {
+                                            format!("{}+0x{:X}", m.symbol.name, m.displacement)
+                                        }
+                                    })
+                                })
                             })
-                        })
+                            .unwrap_or_else(|| format!("sub_{:08X}", site_rva))
                     })
-                    .unwrap_or_else(|| format!("sub_{:08X}", site_rva));
+                };
 
                 if !insn.is_call && !insn.is_jmp && !insn.is_jcc {
                     if insn.iced.is_ip_rel_memory_operand()
@@ -198,7 +209,7 @@ impl XrefScan<'_> {
                         } else {
                             "MEMORY"
                         };
-                        let line = format!("{kind} {owner} [site 0x{site_rva:08X}] -> {target_name} [target 0x{target_rva:08X}]");
+                        let line = format!("{kind} {} [site 0x{site_rva:08X}] -> {target_name} [target 0x{target_rva:08X}]", owner());
                         if seen.insert(line.clone()) {
                             results.push(line);
                         }
@@ -212,7 +223,11 @@ impl XrefScan<'_> {
                         let kind = if insn.is_call { "CALL" } else { "JMP" };
                         let line = format!(
                             "{} {} [site 0x{:08X}] -> {} [target 0x{:08X}]",
-                            kind, owner, site_rva, target_name, target_rva
+                            kind,
+                            owner(),
+                            site_rva,
+                            target_name,
+                            target_rva
                         );
                         if seen.insert(line.clone()) {
                             results.push(line);
@@ -243,7 +258,12 @@ impl XrefScan<'_> {
                                     let kind = if insn.is_call { "CALL" } else { "JMP" };
                                     let line = format!(
                                         "{} {} [site 0x{:08X}] -> {}!{} via {}",
-                                        kind, owner, site_rva, src.dll, src.label, src.method
+                                        kind,
+                                        owner(),
+                                        site_rva,
+                                        src.dll,
+                                        src.label,
+                                        src.method
                                     );
                                     if seen.insert(line.clone()) {
                                         results.push(line);
@@ -273,12 +293,21 @@ impl XrefScan<'_> {
                             {
                                 format!(
                                     "{} {} [site 0x{:08X}] -> {}!{} [IAT 0x{:08X}]",
-                                    kind, owner, site_rva, dll_name, func_name, slot_rva
+                                    kind,
+                                    owner(),
+                                    site_rva,
+                                    dll_name,
+                                    func_name,
+                                    slot_rva
                                 )
                             } else {
                                 format!(
                                     "{} {} [site 0x{:08X}] -> {} [IAT 0x{:08X}]",
-                                    kind, owner, site_rva, target_name, slot_rva
+                                    kind,
+                                    owner(),
+                                    site_rva,
+                                    target_name,
+                                    slot_rva
                                 )
                             };
                             if seen.insert(line.clone()) {
@@ -305,13 +334,18 @@ impl XrefScan<'_> {
                             let line = if src.dll.eq_ignore_ascii_case("WDF") {
                                 format!(
                                     "{} {} [site 0x{:08X}] -> {}!{} via {}",
-                                    kind, owner, site_rva, src.dll, src.label, src.method
+                                    kind,
+                                    owner(),
+                                    site_rva,
+                                    src.dll,
+                                    src.label,
+                                    src.method
                                 )
                             } else {
                                 format!(
                                     "{} {} [site 0x{:08X}] -> {}!{} [IAT 0x{:08X}] via {}",
                                     kind,
-                                    owner,
+                                    owner(),
                                     site_rva,
                                     src.dll,
                                     src.label,

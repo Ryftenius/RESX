@@ -2,6 +2,22 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+pub const MAX_DIRECTORY_WALK_ENTRIES: usize = 100_000;
+
+/// Whether metadata obtained with `symlink_metadata` names a link or junction.
+/// Directory walkers must check this before following attacker-supplied entries.
+pub fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 /// Validate an untrusted filename component before joining it to a trusted root.
 /// This is deliberately independent of the host's path syntax.
 pub fn is_safe_basename(name: &str) -> bool {

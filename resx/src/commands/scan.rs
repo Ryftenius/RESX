@@ -216,20 +216,35 @@ fn collect_image_paths(
 ) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     let mut queue = VecDeque::new();
+    let mut walked = 0usize;
     queue.push_back(root.to_path_buf());
 
     while let Some(path) = queue.pop_front() {
         if out.len() >= max_files {
             break;
         }
-        let Ok(meta) = std::fs::metadata(&path) else {
+        if walked >= crate::core::input::MAX_DIRECTORY_WALK_ENTRIES {
+            return Err("Scan directory traversal exceeded 100,000 entries".into());
+        }
+        walked += 1;
+        let Ok(meta) = (if path == root {
+            std::fs::metadata(&path)
+        } else {
+            std::fs::symlink_metadata(&path)
+        }) else {
             continue;
         };
+        if path != root && crate::core::input::is_reparse_point(&meta) {
+            continue;
+        }
         if meta.is_dir() {
             let Ok(entries) = std::fs::read_dir(&path) else {
                 continue;
             };
             for entry in entries.flatten() {
+                if queue.len() >= crate::core::input::MAX_DIRECTORY_WALK_ENTRIES {
+                    return Err("Scan directory queue exceeded 100,000 entries".into());
+                }
                 queue.push_back(entry.path());
             }
             continue;
