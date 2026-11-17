@@ -35,8 +35,8 @@ use crate::core::color::Colors;
 use crate::core::config::Config;
 use crate::core::json::versioned_object;
 use crate::core::output::{
-    print_c_recomp, print_eat, print_iat, print_insns, print_pe_anomalies, print_sections,
-    print_yara_matches, StageProgress,
+    print_c_recomp, print_eat, print_iat, print_insns, print_insns_with_prefix, print_pe_anomalies,
+    print_sections, print_yara_matches, StageProgress,
 };
 use crate::core::search::find_dll_path;
 use crate::formats::pdb::{load_pdb_symbol, load_pdb_symbols};

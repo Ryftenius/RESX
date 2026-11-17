@@ -13,52 +13,40 @@ RESX isn't intended to replace IDA Pro or Ghidra. It's a specialized toolkit tha
 
 ## Showcase & Examples
 
-Every example below is real RESX output. The tested examples include checked-in public fixtures where linked; Example 2 also preserves a historical IDA comparison from a separate sample. Click any title to expand it.
+Every example below is real RESX output. The first comparison uses the checked-in public overlap fixture and the current renderer.
 
-<table>
-<tr><th colspan="2">Historical Example 2 comparison: a syscall stub built to break disassemblers</th></tr>
-<tr><th>IDA Pro 9.0 + Hex-Rays</th><th>RESX 2.2.1</th></tr>
-<tr>
-<td valign="top">
+### Current overlap comparison: same public PE, no PDB
+
+IDA Pro 9.0's default analysis follows the carrier instruction and does not decode the `call` at `0x14000100F`:
 
 ```asm
-jz   short near ptr loc_F4C5+2
-jmp  short $+2
-mov  r11, 9F08EB0000000FE8h
-       ; F4C7: Can't disassemble
-mov  eax, 0C0000022h
-...
-db 8Bh, 0C1h, 48h, ...  ; stub = data
+140001009  jz   short near ptr loc_14000100D+2
+14000100B  jmp  short $+2
+14000100D  mov  r11, 9F08EB0000000FE8h
+140001017  mov  eax, 0C0000022h
+14000101C  jmp  short $+2
+14000101E  retn
 ```
 
-```c
-void sub_14000F460()
-{
-  JUMPOUT(0x14000F4C7LL);
-}
+RESX `main` separates the two decodes in its console output (excerpt from the [public fixture](resx/tests/data/overlap_probe.exe)):
+
+```text
+  * marks instructions involved in overlapping decode streams:
+  0x0000100f starts inside instruction at 0x0000100d
+  00001009  74 04                          je         short 0x14000100f
+  0000100b  eb 00                          jmp        short 0x14000100d
+
+*0000100d  49 bb e8 0f 00 00 00 eb 08 9f  mov        r11, 0x9f08eb0000000fe8
+  ... Continuation of 0x0000100d
+
+*0000100f  e8 0f 00 00 00                 call       HiddenTarget
+  ... Continuation of 0x0000100f
+
+API Call Map for OverlapProbe  [1 call site(s)]:
+  └── 0x100F  CALL  HiddenTarget
 ```
 
-</td>
-<td valign="top">
-
-```asm
-je   short 0x14000f4c7
-jmp  short 0x14000f4c5
-mov  r11, 0x9f08eb0000000fe8
-call 0x14000f4db   ; hidden call
-jmp  short 0x14000f4d6
-mov  eax, 0xc0000022  ; decoy
-...
-Overlapping decode streams: 10
-  nop/mov/lea/cmp/imul carriers
-  each with its hidden jmp
-
-└── 0xF4C7  CALL  sub_0000F4DB
-```
-
-</td>
-</tr>
-</table>
+The asterisk marks the carrier instruction and the alternate `call`. The two paths are coloured separately in a terminal and remain distinct without colour or instruction bytes. A longer listing and the reproduction steps are in [Example 2](#tested-example-2).
 
 | | Tested example | What RESX shows |
 | --- | --- | --- |
@@ -69,7 +57,7 @@ Overlapping decode streams: 10
 
 <a id="tested-example-1"></a>
 <details>
-<summary><h3 style="display: inline;">Tested Example 1: Encoded APIs &amp; Manual Resolution</h3></summary>
+<summary><strong>Example 1: Encoded API resolution</strong></summary>
 
 Let's say I want to analyze a binary that hides its Windows API names with XOR and resolves them by walking the PEB loader list and the module's export table. The checked-in [C sample](resx/tests/data/manual_resolver.c) allocates a page, writes an inert byte, changes the page protection, releases it, and attempts a protected-directory listing. Its [compiled EXE](resx/tests/data/manual_resolver.exe) has no PDB, and none of the seven APIs below appear in its import table.
 
@@ -106,7 +94,7 @@ With one small sample, RESX recovers the API names, the XOR key, the manual reso
 
 <a id="tested-example-2"></a>
 <details>
-<summary><h3 style="display: inline;">Tested Example 2: Overlapping Instruction Seams (with a historical IDA comparison)</h3></summary>
+<summary><strong>Example 2: Overlapping instruction streams</strong></summary>
 
 **Reproduce the overlap with the public fixture.** The checked-in [x64 assembly source](resx/tests/data/overlap_probe.asm) and [2 KB PE](resx/tests/data/overlap_probe.exe) live with the other public samples in [the test-data directory](resx/tests/data/README.md), which includes a warning and rebuild instructions. Its entry point and hidden callee are inert. From the repository root:
 
@@ -128,17 +116,27 @@ IDA does not decode an instruction at `0x14000100F` or create a code reference f
 OverlapProbe @ RVA 0x00001003  (ord 2)
 
 overlap_probe.exe!OverlapProbe  [RVA 0x00001003, VA 0x140001003]
+  * marks instructions involved in overlapping decode streams:
+  0x0000100f starts inside instruction at 0x0000100d
   00001009  74 04                          je         short 0x14000100f
   0000100b  eb 00                          jmp        short 0x14000100d
-  0000100d  49 bb e8 0f 00 00 00 eb 08 9f  mov        r11, 0x9f08eb0000000fe8
-  0000100f  e8 0f 00 00 00                 call       HiddenTarget
-  00001014  eb 08                          jmp        short 0x14000101e
+
+*0000100d  49 bb e8 0f 00 00 00 eb 08 9f  mov        r11, 0x9f08eb0000000fe8
+  ... Continuation of 0x0000100d
+│00001017  b8 22 00 00 c0                 mov        eax, 0xc0000022
+│0000101c  eb 00                          jmp        short 0x14000101e
+
+*0000100f  e8 0f 00 00 00                 call       HiddenTarget
+  ... Continuation of 0x0000100f
+│00001014  eb 08                          jmp        short 0x14000101e
+
+  0000101e  c3                             ret
 
 API Call Map for OverlapProbe  [1 call site(s)]:
   └── 0x100F  CALL  HiddenTarget
 ```
 
-The `je` at `0x1009` enters two bytes into the `mov` at `0x100D`; RESX shows both decodes and follows the hidden call. These lines are excerpted from the checked-in binary's output. Both tools were run without a PDB. The fixture proves this overlap behavior, but it is **not** the syscall-stub binary used for the historical IDA Pro comparison below.
+The `je` at `0x1009` enters two bytes into the `mov` at `0x100D`. The carrier instruction and overlapping `call` are both marked `*`, and each path's continuation is shown separately. The marker, addresses and bytes use distinct colours for the two paths in a terminal; the markers remain visible without colour or bytes. These lines are excerpted from the checked-in binary's output. Both tools were run without a PDB. The fixture proves this overlap behavior, but it is **not** the syscall-stub binary used for the historical IDA Pro comparison below.
 
 The historical comparison used an advanced sample that never calls `ntdll`. It carries its own syscall stub, and the stub is built to break disassemblers. It uses *overlapping instruction seams*: an always-taken `jz` lands two or three bytes inside a longer "carrier" instruction, so the same bytes decode as two different instruction streams. One of those streams is the code that actually runs. The other is a decoy that ends in a fake failure path. The sample has no PDB, and every name below was assigned by the tools.
 
@@ -167,7 +165,7 @@ void sub_14000F460()
 
 Because the hidden `call` is never decoded, nothing in IDA reaches `0xF4DB`. The routine that performs the syscall is never disassembled and stays as raw `db`/`dq` bytes.
 
-`resx dump` decodes both streams and keeps them side by side. The carrier at `0xF4C5` and the overlapping `call` at `0xF4C7` are both in the listing, and the call map follows the hidden edge into the stub:
+The archived RESX 2.2.1 output decodes both streams and follows the hidden edge into the stub. Its address-sorted listing puts the carrier at `0xF4C5` next to the overlapping `call` at `0xF4C7`; the current renderer separates overlapping paths as shown with the public fixture above:
 
 ```powershell
 > resx dump .\sample.exe --at 0xF460 --bytes --calls --no-pdb  # historical sample
@@ -186,7 +184,7 @@ API Call Map for fn_0x0000F460  [1 call site(s)]:
   └── 0xF4C7  CALL  sub_0000F4DB
 ```
 
-The stub at `0xF4DB` moves the service number into `eax`, shifts the arguments into the native syscall ABI, and then passes through five more seams. Each one is keyed on a bit of the service number, and the carriers are `nop`, `mov`, `lea`, `cmp` and `imul`, with immediates that differ between builds. A linear decode yields junk such as `nop dword ptr [rax+rax-7844FD15h]` and `imul r11d, 0B3402EBh`, and hides every real `jmp`. With `--verbose`, RESX reports each seam it resolved, naming the carrier and the alternate `jmp` inside it, and lays the real jump directly under its carrier:
+The stub at `0xF4DB` moves the service number into `eax`, shifts the arguments into the native syscall ABI, and then passes through five more seams. Each one is keyed on a bit of the service number, and the carriers are `nop`, `mov`, `lea`, `cmp` and `imul`, with immediates that differ between builds. A linear decode yields junk such as `nop dword ptr [rax+rax-7844FD15h]` and `imul r11d, 0B3402EBh`, and hides every real `jmp`. In this archived `--verbose` output, RESX reports each seam it resolved, naming the carrier and the alternate `jmp` inside it:
 
 ```powershell
 > resx dump .\sample.exe --at 0xF4DB --bytes --verbose --no-pdb  # historical sample
@@ -216,7 +214,7 @@ Tested with RESX 2.2.1 and IDA Pro 9.0 (Hex-Rays 9.0.0.240807), both without sym
 
 <a id="tested-example-3"></a>
 <details>
-<summary><h3 style="display: inline;">Tested Example 3: API Hashing vs IDA Pro &amp; Ghidra</h3></summary>
+<summary><strong>Example 3: API hashing</strong></summary>
 
 Let's say I'm triaging a loader that hides every API it uses behind a hash. This is the shellcode staple: walk the PEB to find a module, walk its export table, and hash each export name until one matches a constant baked into the binary. No API name appears in the image, not even as an encoded string, so there is nothing to decode. The only way to name these calls is to know the hash construction and invert it.
 
@@ -297,7 +295,7 @@ Tested with RESX 2.2.1, IDA Pro 9.0 (Hex-Rays 9.0.0.240807) and Ghidra 11.2.1, e
 
 <a id="tested-example-4"></a>
 <details>
-<summary><h3 style="display: inline;">Tested Example 4: Learning an API for Implant &amp; Exploit Development</h3></summary>
+<summary><strong>Example 4: WriteProcessMemory to syscall</strong></summary>
 
 Now let's look at it from the other side. Say I'm writing an implant or an exploit and need to write into another process. Before I use `WriteProcessMemory`, I want to know exactly what it takes, where it really lives, what it does under the hood, and what the kernel does with it, without opening a disassembler or a debugger.
 
@@ -423,7 +421,10 @@ Tested with RESX 2.3.0 against the system binaries of the test machine. RVAs and
 ## Workflows
 
 <details>
-<summary><h3 style="display: inline;">Binary Triage & API Call Graphs</h3></summary>
+<summary><strong>Browse 10 workflows</strong></summary>
+
+<details>
+<summary><strong>Binary triage &amp; call graphs</strong></summary>
 
 Let's say I want to quickly figure out what this binary is doing we can invoke the calls command to get a
 call-graph on the Windows API's it invokes *(or any other .dll, CRT, or internal functions if you have PDB)*. This can very quickly give us a basis and structured indicators on where
@@ -502,7 +503,7 @@ From this alone, we can infer that the binary performs **memory management, conc
 </details>
 
 <details>
-<summary><h3 style="display: inline;">API-Aware Static Analysis</h3></summary>
+<summary><strong>API-aware static analysis</strong></summary>
 
 RESX goes beyond identifying API calls. With Windows SDK integration, it can recover official parameter names, resolve Windows constants, identify function pointers, and reconstruct arguments directly from machine code, even without PDB symbols.
 
@@ -549,7 +550,7 @@ From these calls alone, we can infer that the binary **reserves 64 KiB of virtua
 </details>
 
 <details>
-<summary><h3 style="display: inline;">Dynamic API Resolution &amp; Deobfuscation</h3></summary>
+<summary><strong>Dynamic API resolution</strong></summary>
 
 RESX can statically recover dynamically resolved Windows APIs, including those hidden behind **API hashing, PEB loader-list traversal, manual export-table parsing, and encoded API names**. This allows analysts to identify functionality that may be absent from a binary's conventional import table, without manually reversing the resolution routines.
 
@@ -593,7 +594,7 @@ RESX identifies the underlying Windows APIs and their resolution mechanisms, tur
 </details>
 
 <details>
-<summary><h3 style="display: inline;">Windows Internals, Syscalls &amp; Function Disassembly</h3></summary>
+<summary><strong>Windows internals &amp; syscalls</strong></summary>
 
 RESX can also help with Windows internals. Let's locate VirtualAlloc and follow it into the kernel.
 
@@ -669,7 +670,7 @@ That same kernel awareness drives RESX's driver analysis: dispatch routines, IOC
 </details>
 
 <details>
-<summary><h3 style="display: inline;">IOCTL &amp; Kernel Driver Analysis</h3></summary>
+<summary><strong>IOCTL &amp; driver analysis</strong></summary>
 
 RESX can statically reconstruct Windows driver communication interfaces from both **user-mode clients and kernel-mode drivers**, recovering IOCTL codes, request arguments, dispatch routines, buffer requirements, and validation logic without executing the binaries.
 
@@ -748,7 +749,7 @@ This gives analysts a starting point for **reverse-engineering undocumented driv
 </details>
 
 <details>
-<summary><h3 style="display: inline;">Startup Flow &amp; Thread Callback Recovery</h3></summary>
+<summary><strong>Startup &amp; callbacks</strong></summary>
 
 Finding a `CreateThread` call is useful, but what does the thread actually do? RESX can follow a statically recovered callback into the same image and show the code behind it, instead of leaving us with just a function pointer.
 
@@ -777,7 +778,7 @@ Here we can follow the path from the executable's entry point to `CreateThread`,
 </details>
 
 <details>
-<summary><h3 style="display: inline;">Comparing Builds &amp; Hunting Related Binaries</h3></summary>
+<summary><strong>Diffing &amp; hunting</strong></summary>
 
 Let's say we have two versions of a DLL and want to figure out where to look first. Comparing raw bytes can get noisy when addresses or layouts move around, so RESX can compare normalized function code, control-flow structure, API calls, and other properties instead.
 
@@ -832,7 +833,7 @@ These examples profile 200 functions per image. Increase `--max-functions` when 
 </details>
 
 <details>
-<summary><h3 style="display: inline;">PowerShell Automation &amp; JSON Analysis</h3></summary>
+<summary><strong>PowerShell &amp; JSON</strong></summary>
 
 RESX isn't limited to reading a report in the terminal. We can take its JSON output and use it directly in PowerShell, Python, or another tool, which lets us ask more specific questions about the binary.
 
@@ -886,7 +887,7 @@ The executable-memory filter returns no rows for this sample. We can extend the 
 </details>
 
 <details>
-<summary><h3 style="display: inline;">PE Structure, Section Permissions &amp; Validation</h3></summary>
+<summary><strong>PE structure &amp; validation</strong></summary>
 
 Before diving into individual functions, we can also check how the image is laid out. Section permissions, entropy, and structural checks give us another way to decide what needs a closer look.
 
@@ -927,7 +928,7 @@ This fixture passes the structural checks. Between the section layout, permissio
 </details>
 
 <details>
-<summary><h3 style="display: inline;">Live Analysis with SKUGGA</h3></summary>
+<summary><strong>Live analysis with SKUGGA</strong></summary>
 
 RESX also works in conjunction with another one of my tools, ***[SKUGGA](https://github.com/Ryftenius/SKUGGA/)***, which is a lightweight process instrumentation framework. We can use RESX to find an interesting call, then run the same binary under SKUGGA to see its arguments, result, and call stack live.
 
@@ -976,6 +977,8 @@ resx /dump "DYNAMIC.exe" --at 0x1100 --bytes --max-insns 100 --no-pdb --no-color
 ```
 
 The call at `0x1160` is six bytes long, so `0x1166` is the return address immediately after it, the same address shown in SKUGGA's live stack. We have gone from a dynamically resolved API, to its recovered arguments, to the matching live allocation and back to the exact machine-code call site.
+
+</details>
 
 </details>
 

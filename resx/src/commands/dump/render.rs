@@ -1,6 +1,8 @@
 //! Render completed reports. No sessions, image bytes, providers or analysis calls.
 use super::*;
 use crate::analysis::inspection::FunctionReport;
+use crate::analysis::reconstruction::decode_conflicts::DecodeConflicts;
+use std::collections::BTreeSet;
 
 pub(super) struct FunctionView<'a> {
     pub report: FunctionReport<'a>,
@@ -204,7 +206,15 @@ pub(super) fn render_text(
         .ok();
     }
     if !cfg.no_disassembly {
-        print_insns(w, &insns, cfg, c);
+        if !decode_conflicts
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "overlapping-decoded-instructions")
+        {
+            print_insns(w, &insns, cfg, c);
+        } else {
+            print_overlapping_insns(w, &insns, &decode_conflicts, cfg, c);
+        }
     }
     if cfg.verbose {
         writeln!(
@@ -327,6 +337,107 @@ pub(super) fn render_text(
         }
     }
     Ok(())
+}
+
+fn print_overlapping_insns(
+    w: &mut dyn Write,
+    insns: &[Instruction],
+    conflicts: &DecodeConflicts,
+    cfg: &Config,
+    c: &Colors,
+) {
+    let mut outer_blocks = BTreeSet::new();
+    let mut inner_blocks = BTreeSet::new();
+    let mut overlap_pairs = BTreeSet::new();
+    for finding in conflicts
+        .findings
+        .iter()
+        .filter(|finding| finding.kind == "overlapping-decoded-instructions")
+    {
+        let outer = insns
+            .iter()
+            .find(|insn| insn.rva == finding.covering_instruction_rva);
+        let inner = insns.iter().find(|insn| insn.rva == finding.target_rva);
+        if let (Some(outer), Some(inner)) = (outer, inner) {
+            outer_blocks.insert(outer.block_start);
+            inner_blocks.insert(inner.block_start);
+            overlap_pairs.insert((outer.rva, inner.block_start));
+        }
+    }
+    writeln!(
+        w,
+        "  {}",
+        c.b_yellow("* marks instructions involved in overlapping decode streams:")
+    )
+    .ok();
+    for (outer, inner) in overlap_pairs.iter().take(8) {
+        writeln!(
+            w,
+            "  {} starts inside instruction at {}",
+            c.b_mag(&format!("0x{inner:08x}")),
+            c.b_blue(&format!("0x{outer:08x}"))
+        )
+        .ok();
+    }
+    if overlap_pairs.len() > 8 {
+        writeln!(
+            w,
+            "  {}",
+            c.dim("Additional overlaps omitted from summary.")
+        )
+        .ok();
+    }
+
+    // Keep the two paths apart; an address-sorted listing makes their instructions
+    // appear consecutive even though they interpret some of the same bytes.
+    let mut rows: Vec<_> = insns.iter().collect();
+    rows.sort_unstable_by_key(|insn| (insn.block_start, insn.rva));
+    let mut current_block = None;
+    let mut previous_overlap = false;
+    let mut first_in_block = false;
+    let mut continuation_printed = false;
+    for row in rows {
+        let role = (
+            outer_blocks.contains(&row.block_start),
+            inner_blocks.contains(&row.block_start),
+        );
+        let overlapping = role != (false, false);
+        if current_block != Some(row.block_start) {
+            if current_block.is_some() && (previous_overlap || overlapping) {
+                writeln!(w).ok();
+            }
+            current_block = Some(row.block_start);
+            previous_overlap = overlapping;
+            first_in_block = true;
+            continuation_printed = false;
+        }
+        if !overlapping {
+            print_insns(w, std::slice::from_ref(row), cfg, c);
+            first_in_block = false;
+            continue;
+        }
+        let style: fn(&Colors, &str) -> String = match role {
+            (true, false) => Colors::b_blue,
+            (false, true) => Colors::b_mag,
+            (true, true) => Colors::b_yellow,
+            (false, false) => unreachable!(),
+        };
+        if !first_in_block && !continuation_printed {
+            writeln!(
+                w,
+                "  {}",
+                style(c, &format!("... Continuation of 0x{:08x}", row.block_start))
+            )
+            .ok();
+            continuation_printed = true;
+        }
+        let marker = style(c, if first_in_block { "*" } else { "│" });
+        print_insns_with_prefix(w, std::slice::from_ref(row), cfg, c, &marker, Some(style));
+        first_in_block = false;
+    }
+    if conflicts.analysis_truncated {
+        writeln!(w, "  {}", c.b_yellow("Overlap report truncated.")).ok();
+    }
 }
 
 /// Materialize the owning JSON model before serialization, ending all session

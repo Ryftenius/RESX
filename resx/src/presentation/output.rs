@@ -512,6 +512,18 @@ fn highlight_symbol_token(token: &str, c: &Colors) -> String {
 }
 
 pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &Colors) {
+    print_insns_with_prefix(w, insns, cfg, c, "  ", None);
+}
+
+/// Mark a decode stream while retaining semantic mnemonic and symbol colors.
+pub fn print_insns_with_prefix(
+    w: &mut dyn Write,
+    insns: &[Instruction],
+    cfg: &Config,
+    c: &Colors,
+    prefix: &str,
+    stream_color: Option<fn(&Colors, &str) -> String>,
+) {
     let addr_w = if cfg.addr_width == 0 {
         8
     } else {
@@ -524,7 +536,8 @@ pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &C
     };
 
     for insn in insns {
-        let addr = c.cyan(&format!("{:0>width$x}", insn.rva, width = addr_w));
+        let raw_addr = format!("{:0>width$x}", insn.rva, width = addr_w);
+        let addr = stream_color.map_or_else(|| c.cyan(&raw_addr), |style| style(c, &raw_addr));
 
         let byte_str = if cfg.show_bytes {
             let hex: Vec<String> = insn.bytes.iter().map(|b| format!("{:02x}", b)).collect();
@@ -535,7 +548,8 @@ pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &C
             } else {
                 raw[..pad_w.min(raw.len())].to_owned()
             };
-            format!("{}  ", c.dim(&padded))
+            let styled = stream_color.map_or_else(|| c.dim(&padded), |style| style(c, &padded));
+            format!("{styled}  ")
         } else {
             String::new()
         };
@@ -543,7 +557,7 @@ pub fn print_insns(w: &mut dyn Write, insns: &[Instruction], cfg: &Config, c: &C
         let mnem = apply_insn_color(insn, &format!("{:<10}", insn.mnemonic), c);
         let ops = highlight_symbolic_text(&insn.operands, c);
 
-        let mut line = format!("  {}  {}{} {}", addr, byte_str, mnem, ops);
+        let mut line = format!("{}{}  {}{} {}", prefix, addr, byte_str, mnem, ops);
         if !insn.comment.is_empty() {
             line.push_str(&format!(
                 "{}{}",
