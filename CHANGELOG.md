@@ -2,7 +2,18 @@
 
 All notable public changes to RESX are recorded here.
 
-## Unreleased
+## 2.5.0 - 2026-11-17
+
+### Security fixes
+
+- Prevented `scan` and `index` from following directory junctions and symbolic links found during traversal, while preserving explicitly selected linked roots. Two junctions pointing to their parent previously made both commands run past their image-count limit, even when the directory contained no images. Both walkers now have a separate 100,000-entry traversal bound.
+- Bounded the optional Windows file-metadata helper to 30 seconds and 256 KiB of output, and retained file-version data when the Windows signature module is unavailable.
+- Indexed export addresses for repeated owner lookups in `xrefs` and `callers`, and resolved `xrefs` owners only for matching instructions. A small PE with a dense export table previously amplified a whole-image sweep into billions of redundant comparisons.
+- Bounded `callers` reverse indexing across scanned images to 50,000 call sites by default, with `--max-index-sites` and a saved config option for limits up to 250,000. Exceeding the limit now fails explicitly instead of exhausting memory or implying a complete caller tree. Wrapper expansion, x64 boundary decoding, WDF instruction collection, and cached-index reads are also bounded.
+
+### Packaging
+
+- Removed the VS Code extension, its CI packaging workflow, and its installation guide and screenshots.
 
 ## 2.4.0 - 2026-11-17
 
