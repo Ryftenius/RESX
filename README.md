@@ -984,7 +984,6 @@ The call at `0x1160` is six bytes long, so `0x1166` is the return address immedi
 - [Full changelog](CHANGELOG.md)
 - [Command reference](COMMANDS.md)
 - [CLI documentation](docs/cli.md)
-- [VS Code extension documentation](docs/vscode-extension.md)
 - [DLL / FFI integration](docs/dll.md)
 - [Analysis surfaces](docs/analysis-surfaces.md)
 - [Architecture](docs/architecture.md)
@@ -1001,7 +1000,6 @@ The call at `0x1160` is six bytes long, so `0x1166` is the return address immedi
 - Reverse caller tracing across priority modules and custom scan scopes.
 - Startup-flow reconstruction from entry points, TLS callbacks, thread and work-pool callbacks, import calls, indirect edges, and x64 unwind or exception-handler evidence.
 - Structural diffing, CFG diff views, code and control heatmaps, corpus indexing, and sample hunting.
-- Integrated VS Code binary viewer for navigation, behavior triage, API evidence, drivers and IOCTLs, strings, entropy, YARA, flow, symbols, types, diffing, corpus hunting, and function analysis.
 - Protected-file triage for packer markers, OEP handoff candidates, import-rebuild leads, VM dispatcher or handler candidates, and bounded payload recovery.
 - C-like reconstruction and bounded CFG rendering for selected functions.
 - Hardened PE32+ metadata, section, data-directory, debug, CLR, TLS, load-configuration, certificate, version, and anomaly inspection.
@@ -1073,27 +1071,6 @@ resx yara <image> <rule.yar>
 
 See [docs/cli.md](docs/cli.md) for the full command and option reference.
 
-## Install The VS Code Extension
-
-```powershell
-cd resx-vscode
-npm ci
-npm run compile
-npm run package
-```
-
-Install the generated `.vsix` with:
-
-```console
-Extensions: Install from VSIX...
-```
-
-The extension contributes a custom editor for Windows binaries. Its tabs cover Overview, Entry, Triage (with `pechk`), Behavior, Sections, Exports, Imports, Symbols, Types, Strings, Evidence (contracts, IPC, network, crypto), Driver (IOCTLs), Entropy, Search (find, YARA, compare, SDK prototypes), Flow, Scan, Dump and Dev. Dumps add call maps, xrefs, callers, CFG, C-like reconstruction and hex, with hostile mode, `--args` and call filters in the viewer's Options panel.
-
-Command-palette and explorer workflows include Locate, Dump, Compare Images (diff), Scan Folder, Index Folder as Corpus, Find Similar Images (hunt), Decode Payload, Patch Image Bytes, Look Up Windows API Prototype and Configure Windows SDK Headers.
-
-See [docs/vscode-extension.md](docs/vscode-extension.md) for build, packaging, settings, trust model, and workflow details.
-
 ## Use The DLL / FFI
 
 Build the DLL:
@@ -1125,26 +1102,6 @@ if (json) {
 ```
 
 See [docs/dll.md](docs/dll.md) for exported functions, status codes, option JSON, output envelopes, memory ownership, and smoke-test instructions.
-
-## Screenshots
-
-### VS Code Binary Viewer
-
-![RESX VS Code overview](media/Dump_Ntoskrnl_Overview.png)
-
-![RESX dump disassembly view](media/Dump_Disassembly_KiDispatchCallout.png)
-
-![RESX dump API refs view](media/Dump_ApiRefs_KiDispatchCallout.png)
-
-![RESX syscall stub view](media/Dump_ntdll_NtAllocateVirtualMemoryEx_Stub.png)
-
-### Command Palette Workflows
-
-![RESX dump file search](media/Dump_File_Search.png)
-
-![RESX dump symbol search](media/Dump_Search_KiDispatchCallout.png)
-
-![RESX locate result](media/Locate_OpenPro.png)
 
 ## JSON Automation
 

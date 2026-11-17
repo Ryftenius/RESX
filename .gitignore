@@ -14,10 +14,6 @@ __pycache__/
 /build-artifacts/
 /test/
 /package-lock.json
-/resx-vscode/bin/
-/resx-vscode/out/
-/resx-vscode/media-src/payloads.ts
-/resx-vscode/*.vsix
 /resx-demo/
 *.dll
 *.sys

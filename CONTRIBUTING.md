@@ -29,7 +29,7 @@ This policy was adapted from [x64dbg's AI policy](https://github.com/x64dbg/x64d
 
 ### Build RESX
 
-RESX is a Rust workspace that targets Windows. The README covers [building the CLI](README.md#build-the-cli), the [VS Code extension](README.md#install-the-vs-code-extension) and the [DLL / FFI](README.md#use-the-dll--ffi). In short:
+RESX is a Rust workspace that targets Windows. The README covers [building the CLI](README.md#build-the-cli) and the [DLL / FFI](README.md#use-the-dll--ffi). In short:
 
 ```powershell
 git clone https://github.com/Ryftenius/RESX.git
@@ -45,16 +45,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 ```
 
-If you changed the VS Code extension:
-
-```powershell
-cd resx-vscode
-npm ci
-npm test
-```
-
-`npm test` also runs every command line the extension builds against a real analyzer, so it catches drift between the extension and the CLI.
-
 #### Getting started with development
 
 The code can look daunting at first. These documents explain how it fits together:
@@ -64,13 +54,13 @@ The code can look daunting at first. These documents explain how it fits togethe
 - [Analysis surfaces](docs/analysis-surfaces.md): what RESX looks at and how far each analysis goes.
 - [CLI documentation](docs/cli.md): option groups, command grammar and earlier spellings.
 - [JSON schemas](docs/json-schemas.md): the versioned output contract and its stability rules.
-- [DLL / FFI](docs/dll.md) and [VS Code extension](docs/vscode-extension.md) for the integration layers.
+- [DLL / FFI](docs/dll.md) for the native integration layer.
 
 #### Ground rules for code changes
 
 - **Assume hostile input.** Every header, offset, size, RVA, name and record in a sample can lie. Use the checked readers and section mappings, bound every loop and allocation, and never turn missing bytes into zeroes. A sample must not be able to crash RESX, hang it, exhaust memory, or make it read or execute anything on the analyst's machine.
 - **Report evidence, not conclusions.** Findings describe what code *can* do, with its location, confidence and source. Don't claim something executed, and keep unknown values unknown.
-- **Keep the CLI grammar consistent.** Options belong to the command that uses them, in `resx/src/cli/args.rs`, and the help text is generated from it. Renamed options keep their earlier spelling as a hidden alias, which the `legacy_spellings_still_parse` test enforces. If you add a command or an option group, update `resx-vscode/src/cli.ts` as well.
+- **Keep the CLI grammar consistent.** Options belong to the command that uses them, in `resx/src/cli/args.rs`, and the help text is generated from it. Renamed options keep their earlier spelling as a hidden alias, which the `legacy_spellings_still_parse` test enforces.
 - **Keep JSON stable.** Within a schema version, only add optional fields. Don't change a field's representation, and expose limits and truncation when a bound is hit.
 - **Test what you fix.** Add a unit test, or a fixture under `resx/tests/data` with an integration test that pins down the behavior.
 - **Record public changes** in [CHANGELOG.md](CHANGELOG.md), in the same style as the existing entries.
