@@ -2,9 +2,10 @@
 use serde::Serialize;
 
 pub const MAX_SCAN: usize = 16 * 1024 * 1024;
-pub const MAX_STRINGS: usize = 8192;
+pub const MAX_CONFIGURED_SCAN: usize = 128 * 1024 * 1024;
+pub const MAX_STRINGS: usize = 32768;
 pub const MAX_STRING: usize = 4096;
-pub const MAX_TEXT: usize = 1024 * 1024;
+pub const MAX_TEXT: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Text {
@@ -18,15 +19,31 @@ pub struct Text {
 pub struct Scan {
     pub strings: Vec<Text>,
     pub scanned_bytes: usize,
+    pub filtered_out: usize,
+    pub long_strings_truncated: usize,
     pub truncated: bool,
 }
 
 pub fn scan(raw: &[u8], minimum: usize, ascii: bool, wide: bool) -> Scan {
+    scan_filtered(raw, minimum, ascii, wide, MAX_SCAN, |_, _| true)
+}
+
+/// Reject candidates before they consume count and text budgets.
+pub fn scan_filtered(
+    raw: &[u8],
+    minimum: usize,
+    ascii: bool,
+    wide: bool,
+    max_scan: usize,
+    accept: impl Fn(&str, &str) -> bool,
+) -> Scan {
     let minimum = minimum.clamp(1, MAX_STRING);
-    let bytes = &raw[..raw.len().min(MAX_SCAN)];
+    let bytes = &raw[..raw.len().min(max_scan.min(MAX_CONFIGURED_SCAN))];
     let mut result = Scan {
         strings: Vec::new(),
         scanned_bytes: bytes.len(),
+        filtered_out: 0,
+        long_strings_truncated: 0,
         truncated: bytes.len() != raw.len(),
     };
     let mut total = 0;
@@ -65,16 +82,22 @@ pub fn scan(raw: &[u8], minimum: usize, ascii: bool, wide: bool) -> Scan {
             }
             if characters >= minimum {
                 if let Ok(value) = String::from_utf16(&units) {
+                    let encoding = if stride == 1 { "ascii" } else { "utf16le" };
+                    if !accept(encoding, &value) {
+                        result.filtered_out += 1;
+                        at += stride;
+                        continue;
+                    }
                     if result.strings.len() == MAX_STRINGS || total + value.len() > MAX_TEXT {
                         result.truncated = true;
                         return result;
                     }
                     total += value.len();
                     let truncated = characters > MAX_STRING;
-                    result.truncated |= truncated;
+                    result.long_strings_truncated += usize::from(truncated);
                     result.strings.push(Text {
                         offset: start,
-                        encoding: if stride == 1 { "ascii" } else { "utf16le" },
+                        encoding,
                         value,
                         truncated,
                     });
@@ -96,9 +119,27 @@ mod tests {
         assert!(result.truncated);
         assert_eq!(result.strings.len(), 1);
         assert_eq!(result.strings[0].value.len(), MAX_STRING);
+        assert_eq!(result.long_strings_truncated, 1);
         let result = scan(&b"abcdef\0".repeat(MAX_STRINGS + 1), 6, true, false);
         assert!(result.truncated);
         assert_eq!(result.strings.len(), MAX_STRINGS);
+    }
+
+    #[test]
+    fn rejected_wide_candidates_do_not_consume_the_result_budget() {
+        let mut raw = Vec::new();
+        for _ in 0..MAX_STRINGS + 1 {
+            raw.extend_from_slice(&[0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0, 0]);
+        }
+        for unit in "goodwide".encode_utf16().chain([0]) {
+            raw.extend_from_slice(&unit.to_le_bytes());
+        }
+        let result = scan_filtered(&raw, 3, false, true, MAX_SCAN, |_, value| {
+            value == "goodwide"
+        });
+        assert!(result.filtered_out > MAX_STRINGS);
+        assert!(result.strings.iter().any(|entry| entry.value == "goodwide"));
+        assert!(!result.truncated);
     }
 
     #[test]

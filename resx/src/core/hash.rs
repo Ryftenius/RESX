@@ -1,5 +1,43 @@
 //! Native hashing boundary returning an owned digest string.
 
+use std::io::Read;
+use std::path::Path;
+
+/// Hash a regular file with fixed memory while enforcing the image size cap,
+/// including when the file grows after its metadata was read.
+pub fn sha256_file_bounded(path: &Path, max_bytes: u64) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(format!(
+            "Expected a regular image file no larger than {max_bytes} bytes"
+        ));
+    }
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or("Hash size limit is too large")?;
+    let mut reader = file.take(read_limit);
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    let mut hash = Sha256::new();
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > max_bytes {
+            return Err("Image grew beyond the size limit while hashing".to_owned());
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 #[cfg(windows)]
 pub fn sha256(bytes: &[u8]) -> Result<String, String> {
     use std::ffi::c_void;

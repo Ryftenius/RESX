@@ -1,6 +1,7 @@
 use crate::analysis::yara::scan_file;
 use crate::core::{
-    color::Colors, config::Config, hash::sha256, json::versioned_object, search::find_dll_path,
+    color::Colors, config::Config, hash::sha256_file_bounded, json::versioned_object,
+    search::find_dll_path,
 };
 use crate::presentation::output::print_yara_matches;
 use serde_json::json;
@@ -16,13 +17,13 @@ pub fn run(
         return Err("Use `resx yara <image> <rule.yar>`".into());
     }
     let path = find_dll_path(image, cfg)?;
-    let raw = crate::core::input::read_image(&path).map_err(|error| error.to_string())?;
+    let image_sha256 = sha256_file_bounded(&path, crate::formats::pe::MAX_PE_BYTES as u64)?;
     let matches = scan_file(&path.to_string_lossy(), &cfg.yara)?;
 
     if cfg.json {
         let report = json!({
             "image": path,
-            "image_sha256": sha256(&raw)?,
+            "image_sha256": image_sha256,
             "rule_inputs": cfg.yara,
             "match_count": matches.len(),
             "matches": matches,

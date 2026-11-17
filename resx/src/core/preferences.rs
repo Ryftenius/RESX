@@ -12,6 +12,14 @@ pub struct Preferences {
     pub invoke_profiles: BTreeMap<String, Vec<String>>,
     /// Windows SDK include directory for API signatures; off when unset.
     pub headers: Option<String>,
+    /// Optional per-function instruction budget; 0 means unlimited.
+    pub max_insns: Option<usize>,
+    /// Optional recursive traversal budget; 0 means unlimited.
+    pub max_total: Option<usize>,
+    /// Optional string result cap; the default is 2048.
+    pub strings_limit: Option<usize>,
+    /// Optional string scan size in MiB; the default is 32.
+    pub strings_scan_mb: Option<usize>,
 }
 
 impl Default for Preferences {
@@ -22,6 +30,10 @@ impl Default for Preferences {
             rentry_macro: "rentry".to_owned(),
             invoke_profiles: BTreeMap::new(),
             headers: None,
+            max_insns: None,
+            max_total: None,
+            strings_limit: None,
+            strings_scan_mb: None,
         }
     }
 }
@@ -31,7 +43,16 @@ impl Preferences {
         let Some(text) = registry::read_string("Settings") else {
             return Self::default();
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        let mut preferences: Self = serde_json::from_str(&text).unwrap_or_default();
+        preferences.max_insns = preferences.max_insns.filter(|value| *value <= 1_000_000);
+        preferences.max_total = preferences.max_total.filter(|value| *value <= 1_000_000);
+        preferences.strings_limit = preferences
+            .strings_limit
+            .filter(|value| (1..=32768).contains(value));
+        preferences.strings_scan_mb = preferences
+            .strings_scan_mb
+            .filter(|value| (1..=128).contains(value));
+        preferences
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -40,6 +61,17 @@ impl Preferences {
         validate_macro(&self.rentry_macro)?;
         if self.entry_macro.eq_ignore_ascii_case(&self.rentry_macro) {
             return Err("entry and rentry macro names must differ".to_owned());
+        }
+        if self.max_insns.is_some_and(|value| value > 1_000_000)
+            || self.max_total.is_some_and(|value| value > 1_000_000)
+            || self
+                .strings_limit
+                .is_some_and(|value| !(1..=32768).contains(&value))
+            || self
+                .strings_scan_mb
+                .is_some_and(|value| !(1..=128).contains(&value))
+        {
+            return Err("saved limits are outside the supported range".to_owned());
         }
         let text = serde_json::to_string(self).map_err(|error| error.to_string())?;
         registry::write_string("Settings", &text)

@@ -2,7 +2,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 pub fn write(
     path: &Path,
@@ -21,16 +20,32 @@ pub fn write(
     let mut entries = Vec::<(String, Vec<u8>)>::new();
     let mut target_entry = None;
     if let Some(target) = target {
-        if let Ok(bytes) = std::fs::read(target) {
-            let pe = crate::formats::pe::parse_pe(&bytes).ok();
+        if let Ok(metadata) = std::fs::metadata(target) {
+            if !metadata.is_file() {
+                return Err("debug-report target must be a regular file".into());
+            }
+            if include_target && metadata.len() > 64 * 1024 * 1024 {
+                return Err("debug-report target inclusion is capped at 64 MiB".into());
+            }
+            let sha256 = crate::core::hash::sha256_file_bounded(
+                target,
+                crate::formats::pe::MAX_PE_BYTES as u64,
+            )?;
+            let bytes = (metadata.len() <= 64 * 1024 * 1024)
+                .then(|| crate::core::input::read_file_bounded(target, 64 * 1024 * 1024))
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            let pe = bytes
+                .as_deref()
+                .and_then(|raw| crate::formats::pe::parse_pe(raw).ok());
             target_entry = Some(
-                json!({"file_name":target.file_name().and_then(|v|v.to_str()),"size":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"architecture":pe.as_ref().map(|p|p.arch),"entry_rva":pe.as_ref().map(|p|format!("0x{:08X}",p.entry_point)),"sections":pe.as_ref().map(|p|p.sections.len())}),
+                json!({"file_name":target.file_name().and_then(|v|v.to_str()),"size":metadata.len(),"sha256":sha256,"architecture":pe.as_ref().map(|p|p.arch),"entry_rva":pe.as_ref().map(|p|format!("0x{:08X}",p.entry_point)),"sections":pe.as_ref().map(|p|p.sections.len())}),
             );
             if include_target {
-                if bytes.len() > 64 * 1024 * 1024 {
-                    return Err("debug-report target inclusion is capped at 64 MiB".into());
-                }
-                entries.push(("target.bin".into(), bytes));
+                entries.push((
+                    "target.bin".into(),
+                    bytes.ok_or("debug-report target could not be read")?,
+                ));
             }
         }
     }

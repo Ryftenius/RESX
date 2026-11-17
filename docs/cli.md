@@ -19,10 +19,12 @@ accepts:
 
 | Command | Shows |
 | --- | --- |
-| `resx help` | Commands grouped by section |
+| `resx` or `resx help` | Commands grouped by section |
 | `resx help <command>` or `resx <command> --help` | Usage, examples, notes, and that command's options grouped by heading |
-| `resx help <section>` | One section: `inspect`, `code`, `evidence`, `recovery`, `compare`, `options` |
+| `resx help <section>` | One section: `inspect`, `code`, `evidence`, `recovery`, `compare`, `settings`, `options` |
 | `resx help all` | Every command and option |
+
+Unknown help topics return an error and suggest a nearby command or section.
 
 ## Option groups
 
@@ -293,9 +295,17 @@ Cross-reference searches sweep every executable byte of the image.
 
 ## String evidence controls
 
-`resx strings <image>` defaults to 200 results and filters low-quality UTF-16
+`resx strings <image>` defaults to 2,048 results from a 32 MiB scan and filters low-quality UTF-16
 binary coincidences. Use `--encoding ascii|utf16le|both`, `--min-len <n>`,
-`--limit <n>`, `--match <text>`, `--tag <tag>`, or `--interesting` to narrow
+`--limit <n>`, `--scan-mb <n>`, `--match <text>`, `--tag <tag>`, or `--interesting` to narrow
 evidence. `--raw-wide` restores permissive UTF-16 candidates. Values such as
 `TARGET_OK` are tagged `success-marker`; only brace-form tokens are tagged
 `flag-candidate`.
+
+`resx config --strings-limit 4096` saves a result limit (1–32,768) for later
+commands. `resx config --strings-scan-mb 64` saves a scan size (1–128 MiB) for
+commands. `resx config --max-total 1000` saves the recursive traversal budget,
+and `resx config --max-insns 1500` saves the per-function instruction budget.
+Use `unlimited` for the analyzer's safety bound on either analysis budget.
+Command options override saved values for one run; `resx config --reset-limits`
+restores the defaults. Saved nonzero analysis budgets may be at most 1,000,000.

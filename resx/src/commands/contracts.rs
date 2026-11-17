@@ -12,6 +12,7 @@ pub fn run(cfg: &Config, category: &str, output: &mut dyn Write) -> Result<(), S
             &crate::analysis::strings::StringsOptions {
                 min_len: cfg.strings_min_len,
                 limit: cfg.strings_limit,
+                scan_bytes: cfg.strings_scan_mb * 1024 * 1024,
                 ascii: matches!(cfg.strings_encoding.as_str(), "ascii" | "both"),
                 wide: matches!(cfg.strings_encoding.as_str(), "utf16le" | "both"),
                 interesting_only: cfg.strings_interesting,
@@ -22,12 +23,13 @@ pub fn run(cfg: &Config, category: &str, output: &mut dyn Write) -> Result<(), S
         );
         if cfg.verbose && !cfg.quiet {
             eprintln!(
-                "RESX: strings: scanned={} bytes, matched={}, returned={}, filtered={}, truncated={}",
+                "RESX: strings: scanned={} bytes, matched={}, returned={}, filtered={}, truncated={}, long_candidates={}",
                 strings.scanned_bytes,
                 strings.total,
                 strings.strings.len(),
                 strings.filtered_out,
-                strings.truncated
+                strings.truncated,
+                strings.truncated_candidates
             );
             eprintln!("RESX: text candidates retain exact offsets and encoding; presence does not prove behavior");
         }
@@ -36,12 +38,13 @@ pub fn run(cfg: &Config, category: &str, output: &mut dyn Write) -> Result<(), S
             writeln!(output, "{}", colors.heading("String evidence")).map_err(|e| e.to_string())?;
             writeln!(
                 output,
-                "  scanned={} matched={} returned={} filtered={} truncated={}",
+                "  scanned={} matched={} returned={} filtered={} truncated={} long_candidates={}",
                 strings.scanned_bytes,
                 strings.total,
                 strings.strings.len(),
                 strings.filtered_out,
-                strings.truncated
+                strings.truncated,
+                strings.truncated_candidates
             )
             .map_err(|e| e.to_string())?;
             writeln!(

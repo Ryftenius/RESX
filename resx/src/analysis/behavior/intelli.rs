@@ -21,7 +21,14 @@ pub fn analyze_image(
     imports: &[ImportDll],
     insns: Option<&[Instruction]>,
 ) -> Vec<IntelliFinding> {
-    let strings = crate::analysis::text::scan(raw, 6, true, true);
+    let strings = crate::analysis::text::scan_filtered(
+        raw,
+        6,
+        true,
+        true,
+        crate::analysis::text::MAX_SCAN,
+        |encoding, value| encoding != "utf16le" || crate::analysis::strings::plausible_utf16(value),
+    );
     let mut findings = Vec::new();
     findings.extend(scan_strings(&strings.strings));
     if strings.truncated {

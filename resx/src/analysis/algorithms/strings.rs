@@ -18,8 +18,10 @@ pub struct StringsReport {
     pub image: String,
     pub min_len: usize,
     pub scanned_bytes: usize,
+    pub scan_limit_bytes: usize,
     pub total: usize,
     pub filtered_out: usize,
+    pub truncated_candidates: usize,
     pub filters: StringFilters,
     pub strings: Vec<StringFinding>,
     pub truncated: bool,
@@ -38,6 +40,7 @@ pub struct StringFilters {
 pub struct StringsOptions {
     pub min_len: usize,
     pub limit: usize,
+    pub scan_bytes: usize,
     pub ascii: bool,
     pub wide: bool,
     pub interesting_only: bool,
@@ -51,6 +54,7 @@ impl Default for StringsOptions {
         Self {
             min_len: 5,
             limit: 500,
+            scan_bytes: super::text::MAX_SCAN,
             ascii: true,
             wide: true,
             interesting_only: false,
@@ -67,7 +71,16 @@ pub fn analyze_strings(
     raw: &[u8],
     options: &StringsOptions,
 ) -> StringsReport {
-    let scan = super::text::scan(raw, options.min_len, options.ascii, options.wide);
+    let scan = super::text::scan_filtered(
+        raw,
+        options.min_len,
+        options.ascii,
+        options.wide,
+        options.scan_bytes,
+        |encoding, value| {
+            encoding != "utf16le" || !options.plausible_utf16_only || plausible_utf16(value)
+        },
+    );
     let mut strings: Vec<_> = scan
         .strings
         .into_iter()
@@ -78,9 +91,6 @@ pub fn analyze_strings(
         })
         .collect();
     let unfiltered = strings.len();
-    if options.plausible_utf16_only {
-        strings.retain(|entry| entry.encoding != "utf16le" || plausible_utf16(&entry.value));
-    }
     if options.interesting_only {
         strings.retain(|entry| !entry.tags.is_empty());
     }
@@ -108,8 +118,10 @@ pub fn analyze_strings(
         image: image.into(),
         min_len: options.min_len.clamp(1, super::text::MAX_STRING),
         scanned_bytes: scan.scanned_bytes,
+        scan_limit_bytes: options.scan_bytes.min(super::text::MAX_CONFIGURED_SCAN),
         total,
-        filtered_out: unfiltered.saturating_sub(total),
+        filtered_out: scan.filtered_out + unfiltered.saturating_sub(total),
+        truncated_candidates: scan.long_strings_truncated,
         filters: StringFilters {
             encoding: match (options.ascii, options.wide) {
                 (true, true) => "both",
@@ -199,7 +211,7 @@ pub fn classify_string(value: &str) -> Vec<String> {
     tags
 }
 
-fn plausible_utf16(value: &str) -> bool {
+pub(crate) fn plausible_utf16(value: &str) -> bool {
     let mut characters = 0usize;
     let mut ascii_wordlike = 0usize;
     let mut alphanumeric = 0usize;

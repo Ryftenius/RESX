@@ -1,10 +1,10 @@
 use super::*;
 
-pub fn print_examples(topic: &str) {
+pub fn print_examples(topic: &str) -> bool {
     let topic = topic.to_ascii_lowercase();
     if topic == "all" {
         println!("{}", all_help());
-        return;
+        return true;
     }
     if let Some(section) = section_help(&topic) {
         println!(
@@ -12,15 +12,18 @@ pub fn print_examples(topic: &str) {
             product_banner(),
             section
         );
-        return;
+        return true;
     }
     if let Some(help) = command_help(&topic) {
         println!("{help}");
-        return;
+        return true;
     }
-    println!("{}\n", product_banner());
-    println!("{}", GENERAL.trim());
-    println!("\nShared options: resx help options | Command overview: resx help");
+    eprintln!("Unknown help topic: {topic}");
+    if let Some(suggestion) = help_topic_suggestion(&topic) {
+        eprintln!("Did you mean `resx help {suggestion}`?");
+    }
+    eprintln!("Run `resx help` to browse sections and commands.");
+    false
 }
 
 pub(in crate::cli) fn command_help(topic: &str) -> Option<String> {
@@ -36,37 +39,6 @@ pub(in crate::cli) fn command_help(topic: &str) -> Option<String> {
         GLOBAL_SUMMARY
     ))
 }
-
-const GENERAL: &str = r#"
-GENERAL HELP
-Usage:
-  resx <command> [arguments] [options]
-  resx help <command>
-  resx <command> --help
-
-Examples:
-  resx dump ntdll.dll NtCreateFile
-  resx calls .\agent.exe main --depth 4 --only winapi
-  resx intelli suspicious.dll
-  resx behavior suspicious.dll --json
-  resx entropy suspicious.dll
-  resx dump ntoskrnl.exe NtQuerySystemInformation --cfg text
-  resx reconstruct-cfg suspicious.dll --depth 6
-  resx diff .\old.dll .\new.dll
-  resx index .\samples --db .\samples.resxdb --no-pdb
-  resx hunt .\unknown.dll --db .\samples.resxdb
-  resx callers ntdll.dll NtOpenProcess --depth 2
-  resx scan C:\Windows\System32\drivers --jsonl --max-files 200
-  resx locate-sym NtOpenProcess
-  resx update
-
-Command help:
-  resx help dump
-  resx help calls
-  resx help reconstruct-cfg
-  resx help diff
-  resx help all
-"#;
 
 fn topic_text(topic: &str) -> Option<&'static str> {
     Some(match topic {
@@ -124,10 +96,13 @@ Usage: resx strings <image> [options]
 Examples:
   resx strings .\sample.dll --json
   resx strings .\sample.exe --encoding ascii --min-len 8
-  resx strings .\sample.exe --interesting --limit 200
+  resx strings .\sample.exe --interesting --limit 512
+  resx strings .\large.exe --scan-mb 64 --limit 16384
   resx strings .\sample.exe --match TARGET --tag success-marker
 
-Limits: 16 MiB scanned, 8,192 candidates, 4,096 code units per candidate.
+The default result limit is 2,048 and scan size is 32 MiB. Both can be saved
+with `resx config --strings-limit` and `--strings-scan-mb`.
+Safety limits: 128 MiB scanned, 32,768 candidates, 4,096 code units per candidate.
 UTF-16 candidates use a text-quality filter by default; --raw-wide keeps
 permissive binary coincidences. TARGET_OK-like values are labeled success-marker;
 brace-form tokens are separate flag-candidate findings. Text presence does not
@@ -177,13 +152,19 @@ Limits: 8 layers, 16 MiB per input/output, 32 MiB aggregate, bounded expansion."
         }
         "config" => {
             r"CONFIG | Saved RESX command preferences
-Usage: resx config [--command-style standard|slash] [--entry-macro NAME] [--rentry-macro NAME]
+Usage: resx config [options]
 
 Examples:
   resx config --command-style slash
+  resx config --strings-limit 4096 --max-total 1000
+  resx config --strings-scan-mb 64
+  resx config --max-insns 1500
+  resx config --reset-limits
   resx /config /entry-macro:ep /rentry-macro:realep
 
-Both command styles always work. Preferences are stored in
+Command options override saved limits for one run. With no saved instruction
+budget, known function extents decode whole and other functions use 500.
+`unlimited` accepts the analyzer's safety bound. Preferences are stored in
 HKCU\Software\Ryftenius\RESX."
         }
         "api" => {
@@ -499,7 +480,8 @@ Examples:
 
 Accepts rule files, directories containing .yar/.yara files, and JSON saved
 configurations containing a string array of rule paths. Match output includes
-string file offsets, mapped PE RVAs/sections, metadata, and navigation actions."
+string file offsets and metadata. PE RVAs/sections are mapped for images up to
+32 MiB; larger inputs retain file offsets. Targets are capped at 512 MiB."
         }
         "find" => {
             r#"FIND | Bytes, text, constants and instruction patterns

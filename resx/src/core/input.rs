@@ -39,13 +39,17 @@ pub fn is_safe_basename(name: &str) -> bool {
 
 /// Bound allocation even when a file grows after metadata is read.
 pub fn read_image(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    read_file_bounded(path, crate::formats::pe::MAX_PE_BYTES)
+}
+
+/// Read one regular file with an explicit cap, including if it grows during the read.
+pub fn read_file_bounded(path: impl AsRef<Path>, limit: usize) -> io::Result<Vec<u8>> {
     let file = File::open(path)?;
     let metadata = file.metadata()?;
-    let limit = crate::formats::pe::MAX_PE_BYTES;
     if !metadata.is_file() || metadata.len() > limit as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Expected a regular image file no larger than 512 MiB",
+            format!("Expected a regular file no larger than {limit} bytes"),
         ));
     }
     let mut bytes = Vec::new();
@@ -56,7 +60,7 @@ pub fn read_image(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     if bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Image grew beyond the 512 MiB limit",
+            format!("File grew beyond the {limit}-byte limit"),
         ));
     }
     Ok(bytes)

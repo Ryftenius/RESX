@@ -2,13 +2,31 @@
 
 use super::args::*;
 use crate::core::config::Options;
+use crate::core::preferences::Preferences;
 
 impl Cli {
     pub fn lower(self) -> (Command, Options) {
         let mut options = Options::default();
+        apply_saved_limits(&mut options, &Preferences::load());
         self.global.apply(&mut options);
         self.command.clone().apply(&mut options);
         (self.command, options)
+    }
+}
+
+fn apply_saved_limits(options: &mut Options, preferences: &Preferences) {
+    if let Some(value) = preferences.max_insns {
+        options.max_insns = value;
+        options.whole_function = false;
+    }
+    if let Some(value) = preferences.max_total {
+        options.max_total = value;
+    }
+    if let Some(value) = preferences.strings_limit {
+        options.strings_limit = value;
+    }
+    if let Some(value) = preferences.strings_scan_mb {
+        options.strings_scan_mb = value;
     }
 }
 
@@ -186,6 +204,11 @@ impl Command {
                 o.entry_macro = args.entry_macro;
                 o.rentry_macro = args.rentry_macro;
                 o.headers = args.headers;
+                o.saved_max_insns = args.max_insns;
+                o.saved_max_total = args.max_total;
+                o.saved_strings_limit = args.strings_limit;
+                o.saved_strings_scan_mb = args.strings_scan_mb;
+                o.reset_limits = args.reset_limits;
                 o.resx_config = true;
             }
             Self::Update => o.update = true,
@@ -234,11 +257,13 @@ impl TargetArgs {
 
 impl AnalysisArgs {
     fn apply(self, o: &mut Options) {
-        // An explicit budget is honored exactly; otherwise functions with a known
-        // extent are decoded whole and linear decodes keep the 500-instruction cap.
-        o.max_insns = self.max_insns.unwrap_or(500);
-        o.whole_function = self.max_insns.is_none();
-        o.max_total = self.max_total;
+        if let Some(value) = self.max_insns {
+            o.max_insns = value;
+            o.whole_function = false;
+        }
+        if let Some(value) = self.max_total {
+            o.max_total = value;
+        }
         o.hostile = self.hostile;
     }
 }
@@ -426,7 +451,12 @@ impl StringsArgs {
     fn apply(self, o: &mut Options) {
         image(o, self.image);
         o.strings_min_len = self.min_len;
-        o.strings_limit = self.limit;
+        if let Some(value) = self.limit {
+            o.strings_limit = value;
+        }
+        if let Some(value) = self.scan_mb {
+            o.strings_scan_mb = value;
+        }
         o.strings_encoding = self.encoding;
         o.strings_interesting = self.interesting;
         o.strings_match = self.matching;
@@ -484,5 +514,67 @@ impl PatchArgs {
         self.lookup.apply(o);
         self.symbols.apply(o);
         o.patch = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_budgets_apply_and_command_options_override_them() {
+        let preferences = Preferences {
+            max_insns: Some(1_200),
+            max_total: Some(900),
+            strings_limit: Some(1_400),
+            strings_scan_mb: Some(64),
+            ..Preferences::default()
+        };
+        let mut options = Options::default();
+        apply_saved_limits(&mut options, &preferences);
+        assert_eq!(options.max_insns, 1_200);
+        assert!(!options.whole_function);
+        assert_eq!(options.max_total, 900);
+        assert_eq!(options.strings_limit, 1_400);
+        assert_eq!(options.strings_scan_mb, 64);
+
+        let dump = parse_cli(
+            vec![
+                "resx",
+                "dump",
+                "a.exe",
+                "entry",
+                "--max-insns",
+                "700",
+                "--max-total",
+                "400",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        )
+        .unwrap();
+        dump.command.apply(&mut options);
+        assert_eq!(options.max_insns, 700);
+        assert_eq!(options.max_total, 400);
+
+        let strings = parse_cli(
+            vec![
+                "resx",
+                "strings",
+                "a.exe",
+                "--limit",
+                "800",
+                "--scan-mb",
+                "48",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        )
+        .unwrap();
+        strings.command.apply(&mut options);
+        assert_eq!(options.strings_limit, 800);
+        assert_eq!(options.strings_scan_mb, 48);
     }
 }

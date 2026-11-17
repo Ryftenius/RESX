@@ -263,7 +263,7 @@ fn collect_explicit_image_hits(
     cfg: &Config,
     results: &mut Vec<LocateResult>,
 ) {
-    let raw = match std::fs::read(path) {
+    let raw = match crate::core::input::read_image(path) {
         Ok(raw) => raw,
         Err(_) => return,
     };
@@ -388,7 +388,7 @@ fn scan_export_bucket(
         .par_iter()
         .flat_map_iter(|dll_path| {
             let label = dll_path.file_name().unwrap_or_default().to_string_lossy();
-            let raw = match std::fs::read(dll_path) {
+            let raw = match crate::core::input::read_image(dll_path) {
                 Ok(r) => r,
                 Err(_) => {
                     pb.tick(&label);
@@ -493,7 +493,7 @@ fn scan_symbol_bucket(
         .par_iter()
         .filter_map(|dll_path| {
             let label = dll_path.file_name().unwrap_or_default().to_string_lossy();
-            let raw = match std::fs::read(dll_path) {
+            let raw = match crate::core::input::read_image(dll_path) {
                 Ok(r) => r,
                 Err(_) => {
                     pb.tick(&label);

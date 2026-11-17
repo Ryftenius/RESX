@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 const SECTIONS: &[&str] = &[
-    "inspect", "code", "evidence", "recovery", "compare", "options",
+    "inspect", "code", "evidence", "recovery", "compare", "settings", "options",
 ];
 
 const TOPIC_ALIASES: &[(&str, &str)] = &[
@@ -250,12 +250,13 @@ pub fn product_banner() -> String {
 }
 
 pub fn is_help_request(raw_args: &[String]) -> bool {
-    (raw_args.len() >= 2
-        && (raw_args[1].eq_ignore_ascii_case("help")
-            || (raw_args.len() == 2
-                && SECTIONS
-                    .iter()
-                    .any(|name| raw_args[1].eq_ignore_ascii_case(name)))))
+    (raw_args.len() == 1)
+        || (raw_args.len() >= 2
+            && (raw_args[1].eq_ignore_ascii_case("help")
+                || (raw_args.len() == 2
+                    && SECTIONS
+                        .iter()
+                        .any(|name| raw_args[1].eq_ignore_ascii_case(name)))))
         || raw_args.iter().any(|arg| arg == "--help" || arg == "-h")
 }
 
@@ -285,7 +286,11 @@ pub fn is_version_request(raw_args: &[String]) -> bool {
 }
 
 pub fn print_usage() {
-    println!(
+    println!("{}", usage_text());
+}
+
+fn usage_text() -> String {
+    format!(
         r#"{}
 
 Usage: resx <command> [arguments] [options]
@@ -293,9 +298,12 @@ Usage: resx <command> [arguments] [options]
 SECTION     PURPOSE          COMMANDS
   inspect   PE and symbols   peinfo sections eat iat syms types pechk
   code      Code and flow    dump calls xrefs cfg reconstruct-cfg callers
+                            intelli behavior api
   evidence  Static evidence  contracts driver ioctl ipc network crypto strings
+                            entropy yara find
   recovery  Decode/edit      payload patch
   compare   Compare/find     diff index hunt scan locate locate-sym
+  settings  Preferences      config priority update
   options   Shared flags     output, symbols, verbosity and saved preferences
 
 EXAMPLES
@@ -312,7 +320,27 @@ DETAILS
   resx help options     Shared options and saved preferences
   resx help all         Every command and option"#,
         product_banner()
-    );
+    )
+}
+
+pub fn help_topic_suggestion(topic: &str) -> Option<String> {
+    let topic = topic.to_ascii_lowercase();
+    let mut candidates: Vec<String> = grammar()
+        .commands
+        .keys()
+        .filter(|name| name.as_str() != "implicit")
+        .cloned()
+        .chain(SECTIONS.iter().map(|name| (*name).to_owned()))
+        .chain(std::iter::once("all".to_owned()))
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .map(|candidate| (edit_distance(&topic, &candidate), candidate))
+        .filter(|(distance, candidate)| *distance <= 1 + candidate.len() / 6)
+        .min()
+        .map(|(_, candidate)| candidate)
 }
 
 fn topic_command(topic: &str) -> Option<&'static str> {
@@ -475,6 +503,19 @@ Examples:
   resx hunt .\unknown.dll --db .\samples.resxdb
   resx scan .\drivers --jsonl --max-files 100"
         }
+        "settings" => {
+            r"SETTINGS | Saved preferences and maintenance
+  config                      Show or change saved preferences
+  priority                    Open the priority search configuration
+  update                      Update a source checkout
+
+Examples:
+  resx config
+  resx config --command-style slash
+  resx priority
+
+Use `resx help config` for the available preference options."
+        }
         "options" => {
             r"OPTIONS | Output options shared by every command, and option groups
 Output (every command, before or after it):
@@ -508,6 +549,11 @@ Function macros:
   rentry                      RESX startup/main candidate, falling back to entry
   resx config --entry-macro ep --rentry-macro realep
 
+Saved limits:
+  resx config --strings-limit 4096 --strings-scan-mb 64
+  resx config --max-insns 1500 --max-total 1000
+  resx config --reset-limits
+
 Examples:
   resx contracts .\sample.dll --json -v --out contracts.json
   resx peinfo .\driver.sys --json -q"
@@ -520,8 +566,11 @@ Examples:
 mod tests {
     use super::examples::command_help;
     use super::{
-        all_help, help_topic, is_help_request, normalize_cli_syntax, prepare_args, section_help,
+        all_help, help_topic, help_topic_suggestion, is_help_request, normalize_cli_syntax,
+        prepare_args, section_help, usage_text,
     };
+    use crate::cli::args::Cli;
+    use clap::CommandFactory;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -605,6 +654,41 @@ mod tests {
         let values = args(&["resx", "code"]);
         assert!(is_help_request(&values));
         assert_eq!(help_topic(&values), Some("code"));
+    }
+
+    #[test]
+    fn landing_page_lists_every_visible_command_and_bare_resx_opens_it() {
+        assert!(is_help_request(&args(&["resx"])));
+        let overview = usage_text();
+        let commands = super::on_parser_stack(|| {
+            Cli::command()
+                .get_subcommands()
+                .filter(|command| !command.is_hide_set())
+                .map(|command| command.get_name().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+        for command in commands {
+            assert!(
+                overview.split_whitespace().any(|word| word == command),
+                "missing {command}"
+            );
+            assert!(
+                command_help(&command).is_some(),
+                "missing help for {command}"
+            );
+        }
+        assert!(section_help("settings").unwrap().contains("resx config"));
+    }
+
+    #[test]
+    fn unknown_help_topics_get_a_specific_suggestion() {
+        assert_eq!(
+            help_topic_suggestion("setings").as_deref(),
+            Some("settings")
+        );
+        assert_eq!(help_topic_suggestion("dumpp").as_deref(), Some("dump"));
+        assert_eq!(help_topic_suggestion("completely-unrelated"), None);
     }
 
     #[test]

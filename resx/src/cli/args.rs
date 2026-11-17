@@ -27,8 +27,16 @@ fn parse_strings_limit(value: &str) -> Result<usize, String> {
     value
         .parse::<usize>()
         .ok()
-        .filter(|value| (1..=8192).contains(value))
-        .ok_or_else(|| "strings limit must be between 1 and 8192".to_owned())
+        .filter(|value| (1..=32768).contains(value))
+        .ok_or_else(|| "strings limit must be between 1 and 32768".to_owned())
+}
+
+fn parse_strings_scan_mb(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=128).contains(value))
+        .ok_or_else(|| "strings scan size must be between 1 and 128 MiB".to_owned())
 }
 
 const FILTER_TERMS: &str = "winapi, iat, internal, crt, syscall, or a DLL name";
@@ -370,10 +378,9 @@ pub struct AnalysisArgs {
         long = "max-total",
         value_name = "N|unlimited",
         alias = "cfg-budget",
-        default_value = "500",
         value_parser = parse_budget
     )]
-    pub max_total: usize,
+    pub max_total: Option<usize>,
 
     /// Aggressive tracing with register slices and suspicion annotations
     #[arg(long)]
@@ -954,15 +961,18 @@ pub struct StringsArgs {
     )]
     pub min_len: usize,
 
-    /// Maximum strings returned, 1-8192
+    /// Maximum strings returned, 1-32768 [default: 2048 or saved preference]
     #[arg(
         long = "limit",
         alias = "strings-limit",
         value_name = "N",
-        default_value_t = 200,
         value_parser = parse_strings_limit
     )]
-    pub limit: usize,
+    pub limit: Option<usize>,
+
+    /// Image bytes to scan, 1-128 MiB [default: 32 or saved preference]
+    #[arg(long = "scan-mb", value_name = "N", value_parser = parse_strings_scan_mb)]
+    pub scan_mb: Option<usize>,
 
     /// Encodings to extract
     #[arg(
@@ -1346,6 +1356,26 @@ pub struct ConfigArgs {
     /// Windows SDK include directory for API signatures, or `off`
     #[arg(long = "headers", value_name = "DIR|off")]
     pub headers: Option<String>,
+
+    /// Saved instruction budget per function (0 or unlimited removes the cap)
+    #[arg(long = "max-insns", value_name = "N|unlimited", value_parser = parse_budget)]
+    pub max_insns: Option<usize>,
+
+    /// Saved traversal budget for recursive views
+    #[arg(long = "max-total", value_name = "N|unlimited", value_parser = parse_budget)]
+    pub max_total: Option<usize>,
+
+    /// Saved maximum number of strings returned, 1-32768
+    #[arg(long = "strings-limit", value_name = "N", value_parser = parse_strings_limit)]
+    pub strings_limit: Option<usize>,
+
+    /// Saved image scan size for strings, 1-128 MiB
+    #[arg(long = "strings-scan-mb", value_name = "N", value_parser = parse_strings_scan_mb)]
+    pub strings_scan_mb: Option<usize>,
+
+    /// Restore the default analysis limits
+    #[arg(long = "reset-limits", conflicts_with_all = ["max_insns", "max_total", "strings_limit", "strings_scan_mb"])]
+    pub reset_limits: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1415,6 +1445,29 @@ mod tests {
         assert!(parse(&["peinfo", "a.dll", "--calls-only", "winapi"]).is_err());
         assert!(parse(&["strings", "a.dll", "--max-insns", "5"]).is_err());
         assert!(parse(&["dump", "a.dll", "f", "--entropy-window", "5"]).is_err());
+    }
+
+    #[test]
+    fn saved_limit_options_are_bounded_and_reset_is_exclusive() {
+        let (_, options) = parse(&[
+            "config",
+            "--max-insns",
+            "1500",
+            "--max-total",
+            "1000",
+            "--strings-limit",
+            "32768",
+            "--strings-scan-mb",
+            "128",
+        ])
+        .unwrap();
+        assert_eq!(options.saved_max_insns, Some(1500));
+        assert_eq!(options.saved_max_total, Some(1000));
+        assert_eq!(options.saved_strings_limit, Some(32768));
+        assert_eq!(options.saved_strings_scan_mb, Some(128));
+        assert!(parse(&["config", "--strings-limit", "32769"]).is_err());
+        assert!(parse(&["config", "--strings-scan-mb", "129"]).is_err());
+        assert!(parse(&["config", "--reset-limits", "--strings-limit", "100"]).is_err());
     }
 
     #[test]

@@ -22,7 +22,9 @@ fn main() {
 
     if is_help_request(&raw_args) {
         if let Some(topic) = help_topic(&raw_args) {
-            print_examples(topic);
+            if !print_examples(topic) {
+                std::process::exit(2);
+            }
         } else {
             print_usage();
         }
@@ -37,7 +39,9 @@ fn main() {
         .unwrap_or_else(|error| error.exit())
         .lower();
     if cli.example {
-        print_examples(command.name());
+        if !print_examples(command.name()) {
+            std::process::exit(2);
+        }
         return;
     }
 

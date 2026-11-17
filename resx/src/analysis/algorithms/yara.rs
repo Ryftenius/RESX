@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -31,8 +32,9 @@ pub fn scan_file(target: &str, rule_files: &[String]) -> Result<Vec<YaraMatch>, 
     if !target.is_file() {
         return Err("YARA target must be one regular file".into());
     }
-    let target_bytes = std::fs::read(&target).map_err(|e| e.to_string())?;
-    let pe = crate::formats::pe::parse_pe(&target_bytes).ok();
+    // PE offset mapping is optional. YARA can scan larger files without RESX
+    // allocating the entire target, and a growing file must not defeat the cap.
+    let pe = pe_for_match_offsets(&target);
 
     let yara = find_yara_binary()
         .ok_or_else(|| "YARA executable not found (looked for yara64.exe/yara.exe)".to_owned())?;
@@ -133,32 +135,59 @@ pub fn scan_file(target: &str, rule_files: &[String]) -> Result<Vec<YaraMatch>, 
     Ok(out)
 }
 
+const MAX_YARA_PE_MAP_BYTES: u64 = 32 * 1024 * 1024;
+
+fn pe_for_match_offsets(target: &Path) -> Option<crate::formats::pe::PeFile> {
+    let file = std::fs::File::open(target).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_YARA_PE_MAP_BYTES {
+        return None;
+    }
+    let mut raw = Vec::new();
+    file.take(MAX_YARA_PE_MAP_BYTES + 1)
+        .read_to_end(&mut raw)
+        .ok()?;
+    if raw.len() as u64 > MAX_YARA_PE_MAP_BYTES {
+        return None;
+    }
+    crate::formats::pe::parse_pe(&raw).ok()
+}
+
 fn expand_rule_inputs(inputs: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     for input in inputs {
         let path = std::fs::canonicalize(input).map_err(|e| format!("YARA input {input}: {e}"))?;
         if path.is_dir() {
-            let mut entries = std::fs::read_dir(&path)
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            entries.sort_by_key(|e| e.path());
-            for entry in entries {
-                let p = entry.path();
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+                let p = entry.map_err(|e| e.to_string())?.path();
                 if p.is_file()
                     && p.extension()
                         .and_then(|v| v.to_str())
                         .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "yar" | "yara"))
                 {
-                    out.push(p);
+                    entries.push(p);
+                    if entries.len() + out.len() > 64 {
+                        return Err("At most 64 expanded YARA rule files are supported".into());
+                    }
                 }
             }
+            entries.sort();
+            out.extend(entries);
         } else if path
             .extension()
             .and_then(|v| v.to_str())
             .is_some_and(|v| v.eq_ignore_ascii_case("json"))
         {
-            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+            let metadata = file.metadata().map_err(|e| e.to_string())?;
+            if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+                return Err("YARA saved configuration exceeds 1 MiB".into());
+            }
+            let mut bytes = Vec::new();
+            file.take(1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
             if bytes.len() > 1024 * 1024 {
                 return Err("YARA saved configuration exceeds 1 MiB".into());
             }
