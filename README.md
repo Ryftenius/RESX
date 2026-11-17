@@ -7,12 +7,9 @@
   <img src="https://img.shields.io/github/actions/workflow/status/RYFTENIUS/RESX/ci.yml?style=for-the-badge&label=CI" />
 </p>
 
-**RESX** is a specialized Windows SRE and Binary Analysis tool designed to provide a more modern approach to
-reverse-engineer's & malware analyst's workflows. RESX is specially designed to provide in-depth information about the
-binary you are analyzing, whether that is via triaging the process's capabilities, identifiying a packer, following
-API calls through a large function tree, or even reverse-engineering a kernel driver, RESX provides an extended suite
-of information that is aware of what API's do and which can be for what (eg; malware), driver-constructs,
-hypervisor-capabilities, and some shortcomings of mainstream disassembly tools.
+**RESX** is a Windows-focused binary analysis and reverse-engineering toolkit written in Rust, built around problems I've repeatedly run into while reversing Windows binaries. It's designed to help with malware triage, recovering hidden API calls, reconstructing control flow, analyzing kernel drivers, and tracing Windows APIs through syscalls into the kernel. It also understands Windows-specific constructs, including driver interfaces, hypervisor instructions, and potential security telemetry paths.
+
+RESX isn't intended to replace IDA Pro or Ghidra. It's a specialized toolkit that complements existing reverse-engineering workflows, with an emphasis on recovering information that would otherwise take considerable manual analysis.
 
 ## Showcase & Examples
 
