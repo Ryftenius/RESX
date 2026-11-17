@@ -392,6 +392,7 @@ impl ImageArgs {
 impl DumpArgs {
     fn apply(self, o: &mut Options) {
         image(o, self.image);
+        o.overlap_seams = self.overlap_seams;
         self.target.apply(o);
         self.report.apply(o);
         self.calls.apply(o);
@@ -439,6 +440,7 @@ impl ReconstructArgs {
 impl CallersArgs {
     fn apply(self, o: &mut Options) {
         image(o, self.image);
+        o.overlap_seams = self.overlap_seams;
         o.function = Some(self.function);
         o.follow_format = self.format;
         o.show_site = self.show_site;

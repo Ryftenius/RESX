@@ -17,7 +17,7 @@ use crate::formats::pe::{
 };
 
 /// Bump whenever indexed call resolution changes, including the WDF table.
-const REVERSE_CALL_INDEX_VERSION: u32 = 5;
+const REVERSE_CALL_INDEX_VERSION: u32 = 7;
 const MAX_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_INSTRUCTION_BOUNDARIES: usize = 4_000_000;
 const MAX_WDF_INSTRUCTIONS: usize = 250_000;
@@ -79,6 +79,7 @@ pub struct FollowScanConfig {
     pub quiet: bool,
     pub reload: bool,
     pub hostile: bool,
+    pub overlap_seams: bool,
 }
 
 impl FollowScanConfig {
@@ -111,6 +112,7 @@ impl FollowScanConfig {
             quiet: cfg.quiet,
             reload: cfg.reload,
             hostile: cfg.hostile,
+            overlap_seams: cfg.overlap_seams,
         }
     }
 }
@@ -154,6 +156,8 @@ pub enum WrapperTarget {
 pub struct ReverseCallIndex {
     #[serde(default)]
     pub index_version: u32,
+    #[serde(default)]
+    pub overlap_seams: bool,
     pub source_path: String,
     pub file_len: u64,
     pub modified_secs: u64,
@@ -316,6 +320,7 @@ fn build_reverse_index(
     data: &ScanImageData,
     meta: &SourceMeta,
     hostile: bool,
+    overlap_seams: bool,
     budget: &IndexBudget,
 ) -> Result<ReverseCallIndex, String> {
     let mut direct: std::collections::HashMap<u32, std::collections::HashMap<u32, Caller>> =
@@ -347,16 +352,43 @@ fn build_reverse_index(
             let site_rva = s.virtual_address + i as u32;
             let b0 = sec[i];
             let b1 = sec.get(i + 1).copied().unwrap_or(0);
-            if (b0 == 0xFF && (b1 == 0x15 || b1 == 0x25)) && i + 6 <= sec.len() {
+            let iat_call = if b0 == 0xFF && (b1 == 0x15 || b1 == 0x25) && i + 6 <= sec.len() {
+                Some((i, b1, 6usize))
+            } else if data.pe.arch == 64
+                && (0x40..=0x4f).contains(&b0)
+                && b1 == 0xFF
+                && i + 7 <= sec.len()
+                && matches!(sec[i + 2], 0x15 | 0x25)
+            {
+                let mut decoder = iced_x86::Decoder::with_ip(
+                    64,
+                    &sec[i..i + 7],
+                    sec_va_base + i as u64,
+                    iced_x86::DecoderOptions::NONE,
+                );
+                let instr = decoder.decode();
+                (instr.len() == 7
+                    && instr.is_ip_rel_memory_operand()
+                    && matches!(
+                        instr.mnemonic(),
+                        iced_x86::Mnemonic::Call | iced_x86::Mnemonic::Jmp
+                    ))
+                .then_some((i + 1, sec[i + 2], 7usize))
+            } else {
+                None
+            };
+            if let Some((opcode_off, modrm, instr_len)) = iat_call {
                 if !is_decoded_instruction_boundary(data, site_rva) {
                     continue;
                 }
                 let slot_va = if data.pe.arch == 64 {
-                    let rel32 = i32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap());
+                    let rel32 =
+                        i32::from_le_bytes(sec[opcode_off + 2..opcode_off + 6].try_into().unwrap());
                     let instr_va = sec_va_base + i as u64;
-                    (instr_va as i64 + 6 + rel32 as i64) as u64
+                    (instr_va as i64 + instr_len as i64 + rel32 as i64) as u64
                 } else {
-                    u32::from_le_bytes(sec[i + 2..i + 6].try_into().unwrap()) as u64
+                    u32::from_le_bytes(sec[opcode_off + 2..opcode_off + 6].try_into().unwrap())
+                        as u64
                 };
                 if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
                     push_indexed_site(
@@ -365,7 +397,7 @@ fn build_reverse_index(
                             .or_default(),
                         CallSite {
                             rva: site_rva,
-                            pattern: if b1 == 0x15 {
+                            pattern: if modrm == 0x15 {
                                 "CALL [IAT]"
                             } else {
                                 "JMP [IAT]"
@@ -444,6 +476,48 @@ fn build_reverse_index(
         }
     }
 
+    if overlap_seams {
+        let seams = crate::analysis::overlap_scan::scan_seam_calls(&data.raw, &data.pe);
+        if seams.truncated {
+            return Err(
+                "overlap seam scan exceeded its instruction or seam budget (analysis incomplete)"
+                    .into(),
+            );
+        }
+        for call in seams.calls {
+            let pattern = if call.is_jump { "JMP" } else { "CALL" };
+            match call.target {
+                crate::analysis::overlap_scan::SeamTarget::Direct(target_rva) => {
+                    push_indexed_site(
+                        direct.entry(target_rva).or_default(),
+                        CallSite {
+                            rva: call.site_rva,
+                            pattern: format!("{pattern} [overlap seam]"),
+                        },
+                        data,
+                        budget,
+                    )?;
+                }
+                crate::analysis::overlap_scan::SeamTarget::ImportSlot(slot_rva) => {
+                    let slot_va = data.pe.image_base + slot_rva as u64;
+                    if let Some((dll_base, func_name)) = import_slots.get(&slot_va) {
+                        push_indexed_site(
+                            imports
+                                .entry(import_lookup_key(dll_base, func_name))
+                                .or_default(),
+                            CallSite {
+                                rva: call.site_rva,
+                                pattern: format!("{pattern} [IAT overlap seam]"),
+                            },
+                            data,
+                            budget,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
     let direct = direct
         .into_iter()
         .map(|(rva, grouped)| {
@@ -512,6 +586,7 @@ fn build_reverse_index(
 
     Ok(ReverseCallIndex {
         index_version: REVERSE_CALL_INDEX_VERSION,
+        overlap_seams,
         source_path: meta.path.clone(),
         file_len: meta.file_len,
         modified_secs: meta.modified_secs,
@@ -933,7 +1008,7 @@ fn load_or_build_index(
         return Ok(None);
     };
     if !cfg.reload {
-        if let Some(cached) = load_index_from_cache(path, &meta) {
+        if let Some(cached) = load_index_from_cache(path, &meta, cfg.overlap_seams) {
             budget.reserve(index_site_count(&cached))?;
             return Ok(Some(cached));
         }
@@ -944,7 +1019,7 @@ fn load_or_build_index(
     else {
         return Ok(None);
     };
-    let index = build_reverse_index(&data, &meta, cfg.hostile, budget)
+    let index = build_reverse_index(&data, &meta, cfg.hostile, cfg.overlap_seams, budget)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     if !cfg.reload {
         let _ = write_index_to_cache(path, &index);
@@ -963,8 +1038,12 @@ fn index_site_count(index: &ReverseCallIndex) -> usize {
         })
 }
 
-fn load_index_from_cache(path: &Path, meta: &SourceMeta) -> Option<ReverseCallIndex> {
-    let cache_path = cache_path_for_image(path);
+fn load_index_from_cache(
+    path: &Path,
+    meta: &SourceMeta,
+    overlap_seams: bool,
+) -> Option<ReverseCallIndex> {
+    let cache_path = cache_path_for_image(path, overlap_seams);
     // Cache contents are local but may be stale or malformed. Bound the read
     // before deserializing rather than allocating from its declared size.
     let mut bytes = Vec::new();
@@ -979,6 +1058,7 @@ fn load_index_from_cache(path: &Path, meta: &SourceMeta) -> Option<ReverseCallIn
     }
     let cached: ReverseCallIndex = serde_json::from_slice(&bytes).ok()?;
     if cached.index_version == REVERSE_CALL_INDEX_VERSION
+        && cached.overlap_seams == overlap_seams
         && cached.source_path.eq_ignore_ascii_case(&meta.path)
         && cached.file_len == meta.file_len
         && cached.modified_secs == meta.modified_secs
@@ -991,7 +1071,7 @@ fn load_index_from_cache(path: &Path, meta: &SourceMeta) -> Option<ReverseCallIn
 }
 
 fn write_index_to_cache(path: &Path, index: &ReverseCallIndex) -> Result<(), String> {
-    let cache_path = cache_path_for_image(path);
+    let cache_path = cache_path_for_image(path, index.overlap_seams);
     if let Some(parent) = cache_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -1002,7 +1082,7 @@ fn write_index_to_cache(path: &Path, index: &ReverseCallIndex) -> Result<(), Str
     std::fs::write(cache_path, bytes).map_err(|e| e.to_string())
 }
 
-fn cache_path_for_image(path: &Path) -> PathBuf {
+fn cache_path_for_image(path: &Path, overlap_seams: bool) -> PathBuf {
     let canonical = path
         .canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
@@ -1011,7 +1091,8 @@ fn cache_path_for_image(path: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     canonical.hash(&mut hasher);
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-    follow_cache_root().join(format!("{}.{:016x}.json", stem, hasher.finish()))
+    let mode = if overlap_seams { ".overlap" } else { "" };
+    follow_cache_root().join(format!("{}.{:016x}{mode}.json", stem, hasher.finish()))
 }
 
 fn follow_cache_root() -> PathBuf {

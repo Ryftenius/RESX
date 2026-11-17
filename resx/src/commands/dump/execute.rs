@@ -293,6 +293,7 @@ fn run_with_chain(
             Some(&symbol_index),
             target_rva,
             &resolved_name,
+            cfg.overlap_seams,
         );
         let exact_wdf = format!("WDF!{resolved_name}");
         xrefs.retain(|line| line.contains(&exact_wdf));
@@ -342,6 +343,7 @@ fn run_with_chain(
                 Some(&symbol_index),
                 target_rva,
                 &resolved_name,
+                cfg.overlap_seams,
             )
         } else {
             Vec::new()
@@ -385,6 +387,7 @@ fn run_with_chain(
                 Some(&symbol_index),
                 target_rva,
                 &resolved_name,
+                cfg.overlap_seams,
             );
             xrefs.sort();
             xrefs.dedup();
@@ -677,6 +680,7 @@ fn run_with_chain(
             Some(&symbol_index),
             target_rva,
             &resolved_name,
+            cfg.overlap_seams,
         );
         x.extend(startup_xrefs_for_target(
             startup_routines,

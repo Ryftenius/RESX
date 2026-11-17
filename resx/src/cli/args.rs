@@ -780,6 +780,9 @@ pub struct TypesArgs {
 pub struct DumpArgs {
     /// Image path, or a name resolved through the lookup order
     pub image: String,
+    /// Also scan branch-targeted overlapping decode streams for incoming calls (experimental)
+    #[arg(long = "overlap-seams")]
+    pub overlap_seams: bool,
     #[command(flatten)]
     pub target: TargetArgs,
     #[command(flatten)]
@@ -907,6 +910,9 @@ pub struct CallersArgs {
     pub image: String,
     /// Function whose callers are traced
     pub function: String,
+    /// Also index calls in branch-targeted overlapping decode streams (experimental)
+    #[arg(long = "overlap-seams")]
+    pub overlap_seams: bool,
 
     /// Maximum call sites indexed across scanned images, 1-250000
     #[arg(long = "max-index-sites", value_name = "N", value_parser = parse_index_sites)]

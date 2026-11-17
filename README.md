@@ -48,6 +48,13 @@ API Call Map for OverlapProbe  [1 call site(s)]:
 
 The asterisk marks the carrier instruction and the alternate `call`. The two paths are coloured separately in a terminal and remain distinct without colour or instruction bytes. A longer listing and the reproduction steps are in [Example 2](#tested-example-2).
 
+To include that hidden call in image-wide references or reverse callers, opt in with `--overlap-seams`:
+
+```powershell
+resx xrefs .\resx\tests\data\overlap_probe.exe HiddenTarget --overlap-seams --no-pdb
+resx callers .\resx\tests\data\overlap_probe.exe HiddenTarget --scan-exe --no-system --overlap-seams --no-pdb
+```
+
 | | Tested example | What RESX shows |
 | --- | --- | --- |
 | **1** | [Encoded APIs & manual resolution](#tested-example-1) | Seven XOR-hidden APIs, the key, the PEB and export-table walk, and every indirect call site |
@@ -208,7 +215,7 @@ The stub at `0xF4DB` moves the service number into `eax`, shifts the arguments i
 
 The stub ends with a second trick. Where `syscall` (`0F 05`) belongs, the file stores `0F 04`, which is not a valid instruction, and the sample patches that byte at run time. Neither tool can decode an instruction that is not on disk: RESX reports the bytes as `(bad)`, and IDA leaves them as data. The `mov r10, rcx` immediately before it, with the service number in `eax`, is the standard x64 syscall setup, and it points straight at the patched opcode. RESX recovers the full static route from the outer function, through every seam, to that point. IDA's listing and decompiler output lose it at the first seam.
 
-Tested with RESX 2.2.1 and IDA Pro 9.0 (Hex-Rays 9.0.0.240807), both without symbols. Seam recovery is part of `dump`'s per-function multi-stream decoding; the image-wide `xrefs` and `callers` scans do not yet follow calls hidden inside a seam.
+Tested with RESX 2.2.1 and IDA Pro 9.0 (Hex-Rays 9.0.0.240807), both without symbols. Current `dump` output separates overlapping decode streams. Image-wide `xrefs` and `callers` can also report calls hidden inside branch-targeted seams with `--overlap-seams`. This bounded, experimental scan is opt-in because ambiguous instruction bytes can produce false positives; confirm consequential results against the control-flow path and raw bytes.
 
 </details>
 

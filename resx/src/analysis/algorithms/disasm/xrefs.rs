@@ -17,6 +17,7 @@ pub fn find_xrefs(
     symbols: Option<&SymbolIndex>,
     target_rva: u32,
     target_name: &str,
+    overlap_seams: bool,
 ) -> Vec<String> {
     let image = crate::analysis::image::ImageFacts::new(pe, raw);
     let mut results = Vec::new();
@@ -131,6 +132,41 @@ pub fn find_xrefs(
             if section_done {
                 break;
             }
+        }
+    }
+    if overlap_seams {
+        let seams = crate::analysis::overlap_scan::scan_seam_calls(raw, pe);
+        for call in seams.calls {
+            let matching = match call.target {
+                crate::analysis::overlap_scan::SeamTarget::Direct(rva)
+                | crate::analysis::overlap_scan::SeamTarget::ImportSlot(rva) => rva == target_rva,
+            };
+            if !matching {
+                continue;
+            }
+            if results.len() >= 4096 {
+                results.push("Analysis incomplete: cross-reference result budget reached".into());
+                break;
+            }
+            let owner = scan
+                .owner_index
+                .at_or_before(exports, call.site_rva)
+                .map(|e| e.name.clone())
+                .or_else(|| {
+                    symbols.and_then(|si| {
+                        si.lookup(pe.image_base + call.site_rva as u64)
+                            .map(|m| m.symbol.name.clone())
+                    })
+                })
+                .unwrap_or_else(|| format!("sub_{:08X}", call.site_rva));
+            let kind = if call.is_jump { "JMP" } else { "CALL" };
+            let line = format!("{kind} {owner} [site 0x{:08X}] -> {target_name} [target 0x{target_rva:08X}] [overlap seam]", call.site_rva);
+            if seen.insert(line.clone()) {
+                results.push(line);
+            }
+        }
+        if seams.truncated {
+            results.push("Analysis incomplete: overlap seam budget reached".into());
         }
     }
     if budget == 0 {

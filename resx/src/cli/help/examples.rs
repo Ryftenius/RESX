@@ -345,8 +345,11 @@ Examples:
   resx xrefs .\driver.sys WdfDeviceCreate
   resx xrefs kernel32.dll CreateFileW --json
   resx xrefs .\sample.dll --at 0x1200
+  resx xrefs .\sample.exe HiddenTarget --overlap-seams
 
-xrefs is dump with the references section on, and takes every dump option."
+xrefs is dump with the references section on, and takes every dump option.
+--overlap-seams adds a bounded scan of calls targeted by branches into the
+middle of instructions. It is experimental and may report false positives."
         }
         "cfg" => {
             r"CFG | Function control-flow graph
@@ -563,10 +566,12 @@ Examples:
   resx callers ntoskrnl.exe PsOpenProcess --include-dir C:\Windows\System32\drivers --scope-file *.sys
   resx callers user32.dll MessageBoxW --scan-exe --show-site --json
   resx callers ntoskrnl.exe MmMapIoSpace --include-dir C:\Windows\System32\drivers --scope-file *.sys --format list
+  resx callers .\sample.exe HiddenTarget --scan-exe --overlap-seams
 
 Reverse-traces call sites across the priority set plus optional include
 directories and images. --show-site prints call-site RVAs; --filter-dll narrows
-noisy graphs."
+noisy graphs. --overlap-seams also indexes branch-targeted calls inside
+overlapping decode streams; verify these experimental results against bytes."
         }
         "locate" | "locate-sym" => {
             r"LOCATE | Find exports and symbols

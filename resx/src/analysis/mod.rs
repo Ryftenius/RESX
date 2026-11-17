@@ -9,6 +9,7 @@ pub mod headers;
 pub mod image;
 pub mod inspection;
 pub mod options;
+pub mod overlap_scan;
 pub mod reconstruction;
 pub mod resolution;
 pub mod session;
