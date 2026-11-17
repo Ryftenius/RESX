@@ -4,6 +4,17 @@ All notable public changes to RESX are recorded here.
 
 ## Unreleased
 
+## 2.4.0 - 2026-11-17
+
+### CLI usability and limits
+
+- Listed every command on the landing page, made bare `resx` open that page, added a settings section, and made unknown help topics report an error with a nearby suggestion.
+- Raised the default string result limit from 200 to 2,048 after all 60 Blackbird x64 samples hit the old limit and none exceeded 1,197 matches at the full scan cap.
+- Added saved instruction, traversal, and string result limits through `resx config`, with per-command overrides and `--reset-limits`.
+- Filtered implausible UTF-16 candidates before they consume string and `intelli` scan budgets, expanded the bounded string scan for larger images, and made its size configurable. Individual long candidates now report truncation separately from whole-scan coverage.
+- Streamed the YARA target hash and bounded optional PE match-offset mapping to 32 MiB, so scanning a large file does not require RESX to load the entire target into memory.
+- Bounded YARA rule-list and directory expansion, and applied bounded reads and streaming hashes to locate and debug reports.
+
 ## 2.3.0 - 2026-11-16
 
 ### Feature additions

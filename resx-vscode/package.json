@@ -2,7 +2,7 @@
   "name": "resx-vscode",
   "displayName": "RESX Binary Viewer",
   "description": "Windows PE analysis in VS Code powered by RESX: disassembly, call maps, CFGs, behavior triage, API contracts, drivers and IOCTLs, strings, entropy, YARA, diff and corpus hunting for EXE, DLL, SYS and PE-style BIN files",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "publisher": "ryftenius",
   "license": "MIT",
   "repository": {
